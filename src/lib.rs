@@ -107,7 +107,7 @@ impl MiningJob {
             let mut end = start + range_per_core - U512::from(1);
 
             if thread_id == num_cores - 1 {
-                end = end + remainder;
+                end += remainder;
             }
 
             if end > self.nonce_end {
@@ -161,8 +161,7 @@ impl MiningJob {
             if let Some(result) = thread_result.result {
                 let is_better = self
                     .best_result
-                    .as_ref()
-                    .map_or(true, |current_best| result.distance < current_best.distance);
+                    .as_ref().is_none_or(|current_best| result.distance < current_best.distance);
 
                 if is_better {
                     log::debug!(target: "miner",
@@ -272,16 +271,14 @@ impl MiningState {
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
-                    if job.status == JobStatus::Running {
-                        if job.update_from_results() {
-                            log::debug!(target: "miner",
-                                "Job {} finished with status {:?}, hashes: {}, time: {:?}",
-                                job_id,
-                                job.status,
-                                job.total_hash_count,
-                                job.start_time.elapsed()
-                            );
-                        }
+                    if job.status == JobStatus::Running && job.update_from_results() {
+                        log::debug!(target: "miner",
+                            "Job {} finished with status {:?}, hashes: {}, time: {:?}",
+                            job_id,
+                            job.status,
+                            job.total_hash_count,
+                            job.start_time.elapsed()
+                        );
                     }
 
                     // Retain jobs that are running or recently finished (e.g., within 5 minutes)
@@ -355,10 +352,8 @@ fn mine_range(
 
         current_nonce += U512::from(1);
 
-        if hash_count > 0 && hash_count % 4096 == 0 {
-            if cancel_flag.load(Ordering::Relaxed) {
-                break;
-            }
+        if hash_count > 0 && hash_count % 4096 == 0 && cancel_flag.load(Ordering::Relaxed) {
+            break;
         }
     }
 
