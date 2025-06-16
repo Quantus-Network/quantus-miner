@@ -27,6 +27,10 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          components: rustfmt, clippy
+      -
+        name: install taplo
+        run: cargo install taplo-cli --locked
       - 
         name: taplo
         run: taplo format --check --config taplo.toml
