@@ -161,7 +161,8 @@ impl MiningJob {
             if let Some(result) = thread_result.result {
                 let is_better = self
                     .best_result
-                    .as_ref().is_none_or(|current_best| result.distance < current_best.distance);
+                    .as_ref()
+                    .is_none_or(|current_best| result.distance < current_best.distance);
 
                 if is_better {
                     log::debug!(target: "miner",
