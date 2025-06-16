@@ -14,6 +14,10 @@ on:
           - minor
           - major
 
+permissions:
+  contents: write
+  packages: write
+
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: nightly-2024-12-14
