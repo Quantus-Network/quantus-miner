@@ -1,5 +1,3 @@
-// external-miner/src/lib.rs
-
 use codec::{Decode, Encode};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use primitive_types::U512;

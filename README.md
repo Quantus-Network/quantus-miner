@@ -5,10 +5,10 @@ managing mining jobs.
 
 ## Building
 
-To build the external miner service, navigate to the `external-miner` directory within the repository and use Cargo:
+To build the external miner service, navigate to the `miner` directory within the repository and use Cargo:
 
 ```bash
-cd external-miner
+cd quantus-miner
 cargo build --release
 ```
 
@@ -27,15 +27,15 @@ Example:
 
 ```bash
 # Run on the default port 9833 with all available cores
-../target/release/external-miner
+../target/release/quantus-miner
 
 # Run on a custom port with 4 cores
-../target/release/external-miner --port 8000 --num-cores 4
+../target/release/quantus-miner --port 8000 --num-cores 4
 
 # Equivalent using environment variables
 export MINER_PORT=8000
 export MINER_CORES=4
-../target/release/external-miner
+../target/release/quantus-miner
 ```
 
 ## Running
@@ -44,13 +44,13 @@ After building the service, you can run it directly from the command line:
 
 ```bash
 # Run with default settings
-RUST_LOG=info ../target/release/external-miner
+RUST_LOG=info ../target/release/quantus-miner
 
 # Run with a specific port and 2 cores
-RUST_LOG=info ../target/release/external-miner --port 12345 --num-cores 2
+RUST_LOG=info ../target/release/quantus-miner --port 12345 --num-cores 2
 
 # Run in debug mode
-RUST_LOG=info,miner=debug ../target/release/external-miner --num-cores 4
+RUST_LOG=info,miner=debug ../target/release/quantus-miner --num-cores 4
 
 ```
 
