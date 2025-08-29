@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "quantus-miner"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossbeam-channel",
