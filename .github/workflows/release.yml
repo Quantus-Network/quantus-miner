@@ -20,7 +20,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: nightly-2024-12-14
+  RUSTUP_TOOLCHAIN: nightly-2025-06-06
 
 jobs:
   version:
