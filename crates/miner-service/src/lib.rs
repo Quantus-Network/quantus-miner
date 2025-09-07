@@ -479,17 +479,20 @@ fn mine_range_with_engine(
     };
 
     match status {
-        engine_cpu::EngineStatus::Found(EngineCandidate {
-            nonce,
-            work,
-            distance,
-        }) => {
+        engine_cpu::EngineStatus::Found {
+            candidate: EngineCandidate {
+                nonce,
+                work,
+                distance,
+            },
+            hash_count,
+        } => {
             final_result.result = Some(MiningJobResult {
                 nonce,
                 work,
                 distance,
             });
-            final_result.hash_count = 0; // engine may not report per-iteration counts
+            final_result.hash_count = hash_count;
         }
         engine_cpu::EngineStatus::Exhausted { hash_count } => {
             final_result.hash_count = hash_count;

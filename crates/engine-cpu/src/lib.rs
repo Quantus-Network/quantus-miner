@@ -43,10 +43,19 @@ pub struct Candidate {
 /// `Running` is included for potential future async/streaming engines.
 #[derive(Clone, Debug)]
 pub enum EngineStatus {
-    Running { hash_count: u64 },
-    Found(Candidate),
-    Exhausted { hash_count: u64 },
-    Cancelled { hash_count: u64 },
+    Running {
+        hash_count: u64,
+    },
+    Found {
+        candidate: Candidate,
+        hash_count: u64,
+    },
+    Exhausted {
+        hash_count: u64,
+    },
+    Cancelled {
+        hash_count: u64,
+    },
 }
 
 /// Abstract mining engine interface.
@@ -120,7 +129,10 @@ impl MinerEngine for BaselineCpuEngine {
                     work,
                     distance,
                 };
-                return EngineStatus::Found(candidate);
+                return EngineStatus::Found {
+                    candidate,
+                    hash_count,
+                };
             }
 
             // Advance or finish
@@ -182,11 +194,14 @@ impl MinerEngine for FastCpuEngine {
 
             if is_valid_distance(ctx, distance) {
                 let work = current.to_big_endian();
-                return EngineStatus::Found(Candidate {
-                    nonce: current,
-                    work,
-                    distance,
-                });
+                return EngineStatus::Found {
+                    candidate: Candidate {
+                        nonce: current,
+                        work,
+                        distance,
+                    },
+                    hash_count,
+                };
             }
 
             if current == range.end {

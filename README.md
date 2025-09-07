@@ -1,8 +1,8 @@
 # External Miner Service for Quantus Network
 
-Note: This repository is now a Cargo workspace. Build and run the CLI with:
+Note: This repository is now a Cargo workspace. Build and run the CLI with (the --num-cores flag remains available as an alias for --cores):
 - cargo build -p miner-cli --release
-- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--num-cores N]
+- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--cores N]
 
 This crate provides an external mining service that can be used with a Quantus Network node. It exposes an HTTP API for
 managing mining jobs.
@@ -25,7 +25,7 @@ The service can be configured using command-line arguments or environment variab
 | Argument          | Environment Variable | Description                                | Default       |
 |-------------------|----------------------|--------------------------------------------|---------------|
 | `--port <PORT>`   | `MINER_PORT`         | The port for the HTTP server to listen on. | `9833`        |
-| `--num-cores <N>` | `MINER_CORES`        | The number of CPU cores to use for mining. | All available |
+| `--cores <N>` (alias: `--num-cores`) | `MINER_CORES`        | The number of CPU cores to use for mining. | All available |
 
 Example:
 
@@ -34,7 +34,7 @@ Example:
 ../target/release/quantus-miner
 
 # Run on a custom port with 4 cores
-../target/release/quantus-miner --port 8000 --num-cores 4
+../target/release/quantus-miner --port 8000 --cores 4
 
 # Equivalent using environment variables
 export MINER_PORT=8000
@@ -51,10 +51,10 @@ After building the service, you can run it directly from the command line:
 RUST_LOG=info ../target/release/quantus-miner
 
 # Run with a specific port and 2 cores
-RUST_LOG=info ../target/release/quantus-miner --port 12345 --num-cores 2
+RUST_LOG=info ../target/release/quantus-miner --port 12345 --cores 2
 
 # Run in debug mode
-RUST_LOG=info,miner=debug ../target/release/quantus-miner --num-cores 4
+RUST_LOG=info,miner=debug ../target/release/quantus-miner --cores 4
 
 ```
 

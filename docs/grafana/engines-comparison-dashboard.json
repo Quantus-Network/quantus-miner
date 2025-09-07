@@ -1,0 +1,405 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Engine Hash Rate Ratio (left/right)",
+      "description": "Ratio of total per-job hash rate between two selected engines",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(miner_job_hash_rate{engine=~\"$engine_left\"}) / sum(miner_job_hash_rate{engine=~\"$engine_right\"})"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 2 },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Solutions Found (24h) by Engine (left/right)",
+      "description": "Completed jobs increase in the last 24h for left and right engines",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "Left",
+          "expr": "sum(increase(miner_jobs_by_engine_total{engine=~\"$engine_left\", status=\"completed\"}[24h]))"
+        },
+        {
+          "refId": "Right",
+          "expr": "sum(increase(miner_jobs_by_engine_total{engine=~\"$engine_right\", status=\"completed\"}[24h]))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Global Hash Rate (All Engines)",
+      "description": "Sum of reported job hash rates across all engines",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(miner_job_hash_rate)"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hash Rate by Engine",
+      "description": "sum(miner_job_hash_rate) grouped by engine",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 5 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (engine) (miner_job_hash_rate{engine=~\"$engine\"})",
+          "legendFormat": "{{engine}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Jobs by Engine and Status (Total)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (engine, status) (miner_jobs_by_engine_total{engine=~\"$engine\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0 },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-Engine Total Hashes Increase (over time)",
+      "description": "increase(miner_job_hashes_total[$__rate_interval]) grouped by engine",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{engine}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Average Per-Thread Hash Rate by Engine",
+      "description": "avg(miner_thread_hash_rate) grouped by engine (EMA-smoothed)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (engine) (miner_thread_hash_rate{engine=~\"$engine\"})",
+          "legendFormat": "{{engine}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Top 10 Jobs by Hash Rate (filter by engine)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, miner_job_hash_rate{engine=~\"$engine\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" },
+          "unit": "ops",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false },
+        "frameIndex": 0
+      }
+    },
+    {
+      "type": "table",
+      "title": "Per-Engine Total Hashes (5m increase)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[5m]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" },
+          "unit": "ops",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false },
+        "frameIndex": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-Job Hash Rate by Engine (focus comparisons)",
+      "description": "Use filters above to narrow by engine(s) and job(s)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "miner_job_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\"}",
+          "legendFormat": "{{engine}} | {{job_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Per-Thread Hash Rate (filter by engine and job)",
+      "description": "EMA-smoothed per-thread rates with labels for engine/job/thread",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "miner_thread_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\", thread_id=~\"$thread_id\"}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" },
+          "unit": "ops",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false },
+        "frameIndex": 0
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["quantus", "miner", "prometheus", "engines", "comparison"],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "DS_PROMETHEUS",
+        "hide": 0,
+        "query": "prometheus",
+        "current": {},
+        "options": []
+      },
+      {
+        "type": "query",
+        "name": "engine",
+        "label": "Engine(s)",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_job_hash_rate, engine)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_job_hash_rate, engine)",
+        "regex": "",
+        "current": {
+          "selected": false,
+          "text": ["cpu-baseline", "cpu-fast"],
+          "value": ["cpu-baseline", "cpu-fast"]
+        }
+      },
+      {
+        "type": "query",
+        "name": "engine_left",
+        "label": "Left Engine",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_job_hash_rate, engine)",
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_job_hash_rate, engine)",
+        "regex": "",
+        "current": {
+          "selected": true,
+          "text": "cpu-fast",
+          "value": "cpu-fast"
+        }
+      },
+      {
+        "type": "query",
+        "name": "engine_right",
+        "label": "Right Engine",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_job_hash_rate, engine)",
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_job_hash_rate, engine)",
+        "regex": "",
+        "current": {
+          "selected": true,
+          "text": "cpu-baseline",
+          "value": "cpu-baseline"
+        }
+      },
+      {
+        "type": "query",
+        "name": "job_id",
+        "label": "Job ID",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_job_hash_rate{engine=~\"$engine\"}, job_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_job_hash_rate{engine=~\"$engine\"}, job_id)",
+        "regex": "",
+        "current": {
+          "selected": false,
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "query",
+        "name": "thread_id",
+        "label": "Thread ID",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_thread_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\"}, thread_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_thread_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\"}, thread_id)",
+        "regex": "",
+        "current": {
+          "selected": false,
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Quantus Miner - Engines Comparison",
+  "version": 1,
+  "uid": null
+}

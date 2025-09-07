@@ -11,7 +11,7 @@ struct Args {
     port: u16,
 
     /// Number of CPU cores to use for mining (defaults to all logical CPUs)
-    #[arg(long, env = "MINER_CORES")]
+    #[arg(long = "cores", alias = "num-cores", env = "MINER_CORES")]
     num_cores: Option<usize>,
 
     /// Optional Prometheus metrics exporter port; if omitted, metrics are disabled
@@ -48,7 +48,11 @@ impl From<EngineCli> for EngineSelection {
 async fn main() {
     let args = Args::parse();
 
-    // Initialize logger early to capture startup messages
+    // Initialize logger early to capture startup messages.
+    // If RUST_LOG is not set, default to info level for our app.
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     env_logger::init();
 
     // Log effective configuration
