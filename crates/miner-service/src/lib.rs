@@ -216,6 +216,8 @@ impl Clone for MiningJob {
             start_time: self.start_time,
             total_hash_count: self.total_hash_count,
             best_result: self.best_result.clone(),
+            engine_name: self.engine_name,
+            job_id: self.job_id.clone(),
 
             cancel_flag: self.cancel_flag.clone(),
             // Do not clone crossbeam receiver or thread handles; they are runtime artifacts.
