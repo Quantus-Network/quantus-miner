@@ -1,5 +1,9 @@
 # External Miner Service for Quantus Network
 
+Note: This repository is now a Cargo workspace. Build and run the CLI with:
+- cargo build -p miner-cli --release
+- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--num-cores N]
+
 This crate provides an external mining service that can be used with a Quantus Network node. It exposes an HTTP API for
 managing mining jobs.
 

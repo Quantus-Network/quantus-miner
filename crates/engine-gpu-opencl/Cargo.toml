@@ -1,0 +1,25 @@
+[package]
+name = "engine-gpu-opencl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "OpenCL-based GPU mining engine for the Quantus External Miner (placeholder crate)"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Enable OpenCL integrations when implementing the engine.
+opencl = ["dep:ocl"]
+
+[dependencies]
+pow-core = { path = "../pow-core" }
+primitive-types = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# OpenCL ecosystem (optional for now; will be used when implementing GPU backend)
+ocl = { version = "0.19", optional = true }

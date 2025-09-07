@@ -1,11 +1,22 @@
-[package]
-name = "quantus-miner"
-version = "0.2.0"
+[workspace]
+members = [
+    "crates/miner-cli",
+    "crates/miner-service",
+    "crates/pow-core",
+    "crates/engine-cpu",
+    "crates/engine-gpu-cuda",
+    "crates/engine-gpu-opencl",
+    "crates/metrics",
+]
+default-members = ["crates/miner-cli"]
+resolver = "2"
+
+[workspace.package]
 edition = "2021"
 authors = ["Quantus Network"]
-description = "External miner service for Quantus Network"
+description = "Quantus External Miner Workspace"
 
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1.36", features = ["full"] }
 warp = "0.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -18,12 +29,26 @@ codec = { version = "3.6.12", default-features = false, package = "parity-scale-
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 rand = { version = "0.8.5", default-features = false }
-qpow-math = { git = "https://github.com/Quantus-Network/chain.git", package = "qpow-math", default-features = false }
+# Use local pow-core crate instead of the external qpow-math; keep API compatibility at the engine layer.
+# qpow-math intentionally omitted here.
 resonance-miner-api = { git = "https://github.com/Quantus-Network/chain.git", package = "resonance-miner-api" }
 clap = { version = "4.5", features = ["derive", "env"] }
 crossbeam-channel = "0.5"
 num_cpus = "1.16"
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+thiserror = "1"
+anyhow = "1"
 
-[dev-dependencies]
-tokio-test = "0.4"
-test-log = { version = "0.2", features = ["trace"] }
+# GPU backend dependencies are declared in individual engine crates (no optional deps in workspace)
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+incremental = false
+
+[profile.dev]
+opt-level = 1
