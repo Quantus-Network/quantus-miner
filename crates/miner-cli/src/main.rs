@@ -18,8 +18,8 @@ struct Args {
     #[arg(long, env = "MINER_METRICS_PORT")]
     metrics_port: Option<u16>,
 
-    /// Mining engine to use
-    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuBaseline)]
+    /// Mining engine to use (default: cpu-fast). Options: cpu-baseline, cpu-fast
+    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
 }
 
@@ -27,7 +27,8 @@ struct Args {
 enum EngineCli {
     /// Baseline CPU engine (reference implementation)
     CpuBaseline,
-    // CpuFast,   // planned: incremental + Montgomery
+    /// Optimized CPU engine (incremental precompute + step_mul)
+    CpuFast,
     // Cuda,      // planned: CUDA GPU engine
     // Opencl,    // planned: OpenCL GPU engine
 }
@@ -36,7 +37,7 @@ impl From<EngineCli> for EngineSelection {
     fn from(value: EngineCli) -> Self {
         match value {
             EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
-            // EngineCli::CpuFast => EngineSelection::CpuFast,
+            EngineCli::CpuFast => EngineSelection::CpuFast,
             // EngineCli::Cuda => EngineSelection::Cuda,
             // EngineCli::Opencl => EngineSelection::OpenCl,
         }

@@ -22,7 +22,7 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    opts, Encoder, Gauge, IntCounter, IntCounterVec, Registry, TextEncoder,
+    opts, Encoder, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry, TextEncoder,
 };
 
 #[cfg(feature = "http-exporter")]
@@ -85,6 +85,98 @@ static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Access the global Prometheus registry used by this crate.
+// Engine-aware, per-job, and per-thread labeled metrics
+
+static JOB_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_job_hashes_total",
+            "Total nonces tested per job and engine"
+        ),
+        &["engine", "job_id"],
+    )
+    .expect("create miner_job_hashes_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_job_hashes_total");
+    c
+});
+
+static JOB_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_job_hash_rate",
+            "Estimated hash rate (nonces per second) per job and engine"
+        ),
+        &["engine", "job_id"],
+    )
+    .expect("create miner_job_hash_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_hash_rate");
+    g
+});
+
+static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_thread_hashes_total",
+            "Total nonces tested per thread, job, and engine"
+        ),
+        &["engine", "job_id", "thread_id"],
+    )
+    .expect("create miner_thread_hashes_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_thread_hashes_total");
+    c
+});
+
+static THREAD_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_thread_hash_rate",
+            "Estimated hash rate (nonces per second) per thread, job, and engine"
+        ),
+        &["engine", "job_id", "thread_id"],
+    )
+    .expect("create miner_thread_hash_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_thread_hash_rate");
+    g
+});
+
+static JOBS_BY_ENGINE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_jobs_by_engine_total",
+            "Number of jobs by engine and terminal status"
+        ),
+        &["engine", "status"],
+    )
+    .expect("create miner_jobs_by_engine_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_jobs_by_engine_total");
+    c
+});
+
+static JOB_STATUS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    let g = IntGaugeVec::new(
+        opts!(
+            "miner_job_status",
+            "Job status gauge (set to 1 for current status)"
+        ),
+        &["engine", "job_id", "status"],
+    )
+    .expect("create miner_job_status");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_status");
+    g
+});
+
 pub fn default_registry() -> &'static Registry {
     &REGISTRY
 }
@@ -94,6 +186,44 @@ pub fn default_registry() -> &'static Registry {
 // -------------------------------------------------------------------------------------
 
 /// Increment the total hashes counter by `n` (number of nonces tested).
+// Labeled helpers for engine/job/thread metrics
+
+pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
+    JOB_HASHES_TOTAL
+        .with_label_values(&[engine, job_id])
+        .inc_by(n);
+}
+
+pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
+    JOB_HASH_RATE
+        .with_label_values(&[engine, job_id])
+        .set(rate);
+}
+
+pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
+    THREAD_HASHES_TOTAL
+        .with_label_values(&[engine, job_id, thread_id])
+        .inc_by(n);
+}
+
+pub fn set_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str, rate: f64) {
+    THREAD_HASH_RATE
+        .with_label_values(&[engine, job_id, thread_id])
+        .set(rate);
+}
+
+pub fn inc_jobs_by_engine(engine: &str, status: &str) {
+    JOBS_BY_ENGINE_TOTAL
+        .with_label_values(&[engine, status])
+        .inc();
+}
+
+pub fn set_job_status_gauge(engine: &str, job_id: &str, status: &str, value: i64) {
+    JOB_STATUS_GAUGE
+        .with_label_values(&[engine, job_id, status])
+        .set(value);
+}
+
 pub fn inc_hashes(n: u64) {
     HASHES_TOTAL.inc_by(n);
 }

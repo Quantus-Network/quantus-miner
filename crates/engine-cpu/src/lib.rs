@@ -138,4 +138,69 @@ impl MinerEngine for BaselineCpuEngine {
 }
 
 // Re-export commonly used items for convenience by consumers.
-pub use {BaselineCpuEngine as DefaultEngine, Candidate as EngineCandidate, Range as EngineRange};
+
+// Fast CPU engine using incremental pow-core helpers (init_worker_y0 + step_mul)
+#[derive(Default)]
+pub struct FastCpuEngine;
+
+impl FastCpuEngine {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MinerEngine for FastCpuEngine {
+    fn name(&self) -> &'static str {
+        "cpu-fast"
+    }
+
+    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
+        JobContext::new(header_hash, threshold)
+    }
+
+    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
+        use pow_core::{distance_from_y, init_worker_y0, is_valid_distance, step_mul};
+
+        // Ensure start <= end (inclusive range). If not, treat as exhausted.
+        if range.start > range.end {
+            return EngineStatus::Exhausted { hash_count: 0 };
+        }
+
+        let mut current = range.start;
+        let mut y = init_worker_y0(ctx, current);
+        let mut hash_count: u64 = 0;
+
+        loop {
+            // Cancellation check
+            if cancel.load(AtomicOrdering::Relaxed) {
+                return EngineStatus::Cancelled { hash_count };
+            }
+
+            // Compute distance from current accumulator
+            let distance = distance_from_y(ctx, y);
+            hash_count = hash_count.saturating_add(1);
+
+            if is_valid_distance(ctx, distance) {
+                let work = current.to_big_endian();
+                return EngineStatus::Found(Candidate {
+                    nonce: current,
+                    work,
+                    distance,
+                });
+            }
+
+            if current == range.end {
+                break EngineStatus::Exhausted { hash_count };
+            }
+
+            // Advance to next nonce: y <- y * m (mod n), current <- current + 1
+            y = step_mul(ctx, y);
+            current = current.saturating_add(U512::one());
+        }
+    }
+}
+
+pub use {
+    BaselineCpuEngine as DefaultEngine, Candidate as EngineCandidate, FastCpuEngine as FastEngine,
+    Range as EngineRange,
+};

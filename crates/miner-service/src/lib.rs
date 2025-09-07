@@ -13,6 +13,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use warp::{Filter, Rejection, Reply};
 
+const THREAD_RATE_EMA_ALPHA: f64 = 0.2;
+
 /// Service runtime configuration provided by the CLI/binary.
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
@@ -30,7 +32,7 @@ pub struct ServiceConfig {
 #[derive(Clone, Debug)]
 pub enum EngineSelection {
     CpuBaseline,
-    // CpuFast,      // placeholder for incremental/Montgomery path
+    CpuFast,
     // Cuda,
     // OpenCl,
 }
@@ -71,6 +73,14 @@ impl MiningService {
         }
 
         log::debug!(target: "miner", "Adding job: {} with {} cores", job_id, self.num_cores);
+        job.job_id = Some(job_id.clone());
+        #[cfg(feature = "metrics")]
+        {
+            metrics::set_job_status_gauge(self.engine.name(), &job_id, "running", 1);
+            metrics::set_job_status_gauge(self.engine.name(), &job_id, "completed", 0);
+            metrics::set_job_status_gauge(self.engine.name(), &job_id, "failed", 0);
+            metrics::set_job_status_gauge(self.engine.name(), &job_id, "cancelled", 0);
+        }
         job.start_mining(self.engine.clone(), self.num_cores);
         jobs.insert(job_id, job);
         Ok(())
@@ -131,6 +141,22 @@ impl MiningService {
                     retain
                 });
 
+                #[cfg(feature = "metrics")]
+                {
+                    // Aggregate and per-job hash-rate estimate across running jobs (nonces/sec)
+                    let mut total_rate = 0.0;
+                    for (job_id, job) in jobs_guard.iter() {
+                        if job.status == JobStatus::Running {
+                            let elapsed = job.start_time.elapsed().as_secs_f64();
+                            if elapsed > 0.0 {
+                                let rate = job.total_hash_count as f64 / elapsed;
+                                total_rate += rate;
+                                metrics::set_job_hash_rate(job.engine_name, job_id, rate);
+                            }
+                        }
+                    }
+                    metrics::set_hash_rate(total_rate);
+                }
                 drop(jobs_guard);
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -168,9 +194,13 @@ pub struct MiningJob {
     pub total_hash_count: u64,
     pub best_result: Option<MiningJobResult>,
 
+    pub engine_name: &'static str,
+    pub job_id: Option<String>,
     pub cancel_flag: Arc<AtomicBool>,
     pub result_receiver: Option<Receiver<ThreadResult>>,
     pub thread_handles: Vec<thread::JoinHandle<()>>,
+    pub thread_last_update: std::collections::HashMap<usize, std::time::Instant>,
+    pub thread_rate_ema: std::collections::HashMap<usize, f64>,
     completed_threads: usize,
 }
 
@@ -191,6 +221,8 @@ impl Clone for MiningJob {
             // Do not clone crossbeam receiver or thread handles; they are runtime artifacts.
             result_receiver: None,
             thread_handles: Vec::new(),
+            thread_last_update: self.thread_last_update.clone(),
+            thread_rate_ema: self.thread_rate_ema.clone(),
             completed_threads: self.completed_threads,
         }
     }
@@ -220,9 +252,13 @@ impl MiningJob {
             start_time: Instant::now(),
             total_hash_count: 0,
             best_result: None,
+            engine_name: "unknown",
+            job_id: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             result_receiver: None,
             thread_handles: Vec::new(),
+            thread_last_update: std::collections::HashMap::new(),
+            thread_rate_ema: std::collections::HashMap::new(),
             completed_threads: 0,
         }
     }
@@ -230,6 +266,7 @@ impl MiningJob {
     pub fn start_mining(&mut self, engine: Arc<dyn MinerEngine>, num_cores: usize) {
         let (sender, receiver) = bounded(num_cores * 2);
         self.result_receiver = Some(receiver);
+        self.engine_name = engine.name();
 
         let total_range = (self.nonce_end - self.nonce_start).saturating_add(U512::from(1));
         let range_per_core = total_range / U512::from(num_cores as u64);
@@ -281,6 +318,17 @@ impl MiningJob {
         log::debug!(target: "miner", "Cancelling mining job");
         self.cancel_flag.store(true, Ordering::Relaxed);
         self.status = JobStatus::Cancelled;
+        #[cfg(feature = "metrics")]
+        {
+            metrics::inc_job_status("cancelled");
+            if let Some(job_id) = &self.job_id {
+                metrics::inc_jobs_by_engine(self.engine_name, "cancelled");
+                metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
+                metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 0);
+                metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
+                metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 1);
+            }
+        }
 
         while let Some(handle) = self.thread_handles.pop() {
             let _ = handle.join();
@@ -295,9 +343,58 @@ impl MiningJob {
 
         while let Ok(thread_result) = receiver.try_recv() {
             self.total_hash_count += thread_result.hash_count;
+            #[cfg(feature = "metrics")]
+            {
+                metrics::inc_hashes(thread_result.hash_count);
+                if let Some(job_id) = &self.job_id {
+                    metrics::inc_job_hashes(self.engine_name, job_id, thread_result.hash_count);
+                    metrics::inc_thread_hashes(
+                        self.engine_name,
+                        job_id,
+                        &thread_result.thread_id.to_string(),
+                        thread_result.hash_count,
+                    );
+                    // Compute per-thread delta hash rate since the last update for this thread
+                    let now = std::time::Instant::now();
+                    let last = self
+                        .thread_last_update
+                        .get(&thread_result.thread_id)
+                        .copied()
+                        .unwrap_or(self.start_time);
+                    let dt = now.duration_since(last).as_secs_f64();
+                    if dt > 0.0 && thread_result.hash_count > 0 {
+                        let instant_rate = thread_result.hash_count as f64 / dt;
+                        // Exponential Moving Average smoothing
+                        let prev = self
+                            .thread_rate_ema
+                            .get(&thread_result.thread_id)
+                            .copied()
+                            .unwrap_or(instant_rate);
+                        let ema = THREAD_RATE_EMA_ALPHA * instant_rate + (1.0 - THREAD_RATE_EMA_ALPHA) * prev;
+                        metrics::set_thread_hash_rate(
+                            self.engine_name,
+                            job_id,
+                            &thread_result.thread_id.to_string(),
+                            ema,
+                        );
+                        // Store updated EMA for next delta
+                        self.thread_rate_ema
+                            .insert(thread_result.thread_id, ema);
+                    }
+                    // Update last-seen timestamp for this thread
+                    self.thread_last_update
+                        .insert(thread_result.thread_id, now);
+                }
+            }
 
             if thread_result.completed {
                 self.completed_threads += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    // Cleanup per-thread tracking on completion
+                    self.thread_last_update.remove(&thread_result.thread_id);
+                    self.thread_rate_ema.remove(&thread_result.thread_id);
+                }
             }
 
             if let Some(result) = thread_result.result {
@@ -322,10 +419,32 @@ impl MiningJob {
         if self.status == JobStatus::Running {
             if self.best_result.is_some() {
                 self.status = JobStatus::Completed;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics::inc_job_status("completed");
+                    if let Some(job_id) = &self.job_id {
+                        metrics::inc_jobs_by_engine(self.engine_name, "completed");
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 1);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 0);
+                    }
+                }
             } else if self.completed_threads >= self.thread_handles.len()
                 && !self.thread_handles.is_empty()
             {
                 self.status = JobStatus::Failed;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics::inc_job_status("failed");
+                    if let Some(job_id) = &self.job_id {
+                        metrics::inc_jobs_by_engine(self.engine_name, "failed");
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 0);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 1);
+                        metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 0);
+                    }
+                }
             }
         }
 
@@ -610,6 +729,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     #[allow(unused_mut)]
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
         EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
+        EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
     };
     log::info!("Using engine: {}", engine.name());
 
