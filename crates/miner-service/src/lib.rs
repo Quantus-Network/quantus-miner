@@ -111,14 +111,6 @@ impl MiningService {
         if let Some(mut job) = jobs.remove(job_id) {
             log::debug!(target: "miner", "Removing job: {}", job_id);
             job.cancel();
-            #[cfg(feature = "metrics")]
-            {
-                let mut g = self.active_jobs_gauge.lock().await;
-                if *g > 0 {
-                    *g -= 1;
-                }
-                metrics::set_active_jobs(*g);
-            }
             Some(job)
         } else {
             None
@@ -129,14 +121,6 @@ impl MiningService {
         let mut jobs = self.jobs.lock().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.cancel();
-            #[cfg(feature = "metrics")]
-            {
-                let mut g = self.active_jobs_gauge.lock().await;
-                if *g > 0 {
-                    *g -= 1;
-                }
-                metrics::set_active_jobs(*g);
-            }
             true
         } else {
             false
@@ -177,13 +161,16 @@ impl MiningService {
                     // Aggregate and per-job hash-rate estimate across running jobs (nonces/sec)
                     // Aggregate hash-rate across running jobs from last recorded per-job rates
                     let mut total_rate = 0.0;
+                    let mut running_jobs = 0i64;
                     for (job_id, job) in jobs_guard.iter() {
                         if job.status == JobStatus::Running {
+                            running_jobs += 1;
                             total_rate += job.last_hash_rate;
                             metrics::set_job_hash_rate(job.engine_name, job_id, job.last_hash_rate);
                         }
                     }
                     metrics::set_hash_rate(total_rate);
+                    metrics::set_active_jobs(running_jobs);
                 }
                 drop(jobs_guard);
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
