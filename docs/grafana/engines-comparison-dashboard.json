@@ -32,7 +32,11 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "colorMode": "value",
         "graphMode": "none",
@@ -61,7 +65,11 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "orientation": "horizontal",
         "colorMode": "value",
         "graphMode": "none",
@@ -86,7 +94,11 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "orientation": "auto",
         "colorMode": "value",
         "graphMode": "area",
@@ -107,7 +119,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (engine) (miner_job_hash_rate{engine=~\"$engine\"})",
+          "expr": "sum by (engine) (max_over_time(miner_job_hash_rate{engine=~\"$engine\"}[1m]))",
           "legendFormat": "{{engine}}"
         }
       ],
@@ -128,7 +140,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (engine, status) (miner_jobs_by_engine_total{engine=~\"$engine\"})"
+          "expr": "sum by (engine, status) (increase(miner_jobs_by_engine_total{engine=~\"$engine\"}[1m]))",
+          "legendFormat": "{{engine}}, {{status}}"
         }
       ],
       "fieldConfig": {
@@ -138,7 +151,11 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "showUnfilled": true
       }
     },
@@ -151,7 +168,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[$__rate_interval]))",
+          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[1m]))",
           "legendFormat": "{{engine}}"
         }
       ],
@@ -194,7 +211,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, miner_job_hash_rate{engine=~\"$engine\"})"
+          "expr": "topk(10, miner_job_hash_rate{engine=~\"$engine\"})",
+          "legendFormat": "{{engine}}, {{job_id}}"
         }
       ],
       "fieldConfig": {
@@ -219,7 +237,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[5m]))"
+          "expr": "sum by (engine) (increase(miner_job_hashes_total{engine=~\"$engine\"}[5m]))",
+          "legendFormat": "{{engine}}"
         }
       ],
       "fieldConfig": {
@@ -245,8 +264,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "miner_job_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\"}",
-          "legendFormat": "{{engine}} | {{job_id}}"
+          "expr": "max_over_time(miner_job_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\"}[1m])",
+          "legendFormat": "{{engine}}, {{job_id}}"
         }
       ],
       "fieldConfig": {
@@ -267,7 +286,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "miner_thread_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\", thread_id=~\"$thread_id\"}"
+          "expr": "max_over_time(miner_thread_hash_rate{engine=~\"$engine\", job_id=~\"$job_id\", thread_id=~\"$thread_id\"}[1m])",
+          "legendFormat": "{{engine}}, {{job_id}}, {{thread_id}}"
         }
       ],
       "fieldConfig": {

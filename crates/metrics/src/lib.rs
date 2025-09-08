@@ -19,10 +19,15 @@
 //! - The HTTP exporter is spawned as a background task and does not block.
 //! - If the `http-exporter` feature is disabled, `start_http_exporter` becomes
 //!   a no-op that returns immediately.
+//! - When jobs/threads end, prefer removing gauge label children (series) rather than
+//!   writing a zero; this avoids scrape-timing artifacts and produces cleaner rollups.
+//! - Service-level observability: expose an `active_jobs` gauge and a `mine_requests_total`
+//!   counter (labeled by result) to disambiguate "idle because no jobs" vs "actively mining".
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    opts, Encoder, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry, TextEncoder,
+    opts, Encoder, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
+    TextEncoder,
 };
 
 #[cfg(feature = "http-exporter")]
@@ -42,9 +47,43 @@ use anyhow::Result;
 
 static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
+// -------------------------------------------------------------------------------------
+// High-level service metrics
+// -------------------------------------------------------------------------------------
+
+static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "miner_active_jobs",
+        "Number of currently running mining jobs",
+    )
+    .expect("create miner_active_jobs");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_active_jobs");
+    g
+});
+
+static MINE_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_mine_requests_total",
+            "Count of /mine requests by result"
+        ),
+        &["result"], // accepted, duplicate, invalid, error
+    )
+    .expect("create miner_mine_requests_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_mine_requests_total");
+    c
+});
+
 static JOBS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(opts!("miner_jobs_total", "Number of jobs by status"), &["status"])
-        .expect("create miner_jobs_total");
+    let c = IntCounterVec::new(
+        opts!("miner_jobs_total", "Number of jobs by status"),
+        &["status"],
+    )
+    .expect("create miner_jobs_total");
     REGISTRY
         .register(Box::new(c.clone()))
         .expect("register miner_jobs_total");
@@ -187,6 +226,15 @@ pub fn default_registry() -> &'static Registry {
 
 /// Increment the total hashes counter by `n` (number of nonces tested).
 // Labeled helpers for engine/job/thread metrics
+//
+// Service-level helpers
+pub fn set_active_jobs(n: i64) {
+    ACTIVE_JOBS.set(n);
+}
+
+pub fn inc_mine_requests(result: &str) {
+    MINE_REQUESTS_TOTAL.with_label_values(&[result]).inc();
+}
 
 pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
     JOB_HASHES_TOTAL
@@ -195,9 +243,7 @@ pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
 }
 
 pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
-    JOB_HASH_RATE
-        .with_label_values(&[engine, job_id])
-        .set(rate);
+    JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
 }
 
 pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
@@ -246,6 +292,20 @@ pub fn inc_http_request(endpoint: &str, code: u16) {
 }
 
 // -------------------------------------------------------------------------------------
+// Removal helpers for end-of-life series
+// -------------------------------------------------------------------------------------
+
+/// Remove the per-job hash rate series for a finished job.
+pub fn remove_job_hash_rate(engine: &str, job_id: &str) {
+    let _ = JOB_HASH_RATE.remove_label_values(&[engine, job_id]);
+}
+
+/// Remove the per-thread hash rate series for a finished thread.
+pub fn remove_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str) {
+    let _ = THREAD_HASH_RATE.remove_label_values(&[engine, job_id, thread_id]);
+}
+
+// -------------------------------------------------------------------------------------
 // HTTP Exporter (feature: http-exporter)
 // -------------------------------------------------------------------------------------
 
@@ -270,7 +330,9 @@ pub async fn start_http_exporter(port: u16) -> Result<()> {
         let encoder = TextEncoder::new();
         let metric_families = REGISTRY.gather();
         let mut buffer = Vec::with_capacity(16 * 1024);
-        encoder.encode(&metric_families, &mut buffer).unwrap_or_default();
+        encoder
+            .encode(&metric_families, &mut buffer)
+            .unwrap_or_default();
 
         Response::builder()
             .header("Content-Type", encoder.format_type())

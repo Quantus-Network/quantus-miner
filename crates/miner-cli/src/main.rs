@@ -18,6 +18,11 @@ struct Args {
     #[arg(long, env = "MINER_METRICS_PORT")]
     metrics_port: Option<u16>,
 
+    /// Target milliseconds for per-thread progress updates (chunking).
+    /// Smaller values increase metrics freshness but add a bit of overhead.
+    #[arg(long = "progress-chunk-ms", env = "MINER_PROGRESS_CHUNK_MS")]
+    progress_chunk_ms: Option<u64>,
+
     /// Mining engine to use (default: cpu-fast). Options: cpu-baseline, cpu-fast
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
@@ -60,7 +65,9 @@ async fn main() {
     log::info!("API listening port: {}", args.port);
     match args.num_cores {
         Some(n) if n > 0 => log::info!("Using specified number of cores: {}", n),
-        Some(_) => log::warn!("Number of cores must be positive. Defaulting to all available cores."),
+        Some(_) => {
+            log::warn!("Number of cores must be positive. Defaulting to all available cores.")
+        }
         None => log::info!("Using all available cores (auto-detected)."),
     }
     match args.metrics_port {
@@ -73,6 +80,7 @@ async fn main() {
         port: args.port,
         num_cores: args.num_cores,
         metrics_port: args.metrics_port,
+        progress_chunk_ms: args.progress_chunk_ms,
         engine: args.engine.into(),
     };
 
