@@ -71,6 +71,28 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Difficulty (by chain)",
+      "description": "Median reported PoW difficulty by chain (5m), robust to outliers from forked nodes",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 8 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile by (chain) (0.5, avg_over_time(qpow_metrics{data_group=\"difficulty\"}[5m]))",
+          "legendFormat": "{{chain}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
       "type": "table",
       "title": "Per-Instance Hash Rate (current vs 1h peak)",
       "description": "Current (1m max) and 1h peak per instance (filter by engine)",

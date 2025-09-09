@@ -26,6 +26,14 @@ pub struct ServiceConfig {
     pub metrics_port: Option<u16>,
     /// Target milliseconds for per-thread progress updates (chunking). If None, defaults to 2000ms.
     pub progress_chunk_ms: Option<u64>,
+    /// Optional starting value for the manipulator engine's solved-blocks throttle index.
+    pub manip_solved_blocks: Option<u64>,
+    /// Optional base sleep per batch in nanoseconds for manipulator engine (default 500_000ns).
+    pub manip_base_delay_ns: Option<u64>,
+    /// Optional number of nonce attempts between sleeps for manipulator engine (default 10_000).
+    pub manip_step_batch: Option<u64>,
+    /// Optional cap on solved-blocks throttle index for manipulator engine.
+    pub manip_throttle_cap: Option<u64>,
     /// Engine selection (future use). For now, CPU baseline/fast engines are supported.
     pub engine: EngineSelection,
 }
@@ -35,6 +43,7 @@ pub struct ServiceConfig {
 pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
+    CpuChainManipulator,
     // Cuda,
     // OpenCl,
 }
@@ -46,6 +55,10 @@ impl Default for ServiceConfig {
             workers: None,
             metrics_port: None,
             progress_chunk_ms: None,
+            manip_solved_blocks: None,
+            manip_base_delay_ns: None,
+            manip_step_batch: None,
+            manip_throttle_cap: None,
             engine: EngineSelection::CpuBaseline,
         }
     }
@@ -976,6 +989,28 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
         EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
         EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
+        EngineSelection::CpuChainManipulator => {
+            let mut eng = engine_cpu::ChainEngine::new();
+            // Apply optional throttle parameters if provided.
+            if let Some(base) = config.manip_base_delay_ns {
+                log::debug!(target: "miner", "Manipulator base_delay_ns overridden via config: {} ns", base);
+                eng.base_delay_ns = base;
+            }
+            if let Some(step) = config.manip_step_batch {
+                log::debug!(target: "miner", "Manipulator step_batch overridden via config: {}", step);
+                eng.step_batch = step;
+            }
+            if let Some(cap) = config.manip_throttle_cap {
+                log::debug!(target: "miner", "Manipulator throttle_cap set via config: {}", cap);
+                eng.throttle_cap = Some(cap);
+            }
+            // If a starting throttle index is provided, set it here for "pick up where we left off".
+            if let Some(n) = config.manip_solved_blocks {
+                log::debug!(target: "miner", "Manipulator starting throttle index (solved_blocks) set via config: {}", n);
+                eng.job_index.store(n, std::sync::atomic::Ordering::Relaxed);
+            }
+            Arc::new(eng)
+        }
     };
     log::info!("Using engine: {}", engine.name());
 

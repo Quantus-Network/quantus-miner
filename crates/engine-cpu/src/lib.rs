@@ -16,7 +16,8 @@ use core::cmp::Ordering;
 
 use pow_core::{distance_for_nonce, is_valid_distance, JobContext};
 use primitive_types::U512;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 /// An inclusive nonce range to search.
 #[derive(Clone, Debug)]
@@ -215,7 +216,138 @@ impl MinerEngine for FastCpuEngine {
     }
 }
 
+#[derive(Default)]
+pub struct ChainManipulatorEngine {
+    /// Base sleep per batch in nanoseconds; actual sleep increases linearly with job count.
+    pub base_delay_ns: u64,
+    /// Number of nonce attempts between sleeps.
+    pub step_batch: u64,
+    /// Optional cap for solved-block throttling (sleep index will not exceed this).
+    pub throttle_cap: Option<u64>,
+    /// Monotonically increasing solved-block counter used to scale throttling.
+    /// Public so the service can initialize from CLI (pick up where we left off).
+    pub job_index: AtomicU64,
+}
+
+impl ChainManipulatorEngine {
+    pub fn new() -> Self {
+        // Start fast: first block has no throttle (job_index = 0 -> 0ns sleep),
+        // then 0.5ms per batch at block 1, 1.0ms at block 2, etc.
+        Self {
+            base_delay_ns: 500_000, // 0.5 ms
+            step_batch: 10_000,     // sleep every 10k nonce checks
+            throttle_cap: None,     // unlimited by default
+            job_index: AtomicU64::new(0),
+        }
+    }
+}
+
+impl MinerEngine for ChainManipulatorEngine {
+    fn name(&self) -> &'static str {
+        "cpu-chain-manipulator"
+    }
+
+    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
+        // Per-block throttling: do NOT increment here. We increment on Found (i.e., when a block is solved).
+        let ctx = JobContext::new(header_hash, threshold);
+        // Debug: log current throttle state at job start
+        #[cfg(feature = "std")]
+        log::debug!(
+            target: "miner",
+            "manipulator throttle start: solved_blocks={}, sleep_ns_per_batch={}, step_batch={}",
+            self.job_index.load(AtomicOrdering::Relaxed),
+            self.base_delay_ns.saturating_mul(self.job_index.load(AtomicOrdering::Relaxed)),
+            self.step_batch
+        );
+        ctx
+    }
+
+    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
+        use pow_core::{distance_from_y, init_worker_y0, is_valid_distance, step_mul};
+
+        if range.start > range.end {
+            return EngineStatus::Exhausted { hash_count: 0 };
+        }
+
+        // Fast incremental path (same as cpu-fast) to start with high hashrate:
+        // y0 = m^(h + start_nonce) mod n, then y = y * m (mod n) each step.
+        let mut current = range.start;
+        let mut y = init_worker_y0(ctx, current);
+        let mut hash_count: u64 = 0;
+        let mut batch_counter: u64 = 0;
+
+        // Per-block throttling: derived from blocks solved so far (apply cap if configured).
+        let mut solved_blocks = self.job_index.load(AtomicOrdering::Relaxed);
+        if let Some(cap) = self.throttle_cap {
+            if solved_blocks > cap {
+                solved_blocks = cap;
+            }
+        }
+        let sleep_ns = self.base_delay_ns.saturating_mul(solved_blocks);
+        let do_sleep = sleep_ns > 0;
+
+        loop {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                return EngineStatus::Cancelled { hash_count };
+            }
+
+            // Compute distance from current accumulator (incremental path).
+            let distance = distance_from_y(ctx, y);
+            hash_count = hash_count.saturating_add(1);
+            batch_counter = batch_counter.saturating_add(1);
+
+            // Optional detailed debug of throttle progression within a job
+            #[allow(unused_variables)]
+            let _dbg_batch = batch_counter;
+
+            if is_valid_distance(ctx, distance) {
+                let work = current.to_big_endian();
+                // Increment solved-block counter so the NEXT block throttles more.
+                let new_idx = self.job_index.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                #[cfg(feature = "std")]
+                {
+                    let capped = if let Some(cap) = self.throttle_cap {
+                        std::cmp::min(new_idx, cap)
+                    } else {
+                        new_idx
+                    };
+                    log::debug!(
+                        target: "miner",
+                        "manipulator throttle increment: solved_blocks={} (next sleep_ns_per_batch={}, cap={:?})",
+                        new_idx,
+                        self.base_delay_ns.saturating_mul(capped),
+                        self.throttle_cap
+                    );
+                }
+                return EngineStatus::Found {
+                    candidate: Candidate {
+                        nonce: current,
+                        work,
+                        distance,
+                    },
+                    hash_count,
+                };
+            }
+
+            // Throttle after each batch to artificially slow down based on blocks solved so far.
+            if do_sleep && batch_counter >= self.step_batch {
+                std::thread::sleep(Duration::from_nanos(sleep_ns));
+                batch_counter = 0;
+            }
+
+            // Advance
+            if current < range.end {
+                // y <- y * m (mod n); current <- current + 1
+                y = step_mul(ctx, y);
+                current = current.saturating_add(U512::one());
+            } else {
+                break EngineStatus::Exhausted { hash_count };
+            }
+        }
+    }
+}
+
 pub use {
-    BaselineCpuEngine as DefaultEngine, Candidate as EngineCandidate, FastCpuEngine as FastEngine,
-    Range as EngineRange,
+    BaselineCpuEngine as DefaultEngine, Candidate as EngineCandidate,
+    ChainManipulatorEngine as ChainEngine, FastCpuEngine as FastEngine, Range as EngineRange,
 };

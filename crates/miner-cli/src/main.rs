@@ -22,7 +22,24 @@ struct Args {
     #[arg(long = "progress-chunk-ms", env = "MINER_PROGRESS_CHUNK_MS")]
     progress_chunk_ms: Option<u64>,
 
-    /// Mining engine to use (default: cpu-fast). Options: cpu-baseline, cpu-fast
+    /// For cpu-chain-manipulator: start throttle index at this many solved blocks
+    /// to "pick up where we left off" after restarts.
+    #[arg(long = "manip-solved-blocks", env = "MINER_MANIP_SOLVED_BLOCKS")]
+    manip_solved_blocks: Option<u64>,
+
+    /// For cpu-chain-manipulator: base sleep per batch in nanoseconds (default 500_000 ns)
+    #[arg(long = "manip-base-delay-ns", env = "MINER_MANIP_BASE_DELAY_NS")]
+    manip_base_delay_ns: Option<u64>,
+
+    /// For cpu-chain-manipulator: number of nonce attempts between sleeps (default 10_000)
+    #[arg(long = "manip-step-batch", env = "MINER_MANIP_STEP_BATCH")]
+    manip_step_batch: Option<u64>,
+
+    /// For cpu-chain-manipulator: optional cap on solved-blocks throttle index
+    #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
+    manip_throttle_cap: Option<u64>,
+
+    /// Mining engine to use (default: cpu-fast). Options: cpu-baseline, cpu-fast, cpu-chain-manipulator
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
 }
@@ -33,6 +50,8 @@ enum EngineCli {
     CpuBaseline,
     /// Optimized CPU engine (incremental precompute + step_mul)
     CpuFast,
+    /// Throttling CPU engine that slows per block to help reduce difficulty
+    CpuChainManipulator,
     // Cuda,      // planned: CUDA GPU engine
     // Opencl,    // planned: OpenCL GPU engine
 }
@@ -42,6 +61,7 @@ impl From<EngineCli> for EngineSelection {
         match value {
             EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
             EngineCli::CpuFast => EngineSelection::CpuFast,
+            EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             // EngineCli::Cuda => EngineSelection::Cuda,
             // EngineCli::Opencl => EngineSelection::OpenCl,
         }
@@ -80,6 +100,10 @@ async fn main() {
         workers: args.workers,
         metrics_port: args.metrics_port,
         progress_chunk_ms: args.progress_chunk_ms,
+        manip_solved_blocks: args.manip_solved_blocks,
+        manip_base_delay_ns: args.manip_base_delay_ns,
+        manip_step_batch: args.manip_step_batch,
+        manip_throttle_cap: args.manip_throttle_cap,
         engine: args.engine.into(),
     };
 
