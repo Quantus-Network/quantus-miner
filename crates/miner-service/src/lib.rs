@@ -20,8 +20,8 @@ const THREAD_RATE_EMA_ALPHA: f64 = 0.2;
 pub struct ServiceConfig {
     /// Port for the HTTP miner API.
     pub port: u16,
-    /// Number of CPU cores to use for mining (defaults to all logical CPUs if None).
-    pub num_cores: Option<usize>,
+    /// Number of worker threads (logical CPUs) to use for mining (defaults to all available if None).
+    pub workers: Option<usize>,
     /// Optional metrics port. When Some, metrics endpoint starts; when None, metrics are disabled.
     pub metrics_port: Option<u16>,
     /// Target milliseconds for per-thread progress updates (chunking). If None, defaults to 2000ms.
@@ -43,7 +43,7 @@ impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             port: 9833,
-            num_cores: None,
+            workers: None,
             metrics_port: None,
             progress_chunk_ms: None,
             engine: EngineSelection::CpuBaseline,
@@ -55,7 +55,7 @@ impl Default for ServiceConfig {
 #[derive(Clone)]
 pub struct MiningService {
     pub jobs: Arc<Mutex<HashMap<String, MiningJob>>>,
-    pub num_cores: usize,
+    pub workers: usize,
     pub engine: Arc<dyn MinerEngine>,
     /// Target milliseconds for per-thread progress updates (chunking).
     pub progress_chunk_ms: u64,
@@ -64,10 +64,10 @@ pub struct MiningService {
 }
 
 impl MiningService {
-    pub fn new(num_cores: usize, engine: Arc<dyn MinerEngine>, progress_chunk_ms: u64) -> Self {
+    pub fn new(workers: usize, engine: Arc<dyn MinerEngine>, progress_chunk_ms: u64) -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            num_cores,
+            workers,
             engine,
             progress_chunk_ms,
             active_jobs_gauge: Arc::new(tokio::sync::Mutex::new(0)),
@@ -81,7 +81,7 @@ impl MiningService {
             return Err("Job already exists".to_string());
         }
 
-        log::debug!(target: "miner", "Adding job: {} with {} cores", job_id, self.num_cores);
+        log::debug!(target: "miner", "Adding job: {} with {} workers", job_id, self.workers);
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
@@ -96,7 +96,7 @@ impl MiningService {
                 metrics::set_active_jobs(*g);
             }
         }
-        job.start_mining(self.engine.clone(), self.num_cores, self.progress_chunk_ms);
+        job.start_mining(self.engine.clone(), self.workers, self.progress_chunk_ms);
         jobs.insert(job_id, job);
         Ok(())
     }
@@ -286,33 +286,33 @@ impl MiningJob {
     pub fn start_mining(
         &mut self,
         engine: Arc<dyn MinerEngine>,
-        num_cores: usize,
+        workers: usize,
         progress_chunk_ms: u64,
     ) {
-        let (sender, receiver) = bounded(num_cores * 2);
+        let (sender, receiver) = bounded(workers * 2);
         self.result_receiver = Some(receiver);
         self.engine_name = engine.name();
 
         let total_range = (self.nonce_end - self.nonce_start).saturating_add(U512::from(1));
-        let range_per_core = total_range / U512::from(num_cores as u64);
-        let remainder = total_range % U512::from(num_cores as u64);
+        let range_per_worker = total_range / U512::from(workers as u64);
+        let remainder = total_range % U512::from(workers as u64);
 
         log::debug!(
             target: "miner",
-            "Starting mining with {} cores, total range: {}, range per core: {}",
-            num_cores,
+            "Starting mining with {} workers, total range: {}, range per worker: {}",
+            workers,
             total_range,
-            range_per_core
+            range_per_worker
         );
 
         // Prepare shared job context once per job.
         let ctx = engine.prepare_context(self.header_hash, self.distance_threshold);
 
-        for thread_id in 0..num_cores {
-            let start = self.nonce_start + range_per_core * U512::from(thread_id as u64);
-            let mut end = start + range_per_core - U512::from(1);
+        for thread_id in 0..workers {
+            let start = self.nonce_start + range_per_worker * U512::from(thread_id as u64);
+            let mut end = start + range_per_worker - U512::from(1);
 
-            if thread_id == num_cores - 1 {
+            if thread_id == workers - 1 {
                 end += remainder;
             }
             if end > self.nonce_end {
@@ -875,15 +875,101 @@ pub fn build_routes(
 /// - Optionally exposes a metrics endpoint if `metrics_port` is provided and the `metrics` feature is enabled.
 /// - Serves the HTTP API on `config.port`.
 pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
-    let mut num_cores = num_cpus::get();
-    if let Some(n) = config.num_cores {
-        if n > 0 {
-            num_cores = n;
-        } else {
-            log::warn!("Number of cores must be positive. Defaulting to all available cores.");
+    // Determine available logical CPUs, preferring the cgroup cpuset when present.
+    fn detect_effective_cpus() -> usize {
+        // Try cgroup v2 effective cpuset
+        if let Ok(mask) = std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective") {
+            if let Some(count) = parse_cpuset_to_count(mask.trim()) {
+                return count.max(1);
+            }
         }
+        // Fallback to legacy cgroup v1 path
+        if let Ok(mask) = std::fs::read_to_string("/sys/fs/cgroup/cpuset/cpuset.cpus") {
+            if let Some(count) = parse_cpuset_to_count(mask.trim()) {
+                return count.max(1);
+            }
+        }
+        // Fallback to all logical CPUs
+        num_cpus::get().max(1)
     }
-    log::info!("Using {} core(s) for mining", num_cores);
+
+    // Parse cpuset list/ranges like "0-3,6,8-11" into a count
+    fn parse_cpuset_to_count(s: &str) -> Option<usize> {
+        if s.is_empty() {
+            return None;
+        }
+        let mut count: usize = 0;
+        for part in s.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            if let Some((a, b)) = p.split_once('-') {
+                let start = a.trim().parse::<usize>().ok()?;
+                let end = b.trim().parse::<usize>().ok()?;
+                if end < start {
+                    return None;
+                }
+                count += end - start + 1;
+            } else {
+                // single cpu id
+                let _ = p.parse::<usize>().ok()?;
+                count += 1;
+            }
+        }
+        Some(count)
+    }
+
+    // Detect effective CPU pool for this process (cpuset if available).
+    let effective_cpus = detect_effective_cpus();
+
+    // Default workers: leave at least half of resources for other processes.
+    // Use max(1, effective_cpus / 2), but also cap at effective_cpus - 1 if possible.
+    let default_workers = effective_cpus
+        .saturating_sub(effective_cpus / 2)
+        .min(effective_cpus.saturating_sub(1))
+        .max(1);
+
+    // Resolve workers from user config, clamped to [1, effective_cpus].
+    let mut workers = match config.workers {
+        Some(n) if n > 0 => {
+            if n > effective_cpus {
+                log::warn!(
+                    "Requested {} workers exceeds available logical CPUs in cpuset ({}). Clamping to {}.",
+                    n,
+                    effective_cpus,
+                    effective_cpus
+                );
+                effective_cpus
+            } else {
+                n
+            }
+        }
+        Some(_) => {
+            log::warn!("Workers must be positive. Falling back to default.");
+            default_workers
+        }
+        None => {
+            log::info!(
+                "No --workers specified. Defaulting to {} (leaving ~{} for other processes) based on effective {} logical CPUs.",
+                default_workers,
+                effective_cpus.saturating_sub(default_workers),
+                effective_cpus
+            );
+            default_workers
+        }
+    };
+
+    // Final safety: never exceed effective_cpus.
+    if workers > effective_cpus {
+        workers = effective_cpus.max(1);
+    }
+
+    log::info!(
+        "Using {} worker thread(s) for mining (effective logical CPUs available: {})",
+        workers,
+        effective_cpus
+    );
 
     // Select engine
     #[allow(unused_mut)]
@@ -894,7 +980,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     log::info!("Using engine: {}", engine.name());
 
     let progress_chunk_ms = config.progress_chunk_ms.unwrap_or(2000);
-    let service = MiningService::new(num_cores, engine.clone(), progress_chunk_ms);
+    let service = MiningService::new(workers, engine.clone(), progress_chunk_ms);
 
     // Start mining loop
     service.start_mining_loop().await;

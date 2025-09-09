@@ -25,7 +25,7 @@ The service can be configured using command-line arguments or environment variab
 | Argument          | Environment Variable | Description                                | Default       |
 |-------------------|----------------------|--------------------------------------------|---------------|
 | `--port <PORT>`   | `MINER_PORT`         | The port for the HTTP server to listen on. | `9833`        |
-| `--cores <N>` (alias: `--num-cores`) | `MINER_CORES`        | The number of CPU cores to use for mining. | All available |
+| `--workers <N>` | `MINER_WORKERS` | The number of worker threads (logical CPUs) to use for mining. | Auto-detected (leaves ~half available) |
 
 Example:
 
@@ -33,12 +33,12 @@ Example:
 # Run on the default port 9833 with all available cores
 ../target/release/quantus-miner
 
-# Run on a custom port with 4 cores
-../target/release/quantus-miner --port 8000 --cores 4
+# Run on a custom port with 4 workers (logical CPUs)
+../target/release/quantus-miner --port 8000 --workers 4
 
 # Equivalent using environment variables
 export MINER_PORT=8000
-export MINER_CORES=4
+export MINER_WORKERS=4
 ../target/release/quantus-miner
 ```
 
@@ -50,11 +50,11 @@ After building the service, you can run it directly from the command line:
 # Run with default settings
 RUST_LOG=info ../target/release/quantus-miner
 
-# Run with a specific port and 2 cores
-RUST_LOG=info ../target/release/quantus-miner --port 12345 --cores 2
+# Run with a specific port and 2 workers
+RUST_LOG=info ../target/release/quantus-miner --port 12345 --workers 2
 
 # Run in debug mode
-RUST_LOG=info,miner=debug ../target/release/quantus-miner --cores 4
+RUST_LOG=info,miner=debug ../target/release/quantus-miner --workers 4
 
 ```
 
@@ -65,7 +65,7 @@ Example output:
 
 ```
 INFO  external_miner > Starting external miner service...
-INFO  external_miner > Using all available cores: 8
+INFO  external_miner > Using auto-detected workers (leaving headroom): 4
 INFO  external_miner > Server starting on 0.0.0.0:9833 
 ```
 
@@ -76,6 +76,10 @@ The detailed API specification is defined using OpenAPI 3.0 and can be found in 
 This specification details all endpoints, request/response formats, and expected status codes.
 You can use tools like [Swagger Editor](https://editor.swagger.io/)
 or [Swagger UI](https://swagger.io/tools/swagger-ui/) to view and interact with the API definition.
+
+## A note on workers
+
+The miner previously used a flag named `--num-cores`. To better reflect intent, this has been replaced by `--workers`, which specifies the number of worker threads (logical CPUs). When not provided, the miner auto-detects an effective CPU set (honoring cgroup cpusets when present) and defaults to a value that leaves roughly half of the system resources available to other processes.
 
 ## API Endpoints (Summary)
 

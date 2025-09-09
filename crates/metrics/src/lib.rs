@@ -33,7 +33,6 @@ use prometheus::{
 #[cfg(feature = "http-exporter")]
 use {
     anyhow::Result,
-    serde::Serialize,
     std::net::SocketAddr,
     warp::{http::Response, Filter},
 };
@@ -308,12 +307,6 @@ pub fn remove_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str) {
 // -------------------------------------------------------------------------------------
 // HTTP Exporter (feature: http-exporter)
 // -------------------------------------------------------------------------------------
-
-#[cfg(feature = "http-exporter")]
-#[derive(Serialize)]
-struct MetricsInfo {
-    endpoint: &'static str,
-}
 
 /// Start the Prometheus HTTP exporter on 0.0.0.0:`port`.
 ///
