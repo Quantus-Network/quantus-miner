@@ -39,11 +39,14 @@ struct Args {
     #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
     manip_throttle_cap: Option<u64>,
 
-    /// Mining engine to use (default: cpu-fast). Options: cpu-baseline, cpu-fast, cpu-chain-manipulator
+    /// Mining engine to use (default: cpu-fast).
+    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, gpu-cuda, gpu-opencl
+    /// Note: GPU engines are currently unimplemented and will return a clear error at runtime.
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum EngineCli {
     /// Baseline CPU engine (reference implementation)
@@ -52,8 +55,10 @@ enum EngineCli {
     CpuFast,
     /// Throttling CPU engine that slows per block to help reduce difficulty
     CpuChainManipulator,
-    // Cuda,      // planned: CUDA GPU engine
-    // Opencl,    // planned: OpenCL GPU engine
+    /// CUDA GPU engine (unimplemented; selecting will return an error)
+    GpuCuda,
+    /// OpenCL GPU engine (unimplemented; selecting will return an error)
+    GpuOpencl,
 }
 
 impl From<EngineCli> for EngineSelection {
@@ -62,8 +67,8 @@ impl From<EngineCli> for EngineSelection {
             EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
             EngineCli::CpuFast => EngineSelection::CpuFast,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
-            // EngineCli::Cuda => EngineSelection::Cuda,
-            // EngineCli::Opencl => EngineSelection::OpenCl,
+            EngineCli::GpuCuda => EngineSelection::GpuCuda,
+            EngineCli::GpuOpencl => EngineSelection::GpuOpenCl,
         }
     }
 }
@@ -83,14 +88,14 @@ async fn main() {
     log::info!("Starting external miner service...");
     log::info!("API listening port: {}", args.port);
     match args.workers {
-        Some(n) if n > 0 => log::info!("Using specified number of workers: {}", n),
+        Some(n) if n > 0 => log::info!("Using specified number of workers: {n}"),
         Some(_) => {
             log::warn!("Workers must be positive. Defaulting to all available logical CPUs.")
         }
         None => log::info!("Using all available logical CPUs (auto-detected)."),
     }
     match args.metrics_port {
-        Some(p) => log::info!("Metrics enabled on port {}", p),
+        Some(p) => log::info!("Metrics enabled on port {p}"),
         None => log::info!("Metrics disabled (no --metrics-port provided)"),
     }
     log::info!("Selected engine: {:?}", args.engine);

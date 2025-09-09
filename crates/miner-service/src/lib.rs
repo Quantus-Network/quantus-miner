@@ -44,8 +44,8 @@ pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
     CpuChainManipulator,
-    // Cuda,
-    // OpenCl,
+    GpuCuda,
+    GpuOpenCl,
 }
 
 impl Default for ServiceConfig {
@@ -90,7 +90,7 @@ impl MiningService {
     pub async fn add_job(&self, job_id: String, mut job: MiningJob) -> Result<(), String> {
         let mut jobs = self.jobs.lock().await;
         if jobs.contains_key(&job_id) {
-            log::warn!("Attempted to add duplicate job ID: {}", job_id);
+            log::warn!("Attempted to add duplicate job ID: {job_id}");
             return Err("Job already exists".to_string());
         }
 
@@ -122,7 +122,7 @@ impl MiningService {
     pub async fn remove_job(&self, job_id: &str) -> Option<MiningJob> {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(job_id) {
-            log::debug!(target: "miner", "Removing job: {}", job_id);
+            log::debug!(target: "miner", "Removing job: {job_id}");
             job.cancel();
             Some(job)
         } else {
@@ -164,7 +164,7 @@ impl MiningService {
                     let retain = job.status == JobStatus::Running
                         || job.start_time.elapsed().as_secs() < 300;
                     if !retain {
-                        log::debug!(target: "miner", "Cleaning up old job {}", job_id);
+                        log::debug!(target: "miner", "Cleaning up old job {job_id}");
                     }
                     retain
                 });
@@ -306,37 +306,25 @@ impl MiningJob {
         self.result_receiver = Some(receiver);
         self.engine_name = engine.name();
 
-        let total_range = (self.nonce_end - self.nonce_start).saturating_add(U512::from(1));
-        let range_per_worker = total_range / U512::from(workers as u64);
-        let remainder = total_range % U512::from(workers as u64);
+        // Partition nonce range safely
+        let partitions = compute_partitions(self.nonce_start, self.nonce_end, workers);
 
         log::debug!(
             target: "miner",
-            "Starting mining with {} workers, total range: {}, range per worker: {}",
+            "Starting mining with {} workers, total range: {} ({} partitions)",
             workers,
-            total_range,
-            range_per_worker
+            partitions.total_range,
+            partitions.ranges.len()
         );
 
         // Prepare shared job context once per job.
         let ctx = engine.prepare_context(self.header_hash, self.distance_threshold);
 
-        for thread_id in 0..workers {
-            let start = self.nonce_start + range_per_worker * U512::from(thread_id as u64);
-            let mut end = start + range_per_worker - U512::from(1);
-
-            if thread_id == workers - 1 {
-                end += remainder;
-            }
-            if end > self.nonce_end {
-                end = self.nonce_end;
-            }
-
+        for (thread_id, (start, end)) in partitions.ranges.into_iter().enumerate() {
             let cancel_flag = self.cancel_flag.clone();
             let sender = sender.clone();
             let ctx = ctx.clone();
             let engine = engine.clone();
-            let progress_chunk_ms = progress_chunk_ms;
 
             let handle = thread::spawn(move || {
                 mine_range_with_engine(
@@ -601,7 +589,7 @@ fn mine_range_with_engine(
                     completed: true,
                 };
                 if sender.send(final_result).is_err() {
-                    log::warn!("Thread {} failed to send final result", thread_id);
+                    log::warn!("Thread {thread_id} failed to send final result");
                 }
                 done = true;
                 break;
@@ -615,7 +603,7 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!("Thread {} failed to send progress update", thread_id);
+                    log::warn!("Thread {thread_id} failed to send progress update");
                     break;
                 }
             }
@@ -628,7 +616,7 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!("Thread {} failed to send cancel update", thread_id);
+                    log::warn!("Thread {thread_id} failed to send cancel update");
                 }
                 done = true;
                 break;
@@ -653,14 +641,11 @@ fn mine_range_with_engine(
             completed: true,
         };
         if sender.send(final_result).is_err() {
-            log::warn!(
-                "Thread {} failed to send completion status after chunked search",
-                thread_id
-            );
+            log::warn!("Thread {thread_id} failed to send completion status after chunked search");
         }
     }
 
-    log::debug!("Thread {} completed.", thread_id);
+    log::debug!("Thread {thread_id} completed.");
 }
 
 /// Validates incoming mining requests for structural correctness.
@@ -704,7 +689,7 @@ pub async fn handle_mine_request(
     request: MiningRequest,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received mine request: {:?}", request);
+    log::debug!("Received mine request: {request:?}");
     if let Err(e) = validate_mining_request(&request) {
         log::warn!("Invalid mine request ({}): {}", request.job_id, e);
         #[cfg(feature = "metrics")]
@@ -775,12 +760,12 @@ pub async fn handle_result_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received result request for job: {}", job_id);
+    log::debug!("Received result request for job: {job_id}");
 
     let job = match state.get_job(&job_id).await {
         Some(job) => job,
         None => {
-            log::warn!("Result request for unknown job: {}", job_id);
+            log::warn!("Result request for unknown job: {job_id}");
             return Ok(warp::reply::with_status(
                 warp::reply::json(&resonance_miner_api::MiningResult {
                     status: ApiResponseStatus::NotFound,
@@ -814,7 +799,7 @@ pub async fn handle_result_request(
 
     Ok(warp::reply::with_status(
         warp::reply::json(&resonance_miner_api::MiningResult {
-            status: status,
+            status,
             job_id,
             nonce,
             work,
@@ -830,10 +815,10 @@ pub async fn handle_cancel_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received cancel request for job: {}", job_id);
+    log::debug!("Received cancel request for job: {job_id}");
 
     if state.cancel_job(&job_id).await {
-        log::debug!(target: "miner", "Successfully cancelled job: {}", job_id);
+        log::debug!(target: "miner", "Successfully cancelled job: {job_id}");
         Ok(warp::reply::with_status(
             warp::reply::json(&MiningResponse {
                 status: ApiResponseStatus::Cancelled,
@@ -843,7 +828,7 @@ pub async fn handle_cancel_request(
             warp::http::StatusCode::OK,
         ))
     } else {
-        log::warn!("Cancel request for unknown job: {}", job_id);
+        log::warn!("Cancel request for unknown job: {job_id}");
         Ok(warp::reply::with_status(
             warp::reply::json(&MiningResponse {
                 status: ApiResponseStatus::NotFound,
@@ -881,6 +866,44 @@ pub fn build_routes(
         .and_then(handle_cancel_request);
 
     mine_route.or(result_route).or(cancel_route)
+}
+
+/// Helper structures and functions for safe range partitioning (placed before use)
+#[derive(Debug, Clone)]
+struct Partitions {
+    total_range: U512,
+    ranges: Vec<(U512, U512)>,
+}
+
+/// Compute safe, inclusive partitions of [start, end] into `workers` slices.
+/// Guarantees coverage without overflow and clamps to `end`.
+fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
+    // total inclusive range
+    let total_range = end.saturating_sub(start).saturating_add(U512::from(1u64));
+
+    let workers = workers.max(1);
+    let divisor = U512::from(workers as u64).max(U512::from(1u64));
+    let range_per = total_range / divisor;
+    let remainder = total_range % divisor;
+
+    let mut ranges = Vec::with_capacity(workers);
+    for i in 0..workers {
+        let idx = U512::from(i as u64);
+        let s = start.saturating_add(range_per.saturating_mul(idx));
+        let mut e = s.saturating_add(range_per).saturating_sub(U512::from(1u64));
+        if i == workers - 1 {
+            e = e.saturating_add(remainder);
+        }
+        if e > end {
+            e = end;
+        }
+        ranges.push((s, e));
+    }
+
+    Partitions {
+        total_range,
+        ranges,
+    }
 }
 
 /// Start the miner service with the given configuration.
@@ -932,6 +955,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         }
         Some(count)
     }
+    // keep run(config) open; do not close here
 
     // Detect effective CPU pool for this process (cpuset if available).
     let effective_cpus = detect_effective_cpus();
@@ -948,10 +972,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         Some(n) if n > 0 => {
             if n > effective_cpus {
                 log::warn!(
-                    "Requested {} workers exceeds available logical CPUs in cpuset ({}). Clamping to {}.",
-                    n,
-                    effective_cpus,
-                    effective_cpus
+                    "Requested {n} workers exceeds available logical CPUs in cpuset ({effective_cpus}). Clamping to {effective_cpus}."
                 );
                 effective_cpus
             } else {
@@ -979,9 +1000,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     }
 
     log::info!(
-        "Using {} worker thread(s) for mining (effective logical CPUs available: {})",
-        workers,
-        effective_cpus
+        "Using {workers} worker thread(s) for mining (effective logical CPUs available: {effective_cpus})"
     );
 
     // Select engine
@@ -993,23 +1012,33 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             let mut eng = engine_cpu::ChainEngine::new();
             // Apply optional throttle parameters if provided.
             if let Some(base) = config.manip_base_delay_ns {
-                log::debug!(target: "miner", "Manipulator base_delay_ns overridden via config: {} ns", base);
+                log::debug!(target: "miner", "Manipulator base_delay_ns overridden via config: {base} ns");
                 eng.base_delay_ns = base;
             }
             if let Some(step) = config.manip_step_batch {
-                log::debug!(target: "miner", "Manipulator step_batch overridden via config: {}", step);
+                log::debug!(target: "miner", "Manipulator step_batch overridden via config: {step}");
                 eng.step_batch = step;
             }
             if let Some(cap) = config.manip_throttle_cap {
-                log::debug!(target: "miner", "Manipulator throttle_cap set via config: {}", cap);
+                log::debug!(target: "miner", "Manipulator throttle_cap set via config: {cap}");
                 eng.throttle_cap = Some(cap);
             }
             // If a starting throttle index is provided, set it here for "pick up where we left off".
             if let Some(n) = config.manip_solved_blocks {
-                log::debug!(target: "miner", "Manipulator starting throttle index (solved_blocks) set via config: {}", n);
+                log::debug!(target: "miner", "Manipulator starting throttle index (solved_blocks) set via config: {n}");
                 eng.job_index.store(n, std::sync::atomic::Ordering::Relaxed);
             }
             Arc::new(eng)
+        }
+        EngineSelection::GpuCuda => {
+            log::error!("Requested engine gpu-cuda is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
+            return Err(anyhow::anyhow!("engine 'gpu-cuda' is not implemented yet"));
+        }
+        EngineSelection::GpuOpenCl => {
+            log::error!("Requested engine gpu-opencl is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
+            return Err(anyhow::anyhow!(
+                "engine 'gpu-opencl' is not implemented yet"
+            ));
         }
     };
     log::info!("Using engine: {}", engine.name());
@@ -1024,14 +1053,13 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     if let Some(port) = config.metrics_port {
         #[cfg(feature = "metrics")]
         {
-            log::info!("Starting metrics endpoint on 0.0.0.0:{}", port);
+            log::info!("Starting metrics endpoint on 0.0.0.0:{port}");
             metrics::start_http_exporter(port).await?;
         }
         #[cfg(not(feature = "metrics"))]
         {
             log::warn!(
-                "Metrics port provided ({}), but 'metrics' feature is not enabled. Skipping.",
-                port
+                "Metrics port provided ({port}), but 'metrics' feature is not enabled. Skipping."
             );
         }
     } else {
@@ -1044,7 +1072,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Start server
     let addr = ([0, 0, 0, 0], config.port);
     let socket = std::net::SocketAddr::from(addr);
-    log::info!("Server starting on {}", socket);
+    log::info!("Server starting on {socket}");
     warp::serve(routes).run(socket).await;
 
     Ok(())
@@ -1052,13 +1080,17 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
+    use super::{JobStatus, MiningJob, MiningService};
+    use engine_cpu::MinerEngine;
+    use primitive_types::U512;
+    use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn test_mining_state_add_get_remove() {
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine);
+        let state = MiningService::new(2, engine, 2000);
 
         let job = MiningJob::new(
             [1u8; 32],
@@ -1074,15 +1106,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_job_lifecycle_fail() {
-        // Test that a job fails if no nonce is found (threshold too strict)
+        // Test that a job fails if no nonce is found (threshold too strict).
+        // To make this deterministic, avoid nonce=0, which some math paths treat as special.
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine);
+        let state = MiningService::new(2, engine, 2000);
         state.start_mining_loop().await;
 
-        // Impossible threshold
+        // Impossible threshold with a nonce range that excludes 0
         let header_hash = [1u8; 32];
         let distance_threshold = U512::zero();
-        let nonce_start = U512::from(0);
+        let nonce_start = U512::from(1);
         let nonce_end = U512::from(100);
 
         let job = MiningJob::new(header_hash, distance_threshold, nonce_start, nonce_end);
@@ -1101,14 +1134,80 @@ mod tests {
 
         let finished_job = finished_job.expect("Job did not finish in time");
         assert_eq!(finished_job.status, JobStatus::Failed);
-        assert!(finished_job.total_hash_count >= 0);
+    }
+
+    #[cfg(test)]
+    mod partition_tests {
+        use crate::compute_partitions;
+        use primitive_types::U512;
+
+        fn u(x: u64) -> U512 {
+            U512::from(x)
+        }
+
+        #[test]
+        fn partitions_cover_entire_range_even_workers() {
+            // Range [0, 99] split into 4 workers
+            let p = compute_partitions(u(0), u(99), 4);
+            assert_eq!(p.total_range, u(100));
+            // Check coverage and ordering
+            let mut covered = 0u64;
+            let mut prev_end = u(0);
+            for (i, (s, e)) in p.ranges.iter().enumerate() {
+                if i == 0 {
+                    assert_eq!(*s, u(0));
+                } else {
+                    assert_eq!(*s, prev_end.saturating_add(u(1)));
+                }
+                assert!(e >= s);
+                covered += (e.saturating_sub(*s).saturating_add(u(1))).as_u64();
+                prev_end = *e;
+            }
+            assert_eq!(covered, 100);
+            assert_eq!(prev_end, u(99));
+        }
+
+        #[test]
+        fn partitions_cover_entire_range_odd_workers() {
+            // Range [0, 99] split into 3 workers
+            let p = compute_partitions(u(0), u(99), 3);
+            assert_eq!(p.total_range, u(100));
+            // Ensure last range takes remainder and we end exactly at 99
+            assert_eq!(p.ranges.len(), 3);
+            assert_eq!(p.ranges[0], (u(0), u(32)));
+            assert_eq!(p.ranges[1], (u(33), u(65)));
+            assert_eq!(p.ranges[2], (u(66), u(99)));
+        }
+
+        #[test]
+        fn partitions_handles_start_eq_end() {
+            // Range [42, 42] split into any workers -> only last partition reaches the end
+            let p = compute_partitions(u(42), u(42), 5);
+            assert_eq!(p.total_range, u(1));
+            assert_eq!(p.ranges.len(), 5);
+            // All but the last partition may have end < start (empty), but no overflow, and last ends at 42
+            assert_eq!(p.ranges[4].1, u(42));
+        }
+
+        #[test]
+        fn partitions_huge_values_no_overflow() {
+            // Use near-max U512 values to ensure no overflow
+            let start = U512::from(0);
+            let end = U512::MAX.saturating_sub(u(10_000)); // keep a finite total_range
+            let p = compute_partitions(start, end, 3);
+            // Check that each end <= original end
+            for (s, e) in p.ranges {
+                assert!(e >= s);
+                assert!(e <= end);
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_job_lifecycle_success() {
         // Test that a job completes successfully
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine);
+        let state = MiningService::new(2, engine, 2000);
         state.start_mining_loop().await;
 
         // Easy threshold

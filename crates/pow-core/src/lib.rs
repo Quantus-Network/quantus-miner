@@ -44,20 +44,14 @@ pub mod compat {
         if nonce == [0u8; 64] {
             #[cfg(feature = "std")]
             error!(
-                "is_valid_nonce should not be called with 0 nonce, but was for header: {:?}",
-                header
+                "is_valid_nonce should not be called with 0 nonce, but was for header: {header:?}"
             );
             return (false, U512::zero());
         }
 
         let distance_achieved = get_nonce_distance(header, nonce);
         #[cfg(feature = "std")]
-        debug!(
-            target: "pow-core",
-            "distance = {}..., threshold = {}...",
-            distance_achieved,
-            threshold
-        );
+        debug!(target: "pow-core", "distance = {distance_achieved}..., threshold = {threshold}...");
 
         (distance_achieved <= threshold, distance_achieved)
     }
@@ -190,7 +184,7 @@ fn get_nonce_distance_impl(header: [u8; 32], nonce: [u8; 64]) -> U512 {
 
     let distance = target.bitxor(nonce_element);
     #[cfg(feature = "std")]
-    debug!(target: "pow-core", "distance = {}", distance);
+    debug!(target: "pow-core", "distance = {distance}");
     distance
 }
 
@@ -198,7 +192,7 @@ fn get_nonce_distance_impl(header: [u8; 32], nonce: [u8; 64]) -> U512 {
 ///
 /// - m: 256-bit derived via SHA2-256(header)
 /// - n: 512-bit derived via SHA3-512(header), iteratively rehashed until valid:
-///      (odd, composite, coprime with m, and n > m)
+///   (odd, composite, coprime with m, and n > m)
 fn get_random_rsa_impl(header: &[u8; 32]) -> (U512, U512) {
     use sha2::{Digest, Sha256};
     use sha3::Sha3_512;
@@ -383,12 +377,8 @@ fn sha3_512_impl(input: U512) -> U512 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex::FromHex;
 
-    fn u512_from_hex(s: &str) -> U512 {
-        let bytes = <[u8; 64]>::from_hex(s).unwrap();
-        U512::from_big_endian(&bytes)
-    }
+    // removed unused helper u512_from_hex
 
     #[test]
     fn compat_distance_matches_context_distance() {

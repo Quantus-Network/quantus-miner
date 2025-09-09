@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Local QPoW math core for the Quantus external miner (reference + optimized paths)"
 license = "MIT OR Apache-2.0"
-keywords = ["quantus", "qpow", "pow", "crypto", "bigint"]
-categories = ["cryptography", "algorithms", "no-std"]
+keywords = ["bigint", "crypto", "pow", "qpow", "quantus"]
+categories = ["algorithms", "cryptography", "no-std"]
 
 [lib]
 path = "src/lib.rs"
@@ -13,13 +13,13 @@ crate-type = ["rlib"]
 
 [features]
 # Enable std by default; allows logging and faster hash crates.
-default = ["std", "baseline"]
+default = ["baseline", "std"]
 
 # std feature wires through to dependencies that have separate std/no_std builds.
 std = [
-    "primitive-types/std",
-    "sha2/std",
-    "sha3/std",
+	"primitive-types/std",
+	"sha2/std",
+	"sha3/std",
 ]
 
 # Baseline/reference implementation using BigUint-backed modular exponentiation.

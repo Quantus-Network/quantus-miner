@@ -85,4 +85,11 @@ The miner previously used a flag named `--num-cores`. To better reflect intent, 
 
 * `POST /mine`: Submits a new mining job.
 * `GET /result/{job_id}`: Retrieves the status and result of a specific mining job.
-* `POST /cancel/{job_id}`: Cancels an ongoing mining job. 
+* `POST /cancel/{job_id}`: Cancels an ongoing mining job.
+
+## Implementation and PR review docs
+
+These documents provide reviewers with the authoritative context for changes. Commits and pull requests should link to the relevant prompt/response entry.
+
+- Reviewer index: docs/implementation/readme.md
+- Authoring/process guide: agents.md

@@ -10,7 +10,7 @@ description = "Metrics and Prometheus exporter utilities for the Quantus Externa
 default = ["registry"]
 registry = []
 # Enable a Warp-based HTTP exporter (used when --metrics-port is provided).
-http-exporter = ["dep:warp", "dep:tokio", "dep:serde", "dep:serde_json"]
+http-exporter = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:warp"]
 
 [dependencies]
 anyhow = { workspace = true }

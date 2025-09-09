@@ -251,7 +251,6 @@ impl MinerEngine for ChainManipulatorEngine {
         // Per-block throttling: do NOT increment here. We increment on Found (i.e., when a block is solved).
         let ctx = JobContext::new(header_hash, threshold);
         // Debug: log current throttle state at job start
-        #[cfg(feature = "std")]
         log::debug!(
             target: "miner",
             "manipulator throttle start: solved_blocks={}, sleep_ns_per_batch={}, step_batch={}",
@@ -303,18 +302,17 @@ impl MinerEngine for ChainManipulatorEngine {
             if is_valid_distance(ctx, distance) {
                 let work = current.to_big_endian();
                 // Increment solved-block counter so the NEXT block throttles more.
-                let new_idx = self.job_index.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-                #[cfg(feature = "std")]
+                let _new_idx = self.job_index.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 {
                     let capped = if let Some(cap) = self.throttle_cap {
-                        std::cmp::min(new_idx, cap)
+                        std::cmp::min(_new_idx, cap)
                     } else {
-                        new_idx
+                        _new_idx
                     };
                     log::debug!(
                         target: "miner",
                         "manipulator throttle increment: solved_blocks={} (next sleep_ns_per_batch={}, cap={:?})",
-                        new_idx,
+                        _new_idx,
                         self.base_delay_ns.saturating_mul(capped),
                         self.throttle_cap
                     );

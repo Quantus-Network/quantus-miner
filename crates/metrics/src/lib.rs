@@ -124,7 +124,6 @@ static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 
 /// Access the global Prometheus registry used by this crate.
 // Engine-aware, per-job, and per-thread labeled metrics
-
 static JOB_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
