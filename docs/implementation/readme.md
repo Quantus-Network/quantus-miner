@@ -31,6 +31,9 @@ Table of contents
 - 07
   - [07-prompt-stable-clippy-taplo-and-gpu-enum.md](./07-prompt-stable-clippy-taplo-and-gpu-enum.md)
   - [07-response-stable-clippy-taplo-and-gpu-enum.md](./07-response-stable-clippy-taplo-and-gpu-enum.md)
+- 08
+  - [08-prompt-cpuset-metric-and-systemd-units.md](./08-prompt-cpuset-metric-and-systemd-units.md)
+  - [08-response-cpuset-metric-and-systemd-units.md](./08-response-cpuset-metric-and-systemd-units.md)
 
 For authors and agents
 Authoring workflow, conventions, and commit/PR linkage requirements are documented in /agents.md.

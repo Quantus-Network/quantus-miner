@@ -62,6 +62,18 @@ static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "miner_effective_cpus",
+        "Detected logical CPU capacity available to this process (cpuset-aware)",
+    )
+    .expect("create miner_effective_cpus");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_effective_cpus");
+    g
+});
+
 static MINE_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -124,6 +136,10 @@ static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 
 /// Access the global Prometheus registry used by this crate.
 // Engine-aware, per-job, and per-thread labeled metrics
+pub fn set_effective_cpus(n: i64) {
+    EFFECTIVE_CPUS.set(n);
+}
+
 static JOB_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(

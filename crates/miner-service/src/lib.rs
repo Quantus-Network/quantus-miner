@@ -911,22 +911,24 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
 /// - Optionally exposes a metrics endpoint if `metrics_port` is provided and the `metrics` feature is enabled.
 /// - Serves the HTTP API on `config.port`.
 pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
-    // Determine available logical CPUs, preferring the cgroup cpuset when present.
-    fn detect_effective_cpus() -> usize {
+    // Determine available logical CPUs and the cpuset mask (if any), preferring cgroup v2.
+    fn detect_effective_cpus_and_mask() -> (usize, Option<String>) {
         // Try cgroup v2 effective cpuset
         if let Ok(mask) = std::fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective") {
-            if let Some(count) = parse_cpuset_to_count(mask.trim()) {
-                return count.max(1);
+            let trimmed = mask.trim();
+            if let Some(count) = parse_cpuset_to_count(trimmed) {
+                return (count.max(1), Some(trimmed.to_string()));
             }
         }
         // Fallback to legacy cgroup v1 path
         if let Ok(mask) = std::fs::read_to_string("/sys/fs/cgroup/cpuset/cpuset.cpus") {
-            if let Some(count) = parse_cpuset_to_count(mask.trim()) {
-                return count.max(1);
+            let trimmed = mask.trim();
+            if let Some(count) = parse_cpuset_to_count(trimmed) {
+                return (count.max(1), Some(trimmed.to_string()));
             }
         }
         // Fallback to all logical CPUs
-        num_cpus::get().max(1)
+        (num_cpus::get().max(1), None)
     }
 
     // Parse cpuset list/ranges like "0-3,6,8-11" into a count
@@ -958,7 +960,17 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // keep run(config) open; do not close here
 
     // Detect effective CPU pool for this process (cpuset if available).
-    let effective_cpus = detect_effective_cpus();
+    let (effective_cpus, cpuset_mask) = detect_effective_cpus_and_mask();
+    if let Some(mask) = cpuset_mask.as_ref() {
+        log::debug!(target: "miner", "Detected cpuset mask: {}", mask);
+    } else {
+        log::debug!(target: "miner", "No cpuset mask detected; using full logical CPU count");
+    }
+    #[cfg(feature = "metrics")]
+    {
+        // Expose effective CPUs as a gauge for dashboards/alerts.
+        metrics::set_effective_cpus(effective_cpus as i64);
+    }
 
     // Default workers: leave at least half of resources for other processes.
     // Use max(1, effective_cpus / 2), but also cap at effective_cpus - 1 if possible.
