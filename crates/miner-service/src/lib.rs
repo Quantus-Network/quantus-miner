@@ -44,6 +44,7 @@ pub struct ServiceConfig {
 pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
+    CpuMontgomery,
     CpuChainManipulator,
     GpuCuda,
     GpuOpenCl,
@@ -70,6 +71,7 @@ impl fmt::Display for ServiceConfig {
         let engine = match self.engine {
             EngineSelection::CpuBaseline => "cpu-baseline",
             EngineSelection::CpuFast => "cpu-fast",
+            EngineSelection::CpuMontgomery => "cpu-montgomery",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
             EngineSelection::GpuCuda => "gpu-cuda",
             EngineSelection::GpuOpenCl => "gpu-opencl",
@@ -1046,6 +1048,17 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
         EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
         EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
+        EngineSelection::CpuMontgomery => {
+            #[cfg(feature = "montgomery")]
+            {
+                Arc::new(engine_montgomery::MontgomeryCpuEngine::new())
+            }
+            #[cfg(not(feature = "montgomery"))]
+            {
+                // Fallback if montgomery backend is not compiled in
+                Arc::new(engine_cpu::FastCpuEngine::new())
+            }
+        }
         EngineSelection::CpuChainManipulator => {
             let mut eng = engine_cpu::ChainEngine::new();
             // Apply optional throttle parameters if provided.
