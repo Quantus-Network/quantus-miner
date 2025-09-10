@@ -6,6 +6,7 @@ use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
 use primitive_types::U512;
 use resonance_miner_api::*;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -61,6 +62,31 @@ impl Default for ServiceConfig {
             manip_throttle_cap: None,
             engine: EngineSelection::CpuBaseline,
         }
+    }
+}
+
+impl fmt::Display for ServiceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let engine = match self.engine {
+            EngineSelection::CpuBaseline => "cpu-baseline",
+            EngineSelection::CpuFast => "cpu-fast",
+            EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
+            EngineSelection::GpuCuda => "gpu-cuda",
+            EngineSelection::GpuOpenCl => "gpu-opencl",
+        };
+        write!(
+            f,
+            "port={}, workers={:?}, engine={}, metrics_port={:?}, progress_chunk_ms={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            self.port,
+            self.workers,
+            engine,
+            self.metrics_port,
+            self.progress_chunk_ms,
+            self.manip_solved_blocks,
+            self.manip_base_delay_ns,
+            self.manip_step_batch,
+            self.manip_throttle_cap
+        )
     }
 }
 
@@ -1054,6 +1080,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         }
     };
     log::info!("Using engine: {}", engine.name());
+    log::info!("Service configuration: {}", config);
 
     let progress_chunk_ms = config.progress_chunk_ms.unwrap_or(2000);
     let service = MiningService::new(workers, engine.clone(), progress_chunk_ms);

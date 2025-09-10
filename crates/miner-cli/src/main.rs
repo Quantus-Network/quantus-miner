@@ -84,21 +84,8 @@ async fn main() {
     }
     env_logger::init();
 
-    // Log effective configuration
+    // Log effective configuration (concise; see ServiceConfig Display)
     log::info!("Starting external miner service...");
-    log::info!("API listening port: {}", args.port);
-    match args.workers {
-        Some(n) if n > 0 => log::info!("Using specified number of workers: {n}"),
-        Some(_) => {
-            log::warn!("Workers must be positive. Defaulting to all available logical CPUs.")
-        }
-        None => log::info!("Using all available logical CPUs (auto-detected)."),
-    }
-    match args.metrics_port {
-        Some(p) => log::info!("Metrics enabled on port {p}"),
-        None => log::info!("Metrics disabled (no --metrics-port provided)"),
-    }
-    log::info!("Selected engine: {:?}", args.engine);
 
     let config = ServiceConfig {
         port: args.port,
@@ -111,6 +98,7 @@ async fn main() {
         manip_throttle_cap: args.manip_throttle_cap,
         engine: args.engine.into(),
     };
+    log::info!("Effective config: {}", config);
 
     if let Err(e) = run(config).await {
         log::error!("Miner service terminated with error: {e:?}");
