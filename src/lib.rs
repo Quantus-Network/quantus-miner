@@ -11,7 +11,7 @@ Use the new workspace crates instead of the old root library:
   - Examples:
       - cargo run -p miner-cli -- --port 9833
       - cargo run -p miner-cli -- --port 9833 --metrics-port 9900
-      - cargo run -p miner-cli -- --num-cores 4
+      - cargo run -p miner-cli -- --workers 4
 
 - crates/miner-service
   - The service layer: HTTP API (compatible with the node), job orchestration,
@@ -44,5 +44,5 @@ Notes:
 - Build the binary via the new CLI package:
     cargo build -p miner-cli --release
 - Run the service:
-    cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--num-cores N]
+    cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--workers N]
 */

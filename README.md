@@ -1,8 +1,8 @@
 # External Miner Service for Quantus Network
 
-Note: This repository is now a Cargo workspace. Build and run the CLI with (the --num-cores flag remains available as an alias for --cores):
+Note: This repository is now a Cargo workspace. Build and run the CLI with:
 - cargo build -p miner-cli --release
-- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--cores N]
+- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--workers N]
 
 This crate provides an external mining service that can be used with a Quantus Network node. It exposes an HTTP API for
 managing mining jobs.
@@ -30,7 +30,7 @@ The service can be configured using command-line arguments or environment variab
 Example:
 
 ```bash
-# Run on the default port 9833 with all available cores
+# Run on the default port 9833 using about half of total cpu resources
 ../target/release/quantus-miner
 
 # Run on a custom port with 4 workers (logical CPUs)
@@ -58,15 +58,14 @@ RUST_LOG=info,miner=debug ../target/release/quantus-miner --workers 4
 
 ```
 
-The service will start and log messages to the console, indicating the port it's listening on and the number of cores
-it's using.
+The service will start and log messages to the console, indicating the port it's listening on and the number of worker threads in use.
 
 Example output:
 
 ```
 INFO  external_miner > Starting external miner service...
 INFO  external_miner > Using auto-detected workers (leaving headroom): 4
-INFO  external_miner > Server starting on 0.0.0.0:9833 
+INFO  external_miner > Server starting on 0.0.0.0:9833
 ```
 
 ## API Specification
