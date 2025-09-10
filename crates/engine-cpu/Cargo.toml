@@ -1,0 +1,29 @@
+[package]
+name = "engine-cpu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CPU mining engine implementation for the Quantus External Miner"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+# Default to the baseline/reference implementation; enable others as needed.
+default = ["baseline"]
+
+# Map engine features to pow-core features so engine-cpu consumers can toggle them.
+baseline = ["pow-core/baseline"]
+montgomery = ["pow-core/montgomery"]
+simd-sha3 = ["pow-core/simd-sha3"]
+
+[dependencies]
+pow-core = { path = "../pow-core" }
+primitive-types = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

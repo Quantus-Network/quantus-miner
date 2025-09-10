@@ -20,37 +20,28 @@ jobs:
   quality-control:
     runs-on: ubuntu-latest
     steps:
-      -
-        uses: actions/checkout@v4
-      -
-        name: setup rust
+      - uses: actions/checkout@v4
+      - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           components: rustfmt, clippy
-      -
-        name: install taplo
+      - name: install taplo
         run: cargo install taplo-cli --locked
-      - 
-        name: taplo
+      - name: taplo
         run: taplo format --check --config taplo.toml
-      -
-        name: format
+      - name: format
         run: cargo fmt --all -- --check
         timeout-minutes: 5
-      -
-        name: compile
+      - name: compile
         run: cargo build --locked --workspace
         timeout-minutes: 90
-      -
-        name: clippy
-        run: SKIP_WASM_BUILD=1 cargo clippy --locked --workspace
+      - name: clippy
+        run: cargo clippy --locked --workspace
         timeout-minutes: 30
-      -
-        name: test
-        run: SKIP_WASM_BUILD=1 cargo test --locked --workspace
+      - name: test
+        run: cargo test --locked --workspace
         timeout-minutes: 15
-      -
-        name: doc
-        run: SKIP_WASM_BUILD=1 cargo doc --locked --workspace --no-deps
+      - name: doc
+        run: cargo doc --locked --workspace --no-deps
         timeout-minutes: 15

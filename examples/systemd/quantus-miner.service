@@ -1,0 +1,91 @@
+# Quantus External Miner - systemd unit
+#
+# Install:
+#   - Place this file at: /etc/systemd/system/quantus-miner.service
+#   - Optional environment file:
+#       * /etc/default/quantus-miner (Debian/Ubuntu)
+#       * /etc/sysconfig/quantus-miner (RHEL/CentOS/Fedora)
+#   - Optional overrides (recommended for CPU affinity/scheduling):
+#       * Create drop-ins in: /etc/systemd/system/quantus-miner.service.d/*.conf
+#         See examples in: examples/systemd/overrides/
+#
+# Usage:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now quantus-miner.service
+#
+# Notes:
+#   - The miner CLI supports environment variables for all flags (see README):
+#       MINER_PORT, MINER_METRICS_PORT, MINER_WORKERS, MINER_ENGINE,
+#       MINER_PROGRESS_CHUNK_MS,
+#       MINER_MANIP_SOLVED_BLOCKS, MINER_MANIP_BASE_DELAY_NS,
+#       MINER_MANIP_STEP_BATCH, MINER_MANIP_THROTTLE_CAP.
+#     This unit relies on those env vars (set in /etc/default|/etc/sysconfig) so
+#     ExecStart can remain stable and simple.
+#   - The service logs the detected cpuset mask (if any) and emits a
+#     miner_effective_cpus metric when metrics are enabled.
+
+[Unit]
+Description=Quantus External Miner Service
+Wants=network-online.target
+After=network-online.target
+Documentation=https://github.com/Quantus-Network/quantus-external-miner
+
+[Service]
+Type=simple
+
+# Run under a dedicated service account (create if it does not exist).
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin quantus
+User=quantus
+Group=quantus
+
+# State directory (auto-created by systemd with correct permissions)
+StateDirectory=quantus-miner
+WorkingDirectory=/var/lib/quantus-miner
+
+# Load environment from distro-specific location if present.
+# Debian/Ubuntu:
+EnvironmentFile=-/etc/default/quantus-miner
+# RHEL/CentOS/Fedora:
+EnvironmentFile=-/etc/sysconfig/quantus-miner
+
+# Default logging level (can be overridden in env files)
+Environment=RUST_LOG=info
+
+# Launch the miner. All configuration should be passed via environment vars
+# (preferred) or via EXTRA_MINER_FLAGS in the env file for additional arguments.
+ExecStart=/usr/local/bin/quantus-miner $EXTRA_MINER_FLAGS
+
+# Graceful shutdown and restart behavior
+Restart=always
+RestartSec=2s
+TimeoutStopSec=30s
+KillSignal=SIGINT
+StartLimitIntervalSec=0
+
+# Journald logging
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening (relaxed enough to allow network + file access)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallFilter=@system-service
+
+# Resource controls (tune via drop-in overrides for your environment)
+# These are commented here; see examples/systemd/overrides for presets.
+# Nice=-5
+# IOSchedulingClass=best-effort
+# IOSchedulingPriority=2
+# CPUAffinity=0 2 4 6
+# CPUSchedulingPolicy=other
+# CPUWeight=90
+# MemoryMax=infinity
+# TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

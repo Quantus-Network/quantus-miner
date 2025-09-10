@@ -1,0 +1,48 @@
+[package]
+name = "pow-core"
+version = "0.1.0"
+edition = "2021"
+description = "Local QPoW math core for the Quantus external miner (reference + optimized paths)"
+license = "MIT OR Apache-2.0"
+keywords = ["bigint", "crypto", "pow", "qpow", "quantus"]
+categories = ["algorithms", "cryptography", "no-std"]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+# Enable std by default; allows logging and faster hash crates.
+default = ["baseline", "std"]
+
+# std feature wires through to dependencies that have separate std/no_std builds.
+std = [
+	"primitive-types/std",
+	"sha2/std",
+	"sha3/std",
+]
+
+# Baseline/reference implementation using BigUint-backed modular exponentiation.
+baseline = []
+
+# Enable accelerated modular arithmetic (e.g., Montgomery multiplication for 512-bit modulus).
+montgomery = []
+
+# Optionally enable a faster SHA3/Keccak path (hook for SIMD/alt backends).
+simd-sha3 = []
+
+# Optional shared types/helpers for GPU engines (no device code here).
+gpu-interop = []
+
+[dependencies]
+log = { workspace = true }
+primitive-types = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
