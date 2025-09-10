@@ -147,6 +147,8 @@ impl MinerEngine for MontgomeryCpuEngine {
 /// to wire up a fixed-width limb backend for 512-bit operations.
 mod mont_portable {
     use super::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::asm;
 
     // Montgomery context with portable CIOS 8x64 implementation (u128 intermediates).
     // Limbs are stored little-endian (limb 0 is least significant).
@@ -213,12 +215,20 @@ mod mont_portable {
             let r2 = u512_to_le(r2_u512);
             let m = u512_to_le(ctx.m);
 
-            // Choose mul_fn by tag; fall back to portable when not applicable on this arch.
+            // Choose mul_fn by tag; fall back to portable when not applicable or CPU features missing.
             let (mul_fn, _backend): (MulFn, &'static str) = match tag {
                 "x86_64-bmi2-adx" | "bmi2-adx" => {
                     #[cfg(target_arch = "x86_64")]
                     {
-                        (mont_mul_bmi2_adx, "x86_64-bmi2-adx")
+                        if std::is_x86_feature_detected!("bmi2")
+                            && std::is_x86_feature_detected!("adx")
+                        {
+                            (mont_mul_bmi2_adx, "x86_64-bmi2-adx")
+                        } else if std::is_x86_feature_detected!("bmi2") {
+                            (mont_mul_bmi2, "x86_64-bmi2")
+                        } else {
+                            (mont_mul_portable, "portable")
+                        }
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     {
@@ -228,7 +238,11 @@ mod mont_portable {
                 "x86_64-bmi2" | "bmi2" => {
                     #[cfg(target_arch = "x86_64")]
                     {
-                        (mont_mul_bmi2, "x86_64-bmi2")
+                        if std::is_x86_feature_detected!("bmi2") {
+                            (mont_mul_bmi2, "x86_64-bmi2")
+                        } else {
+                            (mont_mul_portable, "portable")
+                        }
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     {
@@ -534,9 +548,113 @@ mod mont_portable {
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // BMI2+ADX-optimized path placeholder currently delegates to BMI2-only kernel.
-        // TODO: Replace with MULX + dual carry chains using ADCX/ADOX inline asm for higher ILP.
-        mont_mul_bmi2(a, b, n, n0_inv)
+        // BMI2+ADX-optimized CIOS using MULX + dual carry chains (ADCX/ADOX).
+        // We retain the same CIOS structure as the portable path:
+        //  - acc is a 9-limb accumulator in 64-bit limbs (little-endian)
+        //  - For each i:
+        //      acc += a[i] * b
+        //      m = (acc[0] * n0_inv) mod 2^64
+        //      acc += m * n
+        //      acc >>= 64 (drop acc[0])
+        //
+        // The inner adds use two independent carry chains:
+        //  - ADCX chain accumulates low halves into acc[j] (carry via CF)
+        //  - ADOX chain accumulates high halves into a separate running carry (OF)
+        //
+        // Note: We keep the logic in Rust around the asm! blocks for readability; the hot add paths
+        // are emitted via inline assembly for ADX utilization.
+        use core::arch::x86_64::_mulx_u64;
+        use std::arch::asm;
+
+        let mut acc: [u64; 9] = [0; 9];
+
+        // helper: add (lo, hi) into acc[j] with dual carry chains (CF/OF)
+        #[inline(always)]
+        unsafe fn adx_accumulate(acc_j: &mut u64, lo: u64, hi: u64, of_carry: &mut u64) {
+            // Clear CF and OF, then do:
+            //   acc_j += lo using ADCX (CF chain)
+            //   of_carry += hi using ADOX (OF chain)
+            asm!(
+                // Clear CF and OF carry chains
+                "xor r8d, r8d",
+                "adcx r8, r8",
+                "adox r8, r8",
+                // acc_j = acc_j + lo + CF
+                "adcx {acc_j}, {lo}",
+                // of_carry = of_carry + hi + OF
+                "adox {ofc}, {hi}",
+                acc_j = inout(reg) *acc_j,
+                ofc   = inout(reg) *of_carry,
+                lo    = in(reg) lo,
+                hi    = in(reg) hi,
+                out("r8") _,
+                options(nomem, nostack)
+            );
+        }
+
+        // helper: fold OF carry into next limb (acc[k] += of_carry)
+        #[inline(always)]
+        unsafe fn adx_fold_of(acc_k: &mut u64, of_carry: &mut u64) {
+            // Fold the overflow-chain carry into acc_k using ADCX with cleared CF.
+            asm!(
+                "xor r8d, r8d",
+                "adcx r8, r8",
+                "adcx {acc_k}, {ofc}",
+                acc_k = inout(reg) *acc_k,
+                ofc   = inout(reg) *of_carry,
+                out("r8") _,
+                options(nomem, nostack)
+            );
+        }
+
+        for i in 0..8 {
+            // acc += a[i] * b
+            let ai = a[i];
+            let mut of_carry: u64 = 0;
+            let mut carry_hi_into_next: u64 = 0;
+
+            // iterate j=0..7: accumulate ai*b[j] into acc[j].. with dual chains
+            for j in 0..8 {
+                let mut hi: u64 = 0;
+                let lo: u64 = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+
+                // acc[j] += lo (CF chain), of_carry += hi (OF chain)
+                unsafe { adx_accumulate(&mut acc[j], lo, hi, &mut of_carry) };
+            }
+            // Propagate remaining OF carry into acc[8]
+            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
+
+            // m = (acc[0] * n0_inv) mod 2^64
+            let m: u64 = (acc[0]).wrapping_mul(n0_inv);
+
+            // acc += m * n
+            of_carry = 0;
+            for j in 0..8 {
+                let mut hi2: u64 = 0;
+                let lo2: u64 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+
+                // acc[j] += lo2 (CF chain), of_carry += hi2 (OF chain)
+                unsafe { adx_accumulate(&mut acc[j], lo2, hi2, &mut of_carry) };
+            }
+            // Propagate remaining OF carry into acc[8]
+            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
+
+            // shift acc right by one limb (drop acc[0])
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
+            acc[8] = 0;
+        }
+
+        // Conditional subtraction: if acc >= n then acc -= n
+        let mut res = [0u64; 8];
+        res.copy_from_slice(&acc[0..8]);
+
+        if ge_le(&res, n) {
+            sub_le_in_place(&mut res, n);
+        }
+
+        res
     }
 
     #[cfg(test)]
