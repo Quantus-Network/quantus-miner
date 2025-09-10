@@ -497,6 +497,7 @@ dependencies = [
  "crypto-bigint",
  "engine-cpu",
  "log",
+ "metrics",
  "num-traits 0.2.19",
  "pow-core",
  "primitive-types",
