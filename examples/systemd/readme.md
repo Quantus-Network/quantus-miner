@@ -127,4 +127,3 @@ Operational tips
 
 Support
 - Repository: https://github.com/Quantus-Network/quantus-external-miner
-- See docs/implementation/ for iteration-specific design and operational notes (metrics, throttling, partitioning, etc.).

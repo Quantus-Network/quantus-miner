@@ -3,8 +3,8 @@
 This document defines the authoring workflow and process conventions for proposal/response documentation and how commits and PRs must link to those docs. It exists to make PR review fast, predictable, and auditable.
 
 If you’re reviewing a PR, the canonical technical narrative lives in:
-- docs/implementation/readme.md (index of iterations)
-- The prompt/response pair referenced by the PR and its commits
+- This process guide (agents.md) is the single source of truth for authoring and process now.
+- Commits and PRs should include clear, self-contained descriptions and link to relevant code diffs.
 
 If you’re authoring changes or operating as an agent, follow this guide.
 
@@ -20,9 +20,7 @@ If you’re authoring changes or operating as an agent, follow this guide.
 
 ## Where things live
 
-- Iteration docs (prompts and responses): docs/implementation/
-  - Indexed in docs/implementation/readme.md (for reviewers)
-- This process guide: /agents.md (for authors/agents)
+- This process guide: /agents.md (for authors/agents and reviewers)
 - Repo overview and user-facing guidance: /README.md
 
 ---
@@ -37,44 +35,34 @@ Each iteration is a prompt/response pair using a two-digit sequence:
 Conventions:
 - Two-digit sequence numbers (00, 01, …, 10, 11, …) in chronological order.
 - short-topic is lowercase, words separated by hyphens.
-- The index is docs/implementation/readme.md (lowercase).
+Remove standalone iteration documents. Capture sufficient context directly in commit messages and PR descriptions.
 
-Examples:
-- 06-prompt-manipulator-and-difficulty-overlay.md
-- 06-response-manipulator-and-difficulty-overlay.md
-- 07-prompt-stable-clippy-taplo-and-gpu-enum.md
-- 07-response-stable-clippy-taplo-and-gpu-enum.md
+Commit message guidance:
+- Title: imperative, concise
+- Body: motivation, high-level changes, key code paths, risks/mitigations
+- Footer: links to key diffs or files (if helpful)
 
 ---
 
 ## Authoring workflow
 
-1) Plan the change (create a Prompt)
-- File name: NN-prompt-<short-topic>.md
-- Include:
-  - Background/context
-  - Objectives and acceptance criteria
-  - Scope of work (what will change, by crate/file if known)
-  - Non-goals (explicitly out of scope)
-  - Risks and mitigations
-  - Validation plan (tests, metrics, manual checks)
-  - CI expectations (what must pass)
+1) Plan the change
+- Capture background, objectives, scope, non-goals, risks/mitigations, and validation in the PR description template (see below).
+- Prefer concise planning; link to tracking issues when relevant.
 
 2) Implement the change
 - Commit in small, reviewable steps.
-- Keep messages crisp and reference the prompt.
+- Keep messages crisp; reference the PR and key deltas.
 
-3) Document the outcome (create a Response)
-- File name: NN-response-<short-topic>.md
-- Include:
-  - Summary of changes vs. the prompt’s plan
-  - Key diffs by area (runtime, API, engine, metrics, tests)
-  - Any deviations from the prompt (and why)
-  - Validation results (what passed, what you measured)
-  - Residual risks / follow-ups
+3) Document the outcome
+- Update the PR description with deviations from plan, validation results, and any follow-ups.
 
-4) Update the index
-- Add links to both files in docs/implementation/readme.md (reviewer index).
+PR description template (copy/paste into GitHub):
+- Overview
+- What changed (by area/crate)
+- Validation (tests, clippy, taplo, manual checks)
+- Risks and mitigations
+- Follow-ups (if any)
 
 ---
 
@@ -188,7 +176,7 @@ Runtime behavior:
 
 - Avoid renaming CLI options unless clearly justified; when renaming, provide an alias window and document migration in the response doc.
 - When adding features (e.g., new engines), default to conservative runtime behavior and explicit logs on unsupported paths.
-- For system-level advice (affinity, priorities), prefer documenting in docs/implementation and cross-linking from README as needed.
+- For system-level advice (affinity, priorities), document briefly in README and/or example files (e.g., examples/systemd), and link from the PR description if relevant.
 
 ---
 
@@ -204,12 +192,11 @@ Q: Why remove series on job end rather than setting 0?
 - To avoid scrape-timing artifacts and enable cleaner aggregations. This is intentional and should be maintained.
 
 Q: Where do I put process/authoring details?
-- In this file (/agents.md). The docs/implementation/readme.md is optimized for PR reviewers and links here for process details.
+- In this file (/agents.md). This is the single reference for authoring and process guidance.
 
 ---
 
 ## Quick links
 
-- Reviewer index: docs/implementation/readme.md
 - Process guide (this file): /agents.md
 - Workspace README: /README.md
