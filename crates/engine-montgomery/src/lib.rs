@@ -147,7 +147,7 @@ impl MinerEngine for MontgomeryCpuEngine {
 /// to wire up a fixed-width limb backend for 512-bit operations.
 mod mont_portable {
     use super::*;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use std::arch::asm;
 
     // Montgomery context with portable CIOS 8x64 implementation (u128 intermediates).
@@ -245,6 +245,16 @@ mod mont_portable {
                         }
                     }
                     #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        (mont_mul_portable, "portable")
+                    }
+                }
+                "aarch64-umulh" | "umulh" => {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        (mont_mul_aarch64, "aarch64-umulh")
+                    }
+                    #[cfg(not(target_arch = "aarch64"))]
                     {
                         (mont_mul_portable, "portable")
                     }
@@ -475,7 +485,7 @@ mod mont_portable {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            (mont_mul_portable, "aarch64-generic")
+            (mont_mul_aarch64, "aarch64-umulh")
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
@@ -657,6 +667,62 @@ mod mont_portable {
         res
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    #[allow(unsafe_code)]
+    fn mont_mul_aarch64(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
+        use core::arch::aarch64::umulh;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
+        let mut acc = [0u128; 9];
+        for i in 0..8 {
+            let ai = a[i];
+            // acc += a[i] * b
+            let mut carry: u128 = 0;
+            for j in 0..8 {
+                // low 64-bit product
+                let lo = ai.wrapping_mul(b[j]);
+                // high 64-bit product via UMULH intrinsic
+                let hi = unsafe { umulh(ai, b[j]) } as u128;
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + hi;
+            }
+            acc[8] = acc[8] + carry;
+
+            // m = (acc[0] * n0_inv) mod 2^64
+            let m = ((acc[0] as u64).wrapping_mul(n0_inv)) as u64;
+
+            // acc += m * n
+            let mut carry2: u128 = 0;
+            for j in 0..8 {
+                let lo2 = m.wrapping_mul(n[j]);
+                let hi2 = unsafe { umulh(m, n[j]) } as u128;
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + hi2;
+            }
+            acc[8] = acc[8] + carry2;
+
+            // shift acc right by one limb
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
+            acc[8] = 0;
+        }
+
+        // Convert acc to result limbs
+        let mut res = [0u64; 8];
+        for j in 0..8 {
+            res[j] = acc[j] as u64;
+        }
+
+        // Conditional subtraction: if res >= n then res -= n
+        if ge_le(&res, n) {
+            sub_le_in_place(&mut res, n);
+        }
+        res
+    }
+
     #[cfg(test)]
     mod prop_tests {
         use super::*;
@@ -775,6 +841,37 @@ mod mont_portable {
                     assert_eq!(hm, hf, "hash_count mismatch on Exhausted");
                 }
                 (m, f) => panic!("expected matching status, got mont={m:?}, fast={f:?}"),
+            }
+        }
+
+        #[test]
+        fn montgomery_aarch64_equivalence_to_portable_when_available() {
+            // On aarch64, ensure UMULH/ADCS path matches portable. On other arches this test
+            // still runs but both tags fall back to portable.
+            let ctx = make_ctx_with_header_byte(0x77u8);
+            let mont_port = MontCtx::from_ctx_with_backend_tag(&ctx, "portable");
+            let mont_arm = MontCtx::from_ctx_with_backend_tag(&ctx, "aarch64-umulh");
+
+            let start = U512::from(4242u64);
+            let mut y_ref = init_worker_y0(&ctx, start);
+
+            let mut y_hat_port = mont_port.to_mont_le_limbs(&y_ref);
+            let mut y_hat_arm = mont_arm.to_mont_le_limbs(&y_ref);
+
+            let m_hat_port = mont_port.m_hat;
+            let m_hat_arm = mont_arm.m_hat;
+
+            for _ in 0..64 {
+                // advance reference so values change per-iteration
+                y_ref = step_mul(&ctx, y_ref);
+
+                y_hat_port = mont_port.mul(&y_hat_port, &m_hat_port);
+                y_hat_arm = mont_arm.mul(&y_hat_arm, &m_hat_arm);
+
+                let y_port = u64x8_le_to_u512(&mont_port.from_mont_le_limbs(&y_hat_port));
+                let y_arm = u64x8_le_to_u512(&mont_arm.from_mont_le_limbs(&y_hat_arm));
+
+                assert_eq!(y_port, y_arm, "aarch64 umulh path mismatch with portable");
             }
         }
     }
