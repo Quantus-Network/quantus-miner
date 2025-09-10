@@ -557,6 +557,7 @@ mod mont_portable {
     #[cfg(target_arch = "x86_64")]
     #[inline]
     #[allow(unsafe_code)]
+    #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
         // BMI2+ADX-optimized CIOS using MULX + dual carry chains (ADCX/ADOX).
         // We retain the same CIOS structure as the portable path:
@@ -621,7 +622,6 @@ mod mont_portable {
             // acc += a[i] * b
             let ai = a[i];
             let mut of_carry: u64 = 0;
-            let mut carry_hi_into_next: u64 = 0;
 
             // iterate j=0..7: accumulate ai*b[j] into acc[j].. with dual chains
             for j in 0..8 {

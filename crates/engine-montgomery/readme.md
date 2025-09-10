@@ -13,7 +13,7 @@ Highlights:
 - Portable CIOS (Coarsely Integrated Operand Scanning) Montgomery multiply with `u128` intermediates.
 - Direct SHA3 over big-endian limbs to avoid intermediate big-integer conversions.
 - Per-job precompute cache (Montgomery params and `m_hat`) to reduce setup overhead.
-- Runtime backend selection for microarchitecture-optimized kernels (x86_64 BMI2-only; BMI2+ADX planned; aarch64 UMULH planned).
+- Runtime backend selection for microarchitecture-optimized kernels (x86_64 BMI2-only and BMI2+ADX; aarch64 UMULH).
 - Metrics label for backend selection to aid dashboards and A/B analysis.
 
 ---
@@ -83,18 +83,17 @@ At runtime, the engine selects a Montgomery multiply backend based on CPU and en
   - BMI2-only (`_mulx_u64`):
     - `mont_mul_bmi2`: uses BMI2 MULX to get 128-bit products efficiently.
     - Single carry chain (easier to validate; broadly available on newer CPUs).
-  - BMI2+ADX (planned):
-    - `mont_mul_bmi2_adx`: MULX + ADCX/ADOX dual carry chains for higher ILP.
-    - Will replace the current placeholder (which temporarily delegates to the BMI2-only kernel).
+  - BMI2+ADX:
+    - `mont_mul_bmi2_adx`: implemented using MULX + ADCX/ADOX dual carry chains for higher ILP.
 
-- aarch64 (planned)
+- aarch64
   - UMULH/ADCS:
-    - Use UMULH for high halves and ADCS for carry propagation.
-    - Expected to bring noticeable speedups on macOS Apple Silicon and Linux ARM64.
+    - `mont_mul_aarch64`: implemented using UMULH for high halves and ADCS-style accumulation via 64-bit ops to reduce dependency on `u128` where beneficial.
+    - Default backend on Apple Silicon/macOS and Linux ARM64.
 
 You can override backend selection for testing:
 
-- `MINER_MONT_BACKEND=portable|bmi2|bmi2-adx`
+- `MINER_MONT_BACKEND=portable|bmi2|bmi2-adx|umulh`
 
 The engine logs the selected backend (and exports it via metrics) at job start. Unsupported overrides safely fall back with a clear warning.
 
@@ -125,17 +124,23 @@ Property tests included:
   - For randomized sequences, `bmi2` backend must match `portable` exactly at each step.
   - On non-x86_64 platforms, the test still runs but both backends fall back to `portable`.
 
+- aarch64 UMULH vs Portable:
+  - For randomized sequences, `aarch64-umulh` must match `portable` exactly at each step.
+  - On non-aarch64 platforms, both tags fall back to `portable`.
+
 - End-to-end parity:
   - `cpu-montgomery` vs `cpu-fast` on a small inclusive range (distance and winner parity; identical hash_count accounting).
 
-We recommend running the property tests on machines with and without BMI2/ADX to cover both code paths.
+We recommend running the property tests on machines with and without BMI2/ADX and on aarch64 to cover all optimized code paths.
 
 ---
 
 ## Safety
 
 - The crate uses `#![deny(unsafe_code)]`.
-- `unsafe` is scoped only to tiny x86_64 backend functions (for `_mulx_u64` and, later, inline asm for ADCX/ADOX).
+- `unsafe` is scoped only to tiny backend functions:
+  - x86_64: `_mulx_u64` and inline asm for ADCX/ADOX dual carry chains.
+  - aarch64: restricted intrinsics (e.g., UMULH) behind a small boundary.
 - All other code remains safe Rust.
 - The portable path is always available as a fallback for correctness/regression checks.
 
@@ -147,7 +152,7 @@ We recommend running the property tests on machines with and without BMI2/ADX to
 - Direct-hash-from-residue + precompute caching already yields a measurable uplift over `cpu-fast`.
 - The BMI2-only path should improve throughput on supporting x86_64 hardware.
 - BMI2+ADX typically produces the highest gains on the multiply itself (often 1.5–2.0×), with end-to-end uplift bounded by SHA3 share per nonce.
-- aarch64 UMULH/ADCS is expected to bring similar relative gains on Apple Silicon.
+- aarch64 UMULH/ADCS brings similar relative gains on Apple Silicon and other ARM64 platforms.
 
 To minimize orchestration overhead in the service:
 - Increase `--progress-chunk-ms` (e.g., 3000–5000) on both engines when comparing, to reduce update traffic and context switching.
@@ -163,6 +168,7 @@ To minimize orchestration overhead in the service:
   - Keep workers and chunking identical across instances.
   - If testing backends explicitly:
     - `MINER_MONT_BACKEND=bmi2` or `bmi2-adx` on capable x86_64 hardware
+    - `MINER_MONT_BACKEND=umulh` on aarch64
     - Check logs and metrics for the selected backend label.
 
 - Observability:
@@ -178,8 +184,8 @@ To minimize orchestration overhead in the service:
 - [x] Direct SHA3 from normalized big-endian bytes
 - [x] Backend selection with log + metric
 - [x] x86_64 BMI2-only MULX kernel
-- [ ] x86_64 BMI2+ADX (MULX + ADCX/ADOX) dual carry chain
-- [ ] aarch64 UMULH/ADCS kernel (macOS/Linux ARM64)
+- [x] x86_64 BMI2+ADX (MULX + ADCX/ADOX) dual carry chain
+- [x] aarch64 UMULH/ADCS kernel (macOS/Linux ARM64)
 - [ ] Optional benchmark micro-harness (ns/op for mont_mul backends)
 - [ ] Extend tests with more randomized vectors and edge-case sweeps
 
