@@ -34,6 +34,9 @@ Table of contents
 - 08
   - [08-prompt-cpuset-metric-and-systemd-units.md](./08-prompt-cpuset-metric-and-systemd-units.md)
   - [08-response-cpuset-metric-and-systemd-units.md](./08-response-cpuset-metric-and-systemd-units.md)
+- 09
+  - [09-prompt-high-value-unit-tests.md](./09-prompt-high-value-unit-tests.md)
+  - [09-response-high-value-unit-tests.md](./09-response-high-value-unit-tests.md)
 
 For authors and agents
 Authoring workflow, conventions, and commit/PR linkage requirements are documented in /agents.md.

@@ -349,3 +349,104 @@ pub use {
     BaselineCpuEngine as DefaultEngine, Candidate as EngineCandidate,
     ChainManipulatorEngine as ChainEngine, FastCpuEngine as FastEngine, Range as EngineRange,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use primitive_types::U512;
+    use std::sync::atomic::AtomicBool;
+
+    fn make_ctx() -> JobContext {
+        let header = [1u8; 32];
+        let threshold = U512::MAX; // permissive threshold for "found" parity test
+        JobContext::new(header, threshold)
+    }
+
+    #[test]
+    fn baseline_and_fast_engines_find_same_candidate_on_small_range() {
+        let ctx = make_ctx();
+
+        let range = Range {
+            start: U512::from(0u64),
+            end: U512::from(100u64),
+        };
+
+        let cancel = AtomicBool::new(false);
+
+        let baseline = BaselineCpuEngine::new();
+        let fast = FastCpuEngine::new();
+
+        let b_status = baseline.search_range(&ctx, range.clone(), &cancel);
+        let f_status = fast.search_range(&ctx, range.clone(), &cancel);
+
+        match (b_status, f_status) {
+            (
+                EngineStatus::Found {
+                    candidate: b_cand,
+                    hash_count: b_hashes,
+                },
+                EngineStatus::Found {
+                    candidate: f_cand,
+                    hash_count: f_hashes,
+                },
+            ) => {
+                assert_eq!(
+                    b_cand.nonce, f_cand.nonce,
+                    "engines disagreed on winning nonce"
+                );
+                assert_eq!(
+                    b_cand.distance, f_cand.distance,
+                    "engines disagreed on distance"
+                );
+                assert_eq!(b_hashes, f_hashes, "engines disagreed on hash_count");
+            }
+            (b, f) => panic!("expected Found/Found, got baseline={b:?}, fast={f:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_returns_exhausted_when_no_solution_in_range() {
+        // Use a very strict threshold to make solutions effectively impossible in a tiny range.
+        let header = [2u8; 32];
+        let threshold = U512::zero();
+        let ctx = JobContext::new(header, threshold);
+
+        let range = Range {
+            start: U512::from(1u64),
+            end: U512::from(1000u64), // small range; probability of accidental match is negligible
+        };
+
+        let cancel = AtomicBool::new(false);
+        let baseline = BaselineCpuEngine::new();
+
+        let status = baseline.search_range(&ctx, range.clone(), &cancel);
+        match status {
+            EngineStatus::Exhausted { hash_count } => {
+                // Inclusive range length = end - start + 1
+                let expected = (range.end - range.start + U512::one()).as_u64();
+                assert_eq!(hash_count, expected, "hash_count should equal range length");
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_respects_immediate_cancellation() {
+        let ctx = make_ctx();
+        let range = Range {
+            start: U512::from(0u64),
+            end: U512::from(1_000_000u64),
+        };
+        let cancel = AtomicBool::new(true); // cancelled before starting
+        let baseline = BaselineCpuEngine::new();
+
+        let status = baseline.search_range(&ctx, range, &cancel);
+        match status {
+            EngineStatus::Cancelled { hash_count } => {
+                // Cancellation was pre-set; allow zero or near-zero work depending on timing.
+                assert_eq!(hash_count, 0, "expected no work when cancelled immediately");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+}

@@ -1246,4 +1246,200 @@ mod tests {
         assert_eq!(finished_job.status, JobStatus::Completed);
         assert!(finished_job.best_result.is_some());
     }
+
+    #[test]
+    fn validate_mining_request_rejects_bad_inputs() {
+        // Helper to build a baseline-valid request we can mutate per case
+        fn valid_req() -> resonance_miner_api::MiningRequest {
+            resonance_miner_api::MiningRequest {
+                job_id: "job-1".to_string(),
+                // 64 hex chars (32 bytes)
+                mining_hash: "11".repeat(32),
+                distance_threshold: "1".to_string(),
+                // 128 hex chars (64 bytes)
+                nonce_start: "00".repeat(64),
+                nonce_end: format!("{:0128x}", 1u8),
+            }
+        }
+
+        // 1) Empty job_id
+        {
+            let mut r = valid_req();
+            r.job_id = "".to_string();
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("job_id cannot be empty"));
+        }
+
+        // 2) Bad mining_hash length
+        {
+            let mut r = valid_req();
+            r.mining_hash = "aa".repeat(31); // 62 chars
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("mining_hash must be 64 hex characters"));
+        }
+
+        // 3) Bad mining_hash hex
+        {
+            let mut r = valid_req();
+            r.mining_hash = "zz".repeat(32);
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("mining_hash must be valid hex"));
+        }
+
+        // 4) Bad distance_threshold decimal
+        {
+            let mut r = valid_req();
+            r.distance_threshold = "not-a-decimal".to_string();
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("distance_threshold must be a valid decimal number"));
+        }
+
+        // 5) Bad nonce_start length
+        {
+            let mut r = valid_req();
+            r.nonce_start = "00".repeat(63); // 126 chars
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("nonce_start must be 128 hex characters"));
+        }
+
+        // 6) Bad nonce_end length
+        {
+            let mut r = valid_req();
+            r.nonce_end = "00".repeat(63); // 126 chars
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("nonce_end must be 128 hex characters"));
+        }
+
+        // 7) Bad nonce_start hex
+        {
+            let mut r = valid_req();
+            r.nonce_start = "0g".repeat(64);
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("nonce_start must be valid hex"));
+        }
+
+        // 8) Bad nonce_end hex
+        {
+            let mut r = valid_req();
+            r.nonce_end = "0g".repeat(64);
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("nonce_end must be valid hex"));
+        }
+
+        // 9) nonce_start > nonce_end
+        {
+            let mut r = valid_req();
+            // start = 2, end = 1
+            r.nonce_start = format!("{:0128x}", 2u8);
+            r.nonce_end = format!("{:0128x}", 1u8);
+            let e = super::validate_mining_request(&r).unwrap_err();
+            assert!(e.contains("nonce_start must be <= nonce_end"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_endpoints_handle_basic_flows() {
+        use warp::test::request;
+
+        let engine: Arc<dyn engine_cpu::MinerEngine> =
+            Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let service = super::MiningService::new(2, engine, 2000);
+        service.start_mining_loop().await;
+
+        // Build routes
+        let routes = super::build_routes(service.clone());
+
+        // 1) GET /result for unknown job -> 404
+        let res = request()
+            .method("GET")
+            .path("/result/unknown")
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), warp::http::StatusCode::NOT_FOUND);
+
+        // 2) POST /cancel for unknown job -> 404
+        let res = request()
+            .method("POST")
+            .path("/cancel/unknown")
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), warp::http::StatusCode::NOT_FOUND);
+
+        // 3) POST /mine valid -> 200 Accepted, duplicate -> 409
+        let req = resonance_miner_api::MiningRequest {
+            job_id: "job-http-1".to_string(),
+            mining_hash: "11".repeat(32),        // 64 hex chars
+            distance_threshold: "0".to_string(), // strict, likely to fail later; OK for accept flow
+            nonce_start: "00".repeat(64),        // 128 hex chars
+            nonce_end: format!("{:0128x}", 1u8),
+        };
+
+        let res = request()
+            .method("POST")
+            .path("/mine")
+            .json(&req)
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), warp::http::StatusCode::OK);
+
+        let res_dup = request()
+            .method("POST")
+            .path("/mine")
+            .json(&req)
+            .reply(&routes)
+            .await;
+        assert_eq!(res_dup.status(), warp::http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn chunked_mining_sends_progress_and_completion() {
+        use crossbeam_channel::bounded;
+        use std::sync::atomic::AtomicBool;
+
+        // Baseline engine, strict threshold to force Exhausted path for the sub-range
+        let engine = engine_cpu::BaselineCpuEngine::new();
+        let header = [3u8; 32];
+        let threshold = U512::zero();
+        let ctx = engine.prepare_context(header, threshold);
+
+        // Small range; chunking derives a large chunk size, so it will be a single chunk,
+        // which still exercises the Exhausted -> progress update and final completion paths.
+        let range = super::EngineRange {
+            start: U512::from(1u64),
+            end: U512::from(10_000u64),
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = bounded::<super::ThreadResult>(8);
+
+        super::mine_range_with_engine(
+            0, &engine, ctx, range, cancel, tx,
+            10, // ms (min chunk size is 5k; fine for testing progress + completion)
+        );
+
+        // Expect at least two messages: one progress (completed=false) and one final completion (completed=true)
+        let first = rx.recv().expect("expected first progress update");
+        assert!(
+            !first.completed,
+            "first message should be a progress update"
+        );
+        assert!(
+            first.hash_count > 0,
+            "progress update should report non-zero hash_count"
+        );
+
+        // Drain messages until we see the completion marker.
+        let mut final_msg = first;
+        while !final_msg.completed {
+            final_msg = rx.recv().expect("expected next message");
+        }
+        assert!(
+            final_msg.completed,
+            "final message should indicate thread completion"
+        );
+        assert_eq!(
+            final_msg.hash_count, 0,
+            "final completion message carries zero hash_count"
+        );
+    }
 }
