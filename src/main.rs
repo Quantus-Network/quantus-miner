@@ -11,7 +11,7 @@ Run the external miner using the new CLI binary:
 Examples:
   - cargo run -p miner-cli -- --port 9833
   - cargo run -p miner-cli -- --port 9833 --metrics-port 9900
-  - cargo run -p miner-cli -- --num-cores 4
+  - cargo run -p miner-cli -- --workers 4
 
 See crates/miner-cli for the active entrypoint and crates/miner-service for the service layer.
 */
@@ -27,7 +27,7 @@ fn main() {
          Examples:\n\
          - cargo run -p miner-cli -- --port 9833\n\
          - cargo run -p miner-cli -- --port 9833 --metrics-port 9900\n\
-         - cargo run -p miner-cli -- --num-cores 4\n"
+         - cargo run -p miner-cli -- --workers 4\n"
     );
     std::process::exit(1);
 }
