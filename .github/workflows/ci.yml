@@ -2,46 +2,45 @@
 name: continuous integration
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+    pull_request:
+    push:
+        branches:
+            - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
 
 env:
-  CARGO_INCREMENTAL: 0
-  CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: nightly-2024-12-14
+    CARGO_INCREMENTAL: 0
+    CARGO_TERM_COLOR: always
 
 jobs:
-  quality-control:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: setup rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          components: rustfmt, clippy
-      - name: install taplo
-        run: cargo install taplo-cli --locked
-      - name: taplo
-        run: taplo format --check --config taplo.toml
-      - name: format
-        run: cargo fmt --all -- --check
-        timeout-minutes: 5
-      - name: compile
-        run: cargo build --locked --workspace
-        timeout-minutes: 90
-      - name: clippy
-        run: cargo clippy --locked --workspace
-        timeout-minutes: 30
-      - name: test
-        run: cargo test --locked --workspace
-        timeout-minutes: 15
-      - name: doc
-        run: cargo doc --locked --workspace --no-deps
-        timeout-minutes: 15
+    quality-control:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: setup rust
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+                  components: rustfmt, clippy
+            - name: install taplo
+              run: cargo install taplo-cli --locked
+            - name: taplo
+              run: taplo format --check --config taplo.toml
+            - name: format
+              run: cargo fmt --all -- --check
+              timeout-minutes: 5
+            - name: compile
+              run: cargo build --locked --workspace
+              timeout-minutes: 90
+            - name: clippy
+              run: cargo clippy --locked --workspace
+              timeout-minutes: 30
+            - name: test
+              run: cargo test --locked --workspace
+              timeout-minutes: 15
+            - name: doc
+              run: cargo doc --locked --workspace --no-deps
+              timeout-minutes: 15

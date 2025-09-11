@@ -185,6 +185,7 @@ mod mont_portable {
             (self.mul_fn)(&xl, &self.r2, &self.n, self.n0_inv)
         }
 
+        #[allow(clippy::wrong_self_convention)]
         pub fn from_mont_u512(&self, x_hat: &[u64; 8]) -> U512 {
             let one = {
                 let mut o = [0u64; 8];
@@ -471,10 +472,8 @@ mod mont_portable {
         #[cfg(target_arch = "x86_64")]
         {
             let bmi2 = std::is_x86_feature_detected!("bmi2");
-            let adx = std::is_x86_feature_detected!("adx");
-            if bmi2 && adx {
-                (mont_mul_bmi2, "x86_64-bmi2")
-            } else if bmi2 {
+
+            if bmi2 {
                 (mont_mul_bmi2, "x86_64-bmi2")
             } else {
                 (mont_mul_portable, "x86_64-generic")
