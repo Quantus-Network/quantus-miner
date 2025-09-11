@@ -40,7 +40,7 @@ struct Args {
     manip_throttle_cap: Option<u64>,
 
     /// Mining engine to use (default: cpu-fast).
-    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, gpu-cuda, gpu-opencl
+    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, cpu-montgomery, gpu-cuda, gpu-opencl
     /// Note: GPU engines are currently unimplemented and will return a clear error at runtime.
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
@@ -53,6 +53,8 @@ enum EngineCli {
     CpuBaseline,
     /// Optimized CPU engine (incremental precompute + step_mul)
     CpuFast,
+    /// Montgomery-optimized CPU engine (fixed-width 512-bit ops)
+    CpuMontgomery,
     /// Throttling CPU engine that slows per block to help reduce difficulty
     CpuChainManipulator,
     /// CUDA GPU engine (unimplemented; selecting will return an error)
@@ -66,6 +68,7 @@ impl From<EngineCli> for EngineSelection {
         match value {
             EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
             EngineCli::CpuFast => EngineSelection::CpuFast,
+            EngineCli::CpuMontgomery => EngineSelection::CpuMontgomery,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             EngineCli::GpuCuda => EngineSelection::GpuCuda,
             EngineCli::GpuOpencl => EngineSelection::GpuOpenCl,
@@ -98,7 +101,7 @@ async fn main() {
         manip_throttle_cap: args.manip_throttle_cap,
         engine: args.engine.into(),
     };
-    log::info!("Effective config: {}", config);
+    log::info!("Effective config: {config}");
 
     if let Err(e) = run(config).await {
         log::error!("Miner service terminated with error: {e:?}");

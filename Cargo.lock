@@ -334,6 +334,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43da5946c66ffcc7745f48db692ffbb10a83bfe0afd96235c5c2a4fb23994929"
 
 [[package]]
+name = "crypto-bigint"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
+dependencies = [
+ "rand_core",
+ "subtle",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,6 +488,20 @@ dependencies = [
  "pow-core",
  "primitive-types",
  "thiserror",
+]
+
+[[package]]
+name = "engine-montgomery"
+version = "0.1.0"
+dependencies = [
+ "crypto-bigint",
+ "engine-cpu",
+ "log",
+ "metrics",
+ "num-traits 0.2.19",
+ "pow-core",
+ "primitive-types",
+ "sha3",
 ]
 
 [[package]]
@@ -1047,6 +1071,7 @@ dependencies = [
  "engine-cpu",
  "engine-gpu-cuda",
  "engine-gpu-opencl",
+ "engine-montgomery",
  "hex",
  "log",
  "metrics",
@@ -1705,6 +1730,12 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"

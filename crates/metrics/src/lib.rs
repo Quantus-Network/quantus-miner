@@ -62,6 +62,21 @@ static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+static ENGINE_BACKEND_INFO: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_engine_backend",
+            "Engine backend info (label-only gauge set to 1). Labels: engine, backend"
+        ),
+        &["engine", "backend"],
+    )
+    .expect("create miner_engine_backend");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_engine_backend");
+    g
+});
+
 static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
     let g = IntGauge::new(
         "miner_effective_cpus",
@@ -244,6 +259,12 @@ pub fn default_registry() -> &'static Registry {
 // Service-level helpers
 pub fn set_active_jobs(n: i64) {
     ACTIVE_JOBS.set(n);
+}
+
+pub fn set_engine_backend(engine: &str, backend: &str) {
+    ENGINE_BACKEND_INFO
+        .with_label_values(&[engine, backend])
+        .set(1.0);
 }
 
 pub fn inc_mine_requests(result: &str) {

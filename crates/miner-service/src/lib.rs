@@ -44,6 +44,7 @@ pub struct ServiceConfig {
 pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
+    CpuMontgomery,
     CpuChainManipulator,
     GpuCuda,
     GpuOpenCl,
@@ -70,6 +71,7 @@ impl fmt::Display for ServiceConfig {
         let engine = match self.engine {
             EngineSelection::CpuBaseline => "cpu-baseline",
             EngineSelection::CpuFast => "cpu-fast",
+            EngineSelection::CpuMontgomery => "cpu-montgomery",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
             EngineSelection::GpuCuda => "gpu-cuda",
             EngineSelection::GpuOpenCl => "gpu-opencl",
@@ -988,7 +990,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Detect effective CPU pool for this process (cpuset if available).
     let (effective_cpus, cpuset_mask) = detect_effective_cpus_and_mask();
     if let Some(mask) = cpuset_mask.as_ref() {
-        log::debug!(target: "miner", "Detected cpuset mask: {}", mask);
+        log::debug!(target: "miner", "Detected cpuset mask: {mask}");
     } else {
         log::debug!(target: "miner", "No cpuset mask detected; using full logical CPU count");
     }
@@ -1046,6 +1048,17 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
         EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
         EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
+        EngineSelection::CpuMontgomery => {
+            #[cfg(feature = "montgomery")]
+            {
+                Arc::new(engine_montgomery::MontgomeryCpuEngine::new())
+            }
+            #[cfg(not(feature = "montgomery"))]
+            {
+                // Fallback if montgomery backend is not compiled in
+                Arc::new(engine_cpu::FastCpuEngine::new())
+            }
+        }
         EngineSelection::CpuChainManipulator => {
             let mut eng = engine_cpu::ChainEngine::new();
             // Apply optional throttle parameters if provided.
@@ -1080,7 +1093,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         }
     };
     log::info!("Using engine: {}", engine.name());
-    log::info!("Service configuration: {}", config);
+    log::info!("Service configuration: {config}");
 
     let progress_chunk_ms = config.progress_chunk_ms.unwrap_or(2000);
     let service = MiningService::new(workers, engine.clone(), progress_chunk_ms);
