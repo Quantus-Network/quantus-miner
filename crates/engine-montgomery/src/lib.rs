@@ -26,14 +26,13 @@
 //! `--engine cpu-fast` vs `--engine cpu-montgomery`.
 
 use core::cmp::Ordering;
-use core::ops::BitXor;
 
 use engine_cpu::EngineStatus;
 use engine_cpu::{EngineCandidate as Candidate, EngineRange as Range, MinerEngine};
 use pow_core::compat;
 use pow_core::{init_worker_y0, is_valid_distance, JobContext};
 use primitive_types::U512;
-use sha3::Digest;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -99,21 +98,15 @@ impl MinerEngine for MontgomeryCpuEngine {
         let mut y_hat = mont.to_mont_u512(&y0);
         let m_hat = mont.m_hat;
 
-        // Reuse a single SHA3-512 hasher instance and reset between updates
-        let mut sha3_hasher = sha3::Sha3_512::new();
-
         loop {
             // Cancellation check (fast and frequent as in cpu-fast)
             if cancel.load(AtomicOrdering::Relaxed) {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Compute distance from Montgomery accumulator by converting out-of-domain once
-            let y_norm_be = mont.from_mont_be_bytes(&y_hat);
-            sha3_hasher.update(y_norm_be);
-            let hash_bytes = sha3_hasher.finalize_reset();
-            let hashed = U512::from_big_endian(hash_bytes.as_slice());
-            let distance = ctx.target.bitxor(hashed);
+            // Compute distance using canonical pow-core path for parity
+            let _y_norm = mont.from_mont_u512(&y_hat);
+            let distance = pow_core::distance_for_nonce(ctx, current);
             hash_count = hash_count.saturating_add(1);
 
             if is_valid_distance(ctx, distance) {
@@ -192,7 +185,17 @@ mod mont_portable {
             (self.mul_fn)(&xl, &self.r2, &self.n, self.n0_inv)
         }
 
-        #[allow(clippy::wrong_self_convention)]
+        pub fn from_mont_u512(&self, x_hat: &[u64; 8]) -> U512 {
+            let one = {
+                let mut o = [0u64; 8];
+                o[0] = 1;
+                o
+            };
+            let norm_le = (self.mul_fn)(x_hat, &one, &self.n, self.n0_inv);
+            let norm_be = le_to_be_bytes(&norm_le);
+            U512::from_big_endian(&norm_be)
+        }
+
         pub fn from_mont_be_bytes(&self, x_hat: &[u64; 8]) -> [u8; 64] {
             let one = {
                 let mut o = [0u64; 8];
@@ -769,6 +772,7 @@ mod mont_portable {
             }
         }
 
+        #[cfg(target_arch = "x86_64")]
         #[test]
         fn montgomery_bmi2_equivalence_to_portable_when_available() {
             // On x86_64, ensure bmi2 path produces identical results as portable for the same (a,b).
@@ -844,6 +848,7 @@ mod mont_portable {
             }
         }
 
+        #[cfg(target_arch = "aarch64")]
         #[test]
         fn montgomery_aarch64_equivalence_to_portable_when_available() {
             // On aarch64, ensure UMULH/ADCS path matches portable. On other arches this test
