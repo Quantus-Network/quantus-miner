@@ -101,7 +101,7 @@ async fn main() {
         manip_throttle_cap: args.manip_throttle_cap,
         engine: args.engine.into(),
     };
-    log::info!("Effective config: {}", config);
+    log::info!("Effective config: {config}");
 
     if let Err(e) = run(config).await {
         log::error!("Miner service terminated with error: {e:?}");

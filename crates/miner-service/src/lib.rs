@@ -990,7 +990,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Detect effective CPU pool for this process (cpuset if available).
     let (effective_cpus, cpuset_mask) = detect_effective_cpus_and_mask();
     if let Some(mask) = cpuset_mask.as_ref() {
-        log::debug!(target: "miner", "Detected cpuset mask: {}", mask);
+        log::debug!(target: "miner", "Detected cpuset mask: {mask}");
     } else {
         log::debug!(target: "miner", "No cpuset mask detected; using full logical CPU count");
     }
@@ -1093,7 +1093,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         }
     };
     log::info!("Using engine: {}", engine.name());
-    log::info!("Service configuration: {}", config);
+    log::info!("Service configuration: {config}");
 
     let progress_chunk_ms = config.progress_chunk_ms.unwrap_or(2000);
     let service = MiningService::new(workers, engine.clone(), progress_chunk_ms);

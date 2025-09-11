@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 
 /// Montgomery engine for CPU.
 pub struct MontgomeryCpuEngine {
+    #[allow(clippy::type_complexity)]
     cache: Mutex<HashMap<([u8; 64], [u8; 64]), Arc<mont_portable::MontCtx>>>,
 }
 
@@ -109,7 +110,7 @@ impl MinerEngine for MontgomeryCpuEngine {
 
             // Compute distance from Montgomery accumulator by converting out-of-domain once
             let y_norm_be = mont.from_mont_be_bytes(&y_hat);
-            sha3_hasher.update(&y_norm_be);
+            sha3_hasher.update(y_norm_be);
             let hash_bytes = sha3_hasher.finalize_reset();
             let hashed = U512::from_big_endian(hash_bytes.as_slice());
             let distance = ctx.target.bitxor(hashed);
@@ -171,7 +172,7 @@ mod mont_portable {
             let r2 = u512_to_le(r2_u512);
             let m = u512_to_le(ctx.m);
             let (mul_fn, backend) = select_backend();
-            log::info!(target: "miner", "cpu-montgomery backend selected: {}", backend);
+            log::info!(target: "miner", "cpu-montgomery backend selected: {backend}");
             #[cfg(feature = "metrics")]
             {
                 metrics::set_engine_backend("cpu-montgomery", backend);
@@ -191,6 +192,7 @@ mod mont_portable {
             (self.mul_fn)(&xl, &self.r2, &self.n, self.n0_inv)
         }
 
+        #[allow(clippy::wrong_self_convention)]
         pub fn from_mont_be_bytes(&self, x_hat: &[u64; 8]) -> [u8; 64] {
             let one = {
                 let mut o = [0u64; 8];
@@ -278,6 +280,7 @@ mod mont_portable {
         }
 
         #[cfg(test)]
+        #[allow(clippy::wrong_self_convention)]
         pub fn from_mont_le_limbs(&self, x_hat: &[u64; 8]) -> [u64; 8] {
             let one = {
                 let mut o = [0u64; 8];
@@ -292,11 +295,11 @@ mod mont_portable {
     fn u512_to_le(x: U512) -> [u64; 8] {
         let be = x.to_big_endian();
         let mut limbs = [0u64; 8];
-        for i in 0..8 {
+        for (i, limb) in limbs.iter_mut().enumerate() {
             let start = 64 - 8 * (i + 1);
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&be[start..start + 8]);
-            limbs[i] = u64::from_be_bytes(bytes);
+            *limb = u64::from_be_bytes(bytes);
         }
         limbs
     }
@@ -330,16 +333,16 @@ mod mont_portable {
         const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
         let mut acc = [0u128; 9];
 
-        for i in 0..8 {
-            // acc += a[i] * b
-            let ai = a[i] as u128;
+        for &ai_u64 in a.iter().take(8) {
+            // acc += ai * b
+            let ai = ai_u64 as u128;
             let mut carry = 0u128;
             for j in 0..8 {
                 let sum = acc[j] + ai * (b[j] as u128) + carry;
                 acc[j] = sum & MASK;
                 carry = sum >> 64;
             }
-            acc[8] = acc[8] + carry;
+            acc[8] += carry;
 
             // m = (acc[0] * n0_inv) mod 2^64
             let m = ((acc[0] as u64).wrapping_mul(n0_inv)) as u128;
@@ -351,7 +354,7 @@ mod mont_portable {
                 acc[j] = sum & MASK;
                 carry2 = sum >> 64;
             }
-            acc[8] = acc[8] + carry2;
+            acc[8] += carry2;
 
             // shift acc right by one limb
             for j in 0..8 {
@@ -434,7 +437,7 @@ mod mont_portable {
                         }
                     }
                     other => {
-                        log::warn!(target: "miner", "cpu-montgomery backend override '{}' is not recognized on x86_64; using auto-detect", other);
+                        log::warn!(target: "miner", "cpu-montgomery backend override '{other}' is not recognized on x86_64; using auto-detect");
                     }
                 }
             }
@@ -505,9 +508,8 @@ mod mont_portable {
         // 9-limb accumulator in u128 to simplify carries
         let mut acc = [0u128; 9];
 
-        for i in 0..8 {
-            // acc += a[i] * b
-            let ai = a[i];
+        for &ai in a.iter().take(8) {
+            // acc += ai * b
             let mut carry: u128 = 0;
             for j in 0..8 {
                 let mut hi: u64 = 0;
@@ -517,10 +519,10 @@ mod mont_portable {
                 acc[j] = sum & MASK;
                 carry = (sum >> 64) + (hi as u128);
             }
-            acc[8] = acc[8] + carry;
+            acc[8] += carry;
 
             // m = (acc[0] * n0_inv) mod 2^64
-            let m = ((acc[0] as u64).wrapping_mul(n0_inv)) as u64;
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
 
             // acc += m * n
             let mut carry2: u128 = 0;
@@ -531,7 +533,7 @@ mod mont_portable {
                 acc[j] = sum2 & MASK;
                 carry2 = (sum2 >> 64) + (hi2 as u128);
             }
-            acc[8] = acc[8] + carry2;
+            acc[8] += carry2;
 
             // shift acc right by one limb (drop acc[0])
             for j in 0..8 {
@@ -618,9 +620,8 @@ mod mont_portable {
             );
         }
 
-        for i in 0..8 {
-            // acc += a[i] * b
-            let ai = a[i];
+        for &ai in a.iter().take(8) {
+            // acc += ai * b
             let mut of_carry: u64 = 0;
 
             // iterate j=0..7: accumulate ai*b[j] into acc[j].. with dual chains
@@ -674,9 +675,8 @@ mod mont_portable {
         use core::arch::aarch64::umulh;
         const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
         let mut acc = [0u128; 9];
-        for i in 0..8 {
-            let ai = a[i];
-            // acc += a[i] * b
+        for &ai in a.iter().take(8) {
+            // acc += ai * b
             let mut carry: u128 = 0;
             for j in 0..8 {
                 // low 64-bit product
