@@ -104,9 +104,9 @@ impl MinerEngine for MontgomeryCpuEngine {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Compute distance using canonical pow-core path for parity
-            let _y_norm = mont.from_mont_u512(&y_hat);
-            let distance = pow_core::distance_for_nonce(ctx, current);
+            // Compute distance from Montgomery accumulator: normalize then hash via pow-core
+            let y_norm = mont.from_mont_u512(&y_hat);
+            let distance = pow_core::distance_from_y(ctx, y_norm);
             hash_count = hash_count.saturating_add(1);
 
             if is_valid_distance(ctx, distance) {
@@ -194,16 +194,6 @@ mod mont_portable {
             let norm_le = (self.mul_fn)(x_hat, &one, &self.n, self.n0_inv);
             let norm_be = le_to_be_bytes(&norm_le);
             U512::from_big_endian(&norm_be)
-        }
-
-        pub fn from_mont_be_bytes(&self, x_hat: &[u64; 8]) -> [u8; 64] {
-            let one = {
-                let mut o = [0u64; 8];
-                o[0] = 1;
-                o
-            };
-            let norm = (self.mul_fn)(x_hat, &one, &self.n, self.n0_inv);
-            le_to_be_bytes(&norm)
         }
 
         pub fn mul(&self, a_hat: &[u64; 8], b_hat: &[u64; 8]) -> [u64; 8] {
@@ -298,12 +288,13 @@ mod mont_portable {
     fn u512_to_le(x: U512) -> [u64; 8] {
         let be = x.to_big_endian();
         let mut limbs = [0u64; 8];
-        for (i, limb) in limbs.iter_mut().enumerate() {
-            let start = 64 - 8 * (i + 1);
+        // Split BE into 8 chunks, then reverse to get LE limb order (least-significant first).
+        for i in 0..8 {
             let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&be[start..start + 8]);
-            *limb = u64::from_be_bytes(bytes);
+            bytes.copy_from_slice(&be[i * 8..(i + 1) * 8]);
+            limbs[i] = u64::from_be_bytes(bytes);
         }
+        limbs.reverse();
         limbs
     }
 
@@ -482,7 +473,7 @@ mod mont_portable {
             let bmi2 = std::is_x86_feature_detected!("bmi2");
             let adx = std::is_x86_feature_detected!("adx");
             if bmi2 && adx {
-                (mont_mul_bmi2_adx, "x86_64-bmi2-adx")
+                (mont_mul_bmi2, "x86_64-bmi2")
             } else if bmi2 {
                 (mont_mul_bmi2, "x86_64-bmi2")
             } else {
