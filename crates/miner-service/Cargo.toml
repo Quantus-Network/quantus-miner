@@ -10,7 +10,7 @@ default = ["cpu", "metrics", "montgomery"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
 # Optional metrics/observability (Prometheus endpoint).
-metrics = ["dep:metrics", "metrics/http-exporter", "engine-montgomery?/metrics"]
+metrics = ["dep:metrics", "engine-montgomery?/metrics", "metrics/http-exporter"]
 # Optional GPU backends (off by default).
 cuda = ["engine-gpu-cuda"]
 opencl = ["engine-gpu-opencl"]
