@@ -5,6 +5,10 @@ edition = "2021"
 publish = false
 description = "CLI binary to run the Quantus External Miner service"
 
+[features]
+default = []
+cuda = ["miner-service/cuda"]
+
 [dependencies]
 miner-service = { path = "../miner-service" }
 clap = { workspace = true, features = ["derive", "env"] }

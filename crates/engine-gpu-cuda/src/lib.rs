@@ -1,5 +1,5 @@
 #![deny(rust_2018_idioms)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! CUDA-based GPU mining engine (placeholder)
 //!
@@ -19,16 +19,22 @@
 //! - Coordinate early-exit via device-global flags and host polling.
 //!
 //! Notes:
-//! - This crate deliberately does NOT implement the `MinerEngine` trait yet,
-//!   because the engine trait currently lives in `engine-cpu`. Once the trait
-//!   is promoted to a shared crate (or re-exported for engines), this crate
-//!   will implement it and become selectable at runtime via the service config.
-//! - CUDA bindings (e.g., via `cust`/`rustacuda`) and kernels will be added
-//!   behind feature flags (e.g., `cuda`). For now, we only offer placeholders
-//!   so the workspace compiles cleanly and the integration points are clear.
+//! - This crate implements the `MinerEngine` trait with a CPU fallback.
+//!   When CUDA is available (feature-enabled and device present), it will
+//!   initialize CUDA and, until kernels are implemented, still delegate to
+//!   the CPU path with a clear log message.
+//! - CUDA bindings (e.g., via `cust`/`rustacuda`) and kernels are gated
+//!   behind the `cuda` feature. The CPU fallback ensures builds and the
+//!   miner service run cleanly even without a GPU.
 
 use pow_core::JobContext;
 use primitive_types::U512;
+use std::sync::atomic::AtomicBool;
+
+use engine_cpu::{EngineRange, EngineStatus, MinerEngine};
+
+#[cfg(feature = "cuda")]
+use cust as cuda;
 
 /// Placeholder type for the CUDA engine.
 ///
@@ -46,7 +52,7 @@ pub struct CudaEngine {
 }
 
 impl CudaEngine {
-    /// Construct a new CUDA engine placeholder.
+    /// Construct a new CUDA engine.
     ///
     /// Future versions may accept configuration (e.g., device index, module path).
     pub fn new() -> Self {
@@ -55,7 +61,7 @@ impl CudaEngine {
 
     /// Human-readable name for logs/metrics.
     pub fn name(&self) -> &'static str {
-        "gpu-cuda (placeholder)"
+        "gpu-cuda"
     }
 
     /// Prepare a precomputed job context for a given header and threshold.
@@ -67,14 +73,48 @@ impl CudaEngine {
         JobContext::new(header_hash, threshold)
     }
 
-    /// Returns whether this build has CUDA support compiled in.
-    ///
-    /// When actual CUDA integration is added behind a feature flag, this will
-    /// return true only if that feature is enabled.
+    /// Returns whether CUDA is compiled in and the driver/device can be initialized.
     pub fn cuda_available(&self) -> bool {
-        // Adjust once actual CUDA integration is implemented behind a feature:
-        // cfg!(feature = "cuda")
-        false
+        #[cfg(feature = "cuda")]
+        {
+            match cuda::quick_init() {
+                Ok(_) => true,
+                Err(e) => {
+                    log::warn!(target: "miner", "CUDA init failed: {e:?}. Falling back to CPU.");
+                    false
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
+    }
+}
+
+impl MinerEngine for CudaEngine {
+    fn name(&self) -> &'static str {
+        "gpu-cuda"
+    }
+
+    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
+        self.prepare_context(header_hash, threshold)
+    }
+
+    fn search_range(
+        &self,
+        ctx: &JobContext,
+        range: EngineRange,
+        cancel: &AtomicBool,
+    ) -> EngineStatus {
+        // Temporary: until CUDA kernels are provided, delegate to CPU fast path.
+        // When CUDA is available, we still log that we are falling back.
+        if self.cuda_available() {
+            log::info!(target: "miner", "CUDA available, but GPU kernel not implemented yet; delegating to CPU fast engine.");
+        }
+
+        let cpu = engine_cpu::FastCpuEngine::new();
+        cpu.search_range(ctx, range, cancel)
     }
 }
 
@@ -86,7 +126,7 @@ mod tests {
     #[test]
     fn placeholder_engine_basics() {
         let eng = CudaEngine::new();
-        assert_eq!(eng.name(), "gpu-cuda (placeholder)");
+        assert_eq!(eng.name(), "gpu-cuda");
 
         // Ensure context creation works and is deterministic in shape.
         let header = [1u8; 32];

@@ -16,6 +16,7 @@ cuda = ["dep:cust"]
 
 [dependencies]
 pow-core = { path = "../pow-core" }
+engine-cpu = { path = "../engine-cpu" }
 primitive-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

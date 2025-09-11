@@ -471,6 +471,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cust",
+ "engine-cpu",
  "log",
  "pow-core",
  "primitive-types",

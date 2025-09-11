@@ -1082,8 +1082,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             Arc::new(eng)
         }
         EngineSelection::GpuCuda => {
-            log::error!("Requested engine gpu-cuda is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
-            return Err(anyhow::anyhow!("engine 'gpu-cuda' is not implemented yet"));
+            #[cfg(feature = "cuda")]
+            {
+                let eng = engine_gpu_cuda::CudaEngine::new();
+                if !eng.cuda_available() {
+                    log::error!("Requested engine gpu-cuda but CUDA driver/device is not available or initialization failed. Build has 'cuda' feature but runtime support is missing.");
+                    return Err(anyhow::anyhow!(
+                        "engine 'gpu-cuda' unavailable at runtime (CUDA init failed)"
+                    ));
+                }
+                Arc::new(eng)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                log::error!("Requested engine gpu-cuda, but this binary was built without the 'cuda' feature. Rebuild miner-service with --features cuda.");
+                return Err(anyhow::anyhow!(
+                    "engine 'gpu-cuda' not built (missing 'cuda' feature)"
+                ));
+            }
         }
         EngineSelection::GpuOpenCl => {
             log::error!("Requested engine gpu-opencl is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
