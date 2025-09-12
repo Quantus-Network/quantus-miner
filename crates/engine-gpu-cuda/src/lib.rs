@@ -231,6 +231,11 @@ impl CudaEngine {
             }
         };
 
+        // Emit backend label metric (g1/g2)
+        #[cfg(feature = "metrics")]
+        {
+            metrics::set_engine_backend("gpu-cuda", if is_g2 { "g2" } else { "g1" });
+        }
         // Precompute Montgomery constants (host-side)
         let gc = GpuConstants::from_ctx(ctx);
 
@@ -359,17 +364,32 @@ impl CudaEngine {
                 // If any symbol is unavailable, leave C_CONSTS_READY at 0 and the kernel will use parameters.
                 {
                     let mut consts_ready_set = false;
+                    // Prepare big-endian 64-bit limbs for target and threshold
+                    let mut target_limbs = [0u64; 8];
+                    let mut thresh_limbs = [0u64; 8];
+                    for i in 0..8 {
+                        let mut limb = [0u8; 8];
+                        limb.copy_from_slice(&target_be[i * 8..(i + 1) * 8]);
+                        target_limbs[i] = u64::from_be_bytes(limb);
+                        let mut limb2 = [0u8; 8];
+                        limb2.copy_from_slice(&threshold_be[i * 8..(i + 1) * 8]);
+                        thresh_limbs[i] = u64::from_be_bytes(limb2);
+                    }
                     if let (
                         Ok(mut c_n),
                         Ok(mut c_r2),
                         Ok(mut c_mhat),
                         Ok(mut c_n0),
+                        Ok(mut c_target),
+                        Ok(mut c_thresh),
                         Ok(mut c_ready),
                     ) = (
                         module.get_global::<[u64; 8]>(CString::new("C_N")?.as_c_str()),
                         module.get_global::<[u64; 8]>(CString::new("C_R2")?.as_c_str()),
                         module.get_global::<[u64; 8]>(CString::new("C_MHAT")?.as_c_str()),
                         module.get_global::<u64>(CString::new("C_N0_INV")?.as_c_str()),
+                        module.get_global::<[u64; 8]>(CString::new("C_TARGET")?.as_c_str()),
+                        module.get_global::<[u64; 8]>(CString::new("C_THRESH")?.as_c_str()),
                         module.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str()),
                     ) {
                         // Copy constants into constant memory
@@ -377,6 +397,8 @@ impl CudaEngine {
                         c_r2.copy_from(&r2_le)?;
                         c_mhat.copy_from(&m_hat_le)?;
                         c_n0.copy_from(&(n0_inv as u64))?;
+                        c_target.copy_from(&target_limbs)?;
+                        c_thresh.copy_from(&thresh_limbs)?;
                         // Flag ready = 1
                         let one: i32 = 1;
                         c_ready.copy_from(&one)?;
@@ -441,7 +463,7 @@ impl CudaEngine {
                     d_distance
                         .copy_to(&mut h_dist)
                         .with_context(|| "copy distance")?;
-                    let distance = U512::from_big_endian(&h_dist);
+
                     let work = nonce.to_big_endian();
                     // Host re-verification to ensure device result matches chain semantics
                     let host_distance = pow_core::distance_for_nonce(ctx, nonce);
@@ -458,6 +480,10 @@ impl CudaEngine {
                     } else {
                         // Treat as not found: account coverage and advance like the "not found" path
                         log::warn!(target: "miner", "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}");
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics::inc_candidates_false_positive("gpu-cuda");
+                        }
                         hash_count = hash_count.saturating_add(covered);
                         if covered < total_elems_u64 {
                             return Ok(EngineStatus::Exhausted { hash_count });

@@ -323,6 +323,9 @@ __device__ __constant__ uint64_t C_R2[8];
 __device__ __constant__ uint64_t C_MHAT[8];
 __device__ __constant__ uint64_t C_N0_INV;
 __device__ __constant__ int      C_CONSTS_READY;
+// Optional device-side target/threshold in constant memory (set by host when available)
+__device__ __constant__ uint64_t C_TARGET[8];
+__device__ __constant__ uint64_t C_THRESH[8];
  
 // Load/store helpers (little-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
@@ -464,8 +467,44 @@ __device__ __forceinline__ bool be64_leq(const uint8_t a[64], const uint8_t b[64
     }
     return true; // equal
 }
+// Convert 64 big-endian bytes into 8 big-endian 64-bit limbs: out[0] holds the most significant limb.
+__device__ __forceinline__ void be64_bytes_to_u64_8(const uint8_t in[64], uint64_t out[8]) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint64_t v = 0ull;
+#pragma unroll
+        for (int b = 0; b < 8; ++b) {
+            v = (v << 8) | (uint64_t)in[i * 8 + b];
+        }
+        out[i] = v;
+    }
+}
+// Compare two 8-limb big-endian u64 arrays: return true if a <= b.
+__device__ __forceinline__ bool be_u64x8_leq(const uint64_t a[8], const uint64_t b[8]) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        if (a[i] != b[i]) {
+            return a[i] < b[i];
+        }
+    }
+    return true;
+}
+__device__ __forceinline__ void be_u64x8_to_be64_bytes(const uint64_t in[8], uint8_t out[64]) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint64_t limb = in[i];
+        out[i * 8 + 0] = (uint8_t)(limb >> 56);
+        out[i * 8 + 1] = (uint8_t)(limb >> 48);
+        out[i * 8 + 2] = (uint8_t)(limb >> 40);
+        out[i * 8 + 3] = (uint8_t)(limb >> 32);
+        out[i * 8 + 4] = (uint8_t)(limb >> 24);
+        out[i * 8 + 5] = (uint8_t)(limb >> 16);
+        out[i * 8 + 6] = (uint8_t)(limb >> 8);
+        out[i * 8 + 7] = (uint8_t)(limb);
+    }
+}
  
-// Kernel: G2 — device SHA3-512 + threshold compare + early-exit
+ // Kernel: G2 — device SHA3-512 + threshold compare + early-exit
 //
 // Notes:
 // - Signature includes additional G2 parameters; host launcher must be updated to pass them.
@@ -523,13 +562,26 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
  
     // Load this thread's y0 (normal domain) and move to Montgomery domain
     uint64_t y0_loc[8];
-#pragma unroll
+    #pragma unroll
     for (int i = 0; i < 8; ++i) {
         y0_loc[i] = y0[tid * 8u + i];
     }
     const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
     uint64_t yhat[8];
     to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
+
+    // Prepare target/threshold limbs (prefer __constant__ if available)
+    uint64_t target_loc[8], thresh_loc[8];
+    if (C_CONSTS_READY) {
+    #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            target_loc[i] = C_TARGET[i];
+            thresh_loc[i] = C_THRESH[i];
+        }
+    } else {
+        be64_bytes_to_u64_8(target_be, target_loc);
+        be64_bytes_to_u64_8(threshold_be, thresh_loc);
+    }
  
     // Iterate and check threshold
     const uint32_t iters = iters_per_thread;
@@ -558,16 +610,17 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
         // H = SHA3-512(y_be)
         uint8_t h_be[64];
         sha3_512_64bytes(y_be, h_be);
- 
-        // distance = target XOR H (byte-wise)
-        uint8_t dist_be[64];
-#pragma unroll
-        for (int i = 0; i < 64; ++i) {
-            dist_be[i] = target_be[i] ^ h_be[i];
+
+        // distance = target XOR H (limb-wise, big-endian)
+        uint64_t h_limb[8], dist_limb[8];
+        be64_bytes_to_u64_8(h_be, h_limb);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            dist_limb[i] = target_loc[i] ^ h_limb[i];
         }
- 
-        // Compare distance <= threshold
-        if (be64_leq(dist_be, threshold_be)) {
+
+        // Compare distance <= threshold (limb-wise, big-endian)
+        if (be_u64x8_leq(dist_limb, thresh_loc)) {
             // Try to claim the flag
             if (atomicCAS(found_flag, 0, 1) == 0) {
                 // Write linear index for host to reconstruct nonce
@@ -576,9 +629,11 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
                 }
                 // Write distance
                 if (out_distance_be) {
+uint8_t dist_out[64];
+                    be_u64x8_to_be64_bytes(dist_limb, dist_out);
 #pragma unroll
                     for (int i = 0; i < 64; ++i) {
-                        out_distance_be[i] = dist_be[i];
+                        out_distance_be[i] = dist_out[i];
                     }
                 }
             }

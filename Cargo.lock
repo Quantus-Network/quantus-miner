@@ -473,6 +473,7 @@ dependencies = [
  "cust",
  "engine-cpu",
  "log",
+ "metrics",
  "num-bigint",
  "num-traits 0.2.19",
  "pow-core",
