@@ -135,7 +135,7 @@ jobs:
                   retention-days: 14
 
             - name: Optional rsync to CDN (if SSH key provided)
-              if: ${{ secrets.CDN_SSH_PRIVATE_KEY != '' }}
+              if: ${{ secrets.CDN_SSH_PRIVATE_KEY }}
               env:
                   BIN_PATH: ${{ steps.extract.outputs.bin_path }}
                   SSH_PRIVATE_KEY: ${{ secrets.CDN_SSH_PRIVATE_KEY }}
