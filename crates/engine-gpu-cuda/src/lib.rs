@@ -344,15 +344,43 @@ impl CudaEngine {
             let kernel_ms = t_kernel_start.elapsed().as_millis();
             log::info!(target: "miner", "CUDA kernel and sync OK (kernel_ms={kernel_ms})");
 
-            // Copy back results
-            let mut y_out_host =
-                vec![0u64; (num_threads as usize) * (iters_per_thread as usize) * 8];
+            // Copy back results (optional pinned host buffer + async copy)
+            let use_pinned = std::env::var("MINER_CUDA_PINNED")
+                .ok()
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let total_words = (num_threads as usize) * (iters_per_thread as usize) * 8;
             let t_copy_start = std::time::Instant::now();
-            d_y_out
-                .copy_to(&mut y_out_host)
-                .with_context(|| "copy d_y_out -> host")?;
-            let copy_ms = t_copy_start.elapsed().as_millis();
-            log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
+            let y_host_arc: std::sync::Arc<dyn AsRef<[u64]> + Send + Sync> = if use_pinned {
+                // Page-locked host buffer with async copy on the same stream
+                let mut pinned =
+                    unsafe { cust::memory::LockedBuffer::<u64>::uninitialized(total_words) }
+                        .with_context(|| "alloc pinned host buffer")?;
+                unsafe {
+                    // Use fully-qualified trait path to avoid needing a 'use'
+                    cust::memory::AsyncCopyDestination::async_copy_to(
+                        &*d_y_out,
+                        pinned.as_mut_slice(),
+                        &stream,
+                    )
+                    .with_context(|| "async copy d_y_out -> pinned")?;
+                }
+                // Ensure async copy completion before host access
+                stream
+                    .synchronize()
+                    .with_context(|| "stream synchronize (post async D2H)")?;
+                log::info!(target: "miner", "CUDA copy-back OK (pinned, async): elems={}, copy_ms={}", total_words, t_copy_start.elapsed().as_millis());
+                std::sync::Arc::new(pinned)
+            } else {
+                // Pageable host buffer with synchronous copy
+                let mut y_out_host = vec![0u64; total_words];
+                d_y_out
+                    .copy_to(&mut y_out_host)
+                    .with_context(|| "copy d_y_out -> host")?;
+                let copy_ms = t_copy_start.elapsed().as_millis();
+                log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
+                std::sync::Arc::new(y_out_host)
+            };
 
             // Parallel SHA3 over GPU results; compute earliest valid index (if any)
             let t_sha_start = std::time::Instant::now();
@@ -376,8 +404,8 @@ impl CudaEngine {
                 });
             log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_to_hash}");
 
-            // Share outputs across worker threads
-            let y_shared = std::sync::Arc::new(y_out_host);
+            // Share outputs across worker threads (Vec or LockedBuffer depending on MINER_CUDA_PINNED)
+            let y_shared = y_host_arc.clone();
             let ctx_for_threads = ctx.clone();
             let found_min_idx =
                 std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
@@ -401,7 +429,8 @@ impl CudaEngine {
 
                             let idx_words = k * 8;
                             let mut le = [0u64; 8];
-                            le.copy_from_slice(&y_arc[idx_words..idx_words + 8]);
+                            let y_slice: &[u64] = y_arc.as_ref().as_ref();
+                            le.copy_from_slice(&y_slice[idx_words..idx_words + 8]);
                             let y_norm = le_limbs_to_u512(&le);
 
                             let distance = pow_core::distance_from_y(&ctx_local, y_norm);
