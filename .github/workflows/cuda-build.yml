@@ -6,8 +6,6 @@ on:
         branches:
             - cuda
         paths-ignore:
-            - ".github/workflows/**"
-            - ".github/actions/**"
             - "docs/**"
             - "*.md"
             - "LICENSE"
@@ -15,6 +13,8 @@ on:
         branches:
             - cuda
         paths-ignore:
+            - ".github/workflows/**"
+            - ".github/actions/**"
             - "docs/**"
             - "*.md"
             - "LICENSE"
