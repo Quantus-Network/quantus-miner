@@ -1,5 +1,6 @@
 #![deny(rust_2018_idioms)]
 #![deny(unsafe_code)]
+#![cfg_attr(not(feature = "cuda"), allow(dead_code, unused_imports))]
 
 //! CUDA-based GPU mining engine (G1 bring-up)
 //!
@@ -8,8 +9,8 @@
 //!   - MINER_CUDA_BLOCK_DIM: threads per block (default 256)
 //!   - MINER_CUDA_THREADS: number of threads to launch per kernel (capped by device/block limits)
 //!   - MINER_CUDA_ITERS: number of iterations per thread (kernel supports iterating ŷ ← ŷ·m̂ repeatedly)
-//!   These will be hooked into the launcher in the next step to reduce per-launch CPU y0 exponentiations
-//!   (few threads, many iterations per launch) and to pool device constants/module/stream across launches.
+//!     These will be hooked into the launcher in the next step to reduce per-launch CPU y0 exponentiations
+//!     (few threads, many iterations per launch) and to pool device constants/module/stream across launches.
 //!
 //! Notes:
 //! - Embedded PTX is preferred at runtime; fallback is ENGINE_GPU_CUDA_PTX_DIR for external PTX.
@@ -31,6 +32,7 @@
 //!   We handle the very first nonce in each chunk on CPU for parity, then
 //!   consume GPU outputs for subsequent nonces in the chunk.
 
+#[cfg(feature = "cuda")]
 use anyhow::Context as AnyhowContext;
 use pow_core::JobContext;
 use primitive_types::U512;
@@ -60,7 +62,7 @@ pub struct CudaEngine;
 impl CudaEngine {
     /// Construct a new CUDA engine.
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Human-readable name for logs/metrics.
@@ -404,6 +406,7 @@ impl GpuConstants {
 
 // --- Helpers: conversions and portable Montgomery (host-side precompute) ---
 
+#[allow(clippy::needless_range_loop)]
 fn u512_to_le_limbs(x: U512) -> [u64; 8] {
     let be = x.to_big_endian();
     let mut le = [0u64; 8];
@@ -437,6 +440,7 @@ fn mont_n0_inv(n0: u64) -> u64 {
 }
 
 // Portable CIOS Montgomery multiplication: returns (a * b * R^{-1}) mod n
+#[allow(clippy::needless_range_loop)]
 fn mont_mul_portable(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
     const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
     let mut acc = [0u128; 9];

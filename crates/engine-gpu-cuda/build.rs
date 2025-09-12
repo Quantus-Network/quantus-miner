@@ -99,19 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // - Use compute_* for -arch
     // - Use sm_* for -code
     let (arch_compute, arch_sm) = if let Some(s) = raw_arch.strip_prefix("sm_") {
-        (format!("compute_{}", s), raw_arch.clone())
+        (format!("compute_{s}"), raw_arch.clone())
     } else if let Some(s) = raw_arch.strip_prefix("compute_") {
-        (raw_arch.clone(), format!("sm_{}", s))
+        (raw_arch.clone(), format!("sm_{s}"))
     } else if let Some(s) = raw_arch.strip_prefix("sm") {
-        (format!("compute{}", s), raw_arch.clone())
+        (format!("compute{s}"), raw_arch.clone())
     } else {
         ("compute_70".to_string(), "sm_70".to_string())
     };
     println!("cargo:warning=NVCC={}", nvcc.display());
-    println!(
-        "cargo:warning=CUDA_ARCH (normalized): compute={}, sm={}",
-        arch_compute, arch_sm
-    );
+    println!("cargo:warning=CUDA_ARCH (normalized): compute={arch_compute}, sm={arch_sm}");
 
     // Output directory for artifacts
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -148,20 +145,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .any(|d| d.join("cuda_runtime.h").is_file());
     if !has_runtime_h {
-        return Err(Box::new(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "engine-gpu-cuda: missing CUDA headers (cuda_runtime.h). \
+        return Err(Box::new(io::Error::other(format!(
+            "engine-gpu-cuda: missing CUDA headers (cuda_runtime.h). \
                  Ensure the matching CUDA toolkit is installed (see README), \
                  and CUDA_HOME is set (current CUDA_HOME={:?}). Searched: {}",
-                cuda_home_env,
-                include_dirs
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )));
+            cuda_home_env,
+            include_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))));
     }
 
     // Extra nvcc options and optional host compiler override
@@ -175,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let ccbin = env::var("MINER_NVCC_CCBIN").ok();
     if let Some(ref cc) = ccbin {
-        println!("cargo:warning=nvcc: using -ccbin {}", cc);
+        println!("cargo:warning=nvcc: using -ccbin {cc}");
     }
 
     // Compile each .cu into artifacts
@@ -188,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stem = cu
             .file_stem()
             .and_then(OsStr::to_str)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid kernel filename"))?
+            .ok_or_else(|| io::Error::other("Invalid kernel filename"))?
             .to_string();
 
         let ptx_path = out_dir.join(format!("{stem}.ptx"));
@@ -215,8 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => {
                 eprintln!("cargo:warning=nvcc PTX failed for {}: {err}", cu.display());
                 eprintln!(
-                    "cargo:warning=Skipping PTX for {} (will rely on CUBIN if available)",
-                    stem
+                    "cargo:warning=Skipping PTX for {stem} (will rely on CUBIN if available)"
                 );
             }
         }
@@ -246,8 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cu.display()
                 );
                 eprintln!(
-                    "cargo:warning=Skipping CUBIN for {} (will fall back to PTX if present)",
-                    stem
+                    "cargo:warning=Skipping CUBIN for {stem} (will fall back to PTX if present)"
                 );
             }
         }
@@ -255,8 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fail fast if no artifacts were generated (prevents producing a GPU binary without embeds)
     if generated_ptx.is_empty() && generated_cubin.is_empty() {
-        return Err(Box::new(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(Box::new(io::Error::other(
             "engine-gpu-cuda: no CUDA artifacts embedded (PTX/CUBIN). Ensure NVCC is set and CUDA_ARCH=sm_XX; see README Fedora section.",
         )));
     }
@@ -275,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (stem, path) in &generated_ptx {
         let const_name = to_const_name(stem, "_PTX");
         let ptx = std::fs::read_to_string(path).unwrap_or_else(|_| String::new());
-        rs.push_str(&format!("    pub const {}: &str = r###\"", const_name));
+        rs.push_str(&format!("    pub const {const_name}: &str = r###\""));
         rs.push_str(&ptx);
         rs.push_str("\"###;\n");
     }
@@ -283,10 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rs.push_str("        match name {\n");
     for (stem, _) in &generated_ptx {
         let const_name = to_const_name(stem, "_PTX");
-        rs.push_str(&format!(
-            "            \"{}\" => Some({}),\n",
-            stem, const_name
-        ));
+        rs.push_str(&format!("            \"{stem}\" => Some({const_name}),\n"));
     }
     rs.push_str("            _ => None,\n");
     rs.push_str("        }\n");
@@ -299,14 +287,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let const_name = to_const_name(stem, "_CUBIN");
         let bytes = std::fs::read(path).unwrap_or_default();
         rs.push_str(&format!(
-            "    pub static {}: &'static [u8] = &[\n        ",
-            const_name
+            "    pub static {const_name}: &'static [u8] = &[\n        "
         ));
         for (i, b) in bytes.iter().enumerate() {
             if i > 0 && i % 16 == 0 {
                 rs.push_str("\n        ");
             }
-            rs.push_str(&format!("{},", b));
+            rs.push_str(&format!("{b},"));
         }
         rs.push_str("\n    ];\n");
     }
@@ -314,10 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rs.push_str("        match name {\n");
     for (stem, _) in &generated_cubin {
         let const_name = to_const_name(stem, "_CUBIN");
-        rs.push_str(&format!(
-            "            \"{}\" => Some({}),\n",
-            stem, const_name
-        ));
+        rs.push_str(&format!("            \"{stem}\" => Some({const_name}),\n"));
     }
     rs.push_str("            _ => None,\n");
     rs.push_str("        }\n");
@@ -426,15 +410,15 @@ fn compile_to_ptx(
 
     let status = cmd.status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("nvcc returned non-zero exit status (ptx): {status}"),
-        ));
+        return Err(io::Error::other(format!(
+            "nvcc returned non-zero exit status (ptx): {status}"
+        )));
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_to_cubin(
     nvcc: &Path,
     arch_compute: &str,
@@ -468,10 +452,9 @@ fn compile_to_cubin(
 
     let status = cmd.status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("nvcc returned non-zero exit status (cubin): {status}"),
-        ));
+        return Err(io::Error::other(format!(
+            "nvcc returned non-zero exit status (cubin): {status}"
+        )));
     }
 
     Ok(())
