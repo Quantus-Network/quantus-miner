@@ -305,7 +305,7 @@ impl CudaEngine {
             // Determine a small launch window (cover next nonces via GPU)
             // coverage bounded by remaining is enforced during consumption
 
-            let num_threads = threads.min(1024);
+            let num_threads = threads;
             // Use many iterations per thread to reduce host exponentiations per launch
             let grid_dim = ((num_threads + block_dim - 1) / block_dim).max(1);
 
