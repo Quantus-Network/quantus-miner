@@ -208,6 +208,11 @@ impl MiningService {
                             running_jobs += 1;
                             total_rate += job.last_hash_rate;
                             metrics::set_job_hash_rate(job.engine_name, job_id, job.last_hash_rate);
+                            metrics::set_job_estimated_rate(
+                                job.engine_name,
+                                job_id,
+                                job.last_hash_rate,
+                            );
                         }
                     }
                     metrics::set_hash_rate(total_rate);
@@ -453,6 +458,7 @@ impl MiningJob {
                     let job_rate: f64 = self.thread_rate_ema.values().copied().sum();
                     self.last_hash_rate = job_rate;
                     metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
+                    metrics::set_job_estimated_rate(self.engine_name, job_id, job_rate);
                 }
             }
 
@@ -501,6 +507,8 @@ impl MiningJob {
                     metrics::inc_job_status("completed");
                     if let Some(job_id) = &self.job_id {
                         metrics::inc_jobs_by_engine(self.engine_name, "completed");
+                        metrics::inc_candidates_found(self.engine_name, job_id);
+                        // TODO(metrics): engine-level false-positive metric is emitted in engine implementations (e.g., gpu-cuda G2 host re-verification)
                         metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 1);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
