@@ -23,9 +23,12 @@
 ################################################################################
 ARG CUDA_TAG=12.9.0
 FROM nvcr.io/nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04 AS builder
+ARG CUDA_TAG
+ENV CUDA_TAG=${CUDA_TAG}
 
 # SM arch for the device code (86=Ampere 3060, 89=Ada 4090, 120=CC 12.0/5090).
 ARG SM=86
+ENV SM=${SM}
 
 # System deps for Rust toolchain and linking
 RUN apt-get update && \
