@@ -297,6 +297,7 @@ impl CudaEngine {
 
             // Consume GPU results in-order; each thread emitted `iters_per_thread` y values:
             // nonce = current + 1 + (t * iters_per_thread) + j
+            let t_sha_start = std::time::Instant::now();
             for t in 0..(num_threads as usize) {
                 for j in 0..(iters_per_thread as usize) {
                     if cancel.load(AtomicOrdering::Relaxed) {
@@ -331,6 +332,10 @@ impl CudaEngine {
                     }
                 }
             }
+
+            // SHA3 (host) timing
+            let sha3_ms = t_sha_start.elapsed().as_millis();
+            log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
 
             // Advance: we covered 1 (CPU step) + num_threads * iters_per_thread nonces in this iteration
             current = current.saturating_add(U512::from(
