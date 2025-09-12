@@ -241,8 +241,7 @@ extern "C" __global__ void qpow_montgomery_g1_kernel(
 
     // Transform to Montgomery domain
         uint64_t yhat[8];
-        const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
-        to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
+        to_mont_512(y0_loc, r2_loc, n_loc, n0_inv, yhat);
 
     // Iterate and emit normalized y per step
     // Output stride per thread: iters_per_thread * 8 limbs
@@ -528,8 +527,9 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
     for (int i = 0; i < 8; ++i) {
         y0_loc[i] = y0[tid * 8u + i];
     }
+    const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
     uint64_t yhat[8];
-    to_mont_512(y0_loc, r2_loc, n_loc, n0_inv, yhat);
+    to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
  
     // Iterate and check threshold
     const uint32_t iters = iters_per_thread;
