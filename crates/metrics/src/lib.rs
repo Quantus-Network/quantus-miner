@@ -185,6 +185,51 @@ static JOB_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
     g
 });
 
+static JOB_ESTIMATED_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_job_estimated_rate",
+            "Estimated work rate (nonces per second) per job and engine"
+        ),
+        &["engine", "job_id"],
+    )
+    .expect("create miner_job_estimated_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_estimated_rate");
+    g
+});
+
+static CANDIDATES_FOUND_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_candidates_found_total",
+            "Total candidates found per job and engine"
+        ),
+        &["engine", "job_id"],
+    )
+    .expect("create miner_candidates_found_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_candidates_found_total");
+    c
+});
+
+static CANDIDATES_FALSE_POSITIVE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_candidates_false_positive_total",
+            "Total false-positive candidates rejected by host re-verification per engine"
+        ),
+        &["engine"],
+    )
+    .expect("create miner_candidates_false_positive_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_candidates_false_positive_total");
+    c
+});
+
 static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -279,6 +324,24 @@ pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
 
 pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
     JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
+}
+
+pub fn set_job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, job_id])
+        .set(rate);
+}
+
+pub fn inc_candidates_found(engine: &str, job_id: &str) {
+    CANDIDATES_FOUND_TOTAL
+        .with_label_values(&[engine, job_id])
+        .inc();
+}
+
+pub fn inc_candidates_false_positive(engine: &str) {
+    CANDIDATES_FALSE_POSITIVE_TOTAL
+        .with_label_values(&[engine])
+        .inc();
 }
 
 pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {

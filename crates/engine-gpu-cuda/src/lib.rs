@@ -443,15 +443,28 @@ impl CudaEngine {
                         .with_context(|| "copy distance")?;
                     let distance = U512::from_big_endian(&h_dist);
                     let work = nonce.to_big_endian();
-                    log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
-                    return Ok(EngineStatus::Found {
-                        candidate: engine_cpu::EngineCandidate {
-                            nonce,
-                            work,
-                            distance,
-                        },
-                        hash_count,
-                    });
+                    // Host re-verification to ensure device result matches chain semantics
+                    let host_distance = pow_core::distance_for_nonce(ctx, nonce);
+                    if pow_core::is_valid_distance(ctx, host_distance) {
+                        log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
+                        return Ok(EngineStatus::Found {
+                            candidate: engine_cpu::EngineCandidate {
+                                nonce,
+                                work,
+                                distance: host_distance,
+                            },
+                            hash_count,
+                        });
+                    } else {
+                        // Treat as not found: account coverage and advance like the "not found" path
+                        log::warn!(target: "miner", "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}");
+                        hash_count = hash_count.saturating_add(covered);
+                        if covered < total_elems_u64 {
+                            return Ok(EngineStatus::Exhausted { hash_count });
+                        }
+                        current = current.saturating_add(U512::from(1u64 + total_elems_u64));
+                        continue;
+                    }
                 }
 
                 // Not found in this window
