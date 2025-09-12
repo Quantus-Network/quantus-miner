@@ -323,7 +323,10 @@ impl CudaEngine {
             // Prepare/update per-chunk inputs
             let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                 .with_context(|| "alloc/copy d_y0")?;
-            // G1 will allocate y_out locally before launch
+            let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
+                (num_threads as usize) * (iters_per_thread as usize) * 8,
+            )
+            .with_context(|| "alloc d_y_out")?;
 
             // Branch kernel launch by mode: G2 (device SHA3 + early-exit) vs G1 (return y values)
             if is_g2 {
@@ -426,10 +429,7 @@ impl CudaEngine {
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
                 log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
-                let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
-                    (num_threads as usize) * (iters_per_thread as usize) * 8,
-                )
-                .with_context(|| "alloc d_y_out")?;
+
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -451,147 +451,148 @@ impl CudaEngine {
             }
 
             // G2 handled in the launch branch above; proceed with G1 copy-back path below.
+            if !is_g2 {
+                // G1 path (host SHA3) — Copy back results (optional pinned host buffer + async copy)
+                let use_pinned = std::env::var("MINER_CUDA_PINNED")
+                    .ok()
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let total_words = (num_threads as usize) * (iters_per_thread as usize) * 8;
+                let t_copy_start = std::time::Instant::now();
+                let y_host_arc: std::sync::Arc<dyn AsRef<[u64]> + Send + Sync> = if use_pinned {
+                    let mut pinned =
+                        unsafe { cust::memory::LockedBuffer::<u64>::uninitialized(total_words) }
+                            .with_context(|| "alloc pinned host buffer")?;
+                    unsafe {
+                        cust::memory::AsyncCopyDestination::async_copy_to(
+                            &*d_y_out,
+                            pinned.as_mut_slice(),
+                            &stream,
+                        )
+                        .with_context(|| "async copy d_y_out -> pinned")?;
+                    }
+                    stream
+                        .synchronize()
+                        .with_context(|| "stream synchronize (post async D2H)")?;
+                    log::info!(target: "miner", "CUDA copy-back OK (pinned, async): elems={}, copy_ms={}", total_words, t_copy_start.elapsed().as_millis());
+                    std::sync::Arc::new(pinned)
+                } else {
+                    let mut y_out_host = vec![0u64; total_words];
+                    d_y_out
+                        .copy_to(&mut y_out_host)
+                        .with_context(|| "copy d_y_out -> host")?;
+                    let copy_ms = t_copy_start.elapsed().as_millis();
+                    log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
+                    std::sync::Arc::new(y_out_host)
+                };
 
-            // G1 path (host SHA3) — Copy back results (optional pinned host buffer + async copy)
-            let use_pinned = std::env::var("MINER_CUDA_PINNED")
-                .ok()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let total_words = (num_threads as usize) * (iters_per_thread as usize) * 8;
-            let t_copy_start = std::time::Instant::now();
-            let y_host_arc: std::sync::Arc<dyn AsRef<[u64]> + Send + Sync> = if use_pinned {
-                let mut pinned =
-                    unsafe { cust::memory::LockedBuffer::<u64>::uninitialized(total_words) }
-                        .with_context(|| "alloc pinned host buffer")?;
-                unsafe {
-                    cust::memory::AsyncCopyDestination::async_copy_to(
-                        &*d_y_out,
-                        pinned.as_mut_slice(),
-                        &stream,
-                    )
-                    .with_context(|| "async copy d_y_out -> pinned")?;
-                }
-                stream
-                    .synchronize()
-                    .with_context(|| "stream synchronize (post async D2H)")?;
-                log::info!(target: "miner", "CUDA copy-back OK (pinned, async): elems={}, copy_ms={}", total_words, t_copy_start.elapsed().as_millis());
-                std::sync::Arc::new(pinned)
-            } else {
-                let mut y_out_host = vec![0u64; total_words];
-                d_y_out
-                    .copy_to(&mut y_out_host)
-                    .with_context(|| "copy d_y_out -> host")?;
-                let copy_ms = t_copy_start.elapsed().as_millis();
-                log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
-                std::sync::Arc::new(y_out_host)
-            };
+                // Parallel SHA3 over GPU results; compute earliest valid index (if any)
+                let t_sha_start = std::time::Instant::now();
 
-            // Parallel SHA3 over GPU results; compute earliest valid index (if any)
-            let t_sha_start = std::time::Instant::now();
+                // Bound hashing work to remaining range in this chunk
+                let rem_be = end.saturating_sub(current).to_big_endian();
+                let mut last8 = [0u8; 8];
+                last8.copy_from_slice(&rem_be[56..64]);
+                let remaining_inclusive: u64 = u64::from_be_bytes(last8);
 
-            // Bound hashing work to remaining range in this chunk
-            let rem_be = end.saturating_sub(current).to_big_endian();
-            let mut last8 = [0u8; 8];
-            last8.copy_from_slice(&rem_be[56..64]);
-            let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+                let total_elems = (num_threads as usize) * (iters_per_thread as usize);
+                let total_to_hash = std::cmp::min(total_elems as u64, remaining_inclusive) as usize;
 
-            let total_elems = (num_threads as usize) * (iters_per_thread as usize);
-            let total_to_hash = std::cmp::min(total_elems as u64, remaining_inclusive) as usize;
+                let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(1)
+                    });
+                log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_to_hash}");
 
-            let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1)
-                });
-            log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_to_hash}");
+                // Share outputs across worker threads (Vec or LockedBuffer depending on MINER_CUDA_PINNED)
+                let y_shared = y_host_arc.clone();
+                let ctx_for_threads = ctx.clone();
+                let found_min_idx =
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+                let found_info = std::sync::Arc::new(std::sync::Mutex::new(None::<(U512, U512)>));
 
-            // Share outputs across worker threads (Vec or LockedBuffer depending on MINER_CUDA_PINNED)
-            let y_shared = y_host_arc.clone();
-            let ctx_for_threads = ctx.clone();
-            let found_min_idx =
-                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
-            let found_info = std::sync::Arc::new(std::sync::Mutex::new(None::<(U512, U512)>));
+                std::thread::scope(|scope| {
+                    for tidx in 0..hash_threads.max(1) {
+                        let y_arc = y_shared.clone();
+                        let ctx_local = ctx_for_threads.clone();
+                        let min_idx = found_min_idx.clone();
+                        let info = found_info.clone();
+                        let start_k = (total_to_hash * tidx) / hash_threads.max(1);
+                        let end_k = (total_to_hash * (tidx + 1)) / hash_threads.max(1);
+                        let iters_usize = iters_per_thread as usize;
 
-            std::thread::scope(|scope| {
-                for tidx in 0..hash_threads.max(1) {
-                    let y_arc = y_shared.clone();
-                    let ctx_local = ctx_for_threads.clone();
-                    let min_idx = found_min_idx.clone();
-                    let info = found_info.clone();
-                    let start_k = (total_to_hash * tidx) / hash_threads.max(1);
-                    let end_k = (total_to_hash * (tidx + 1)) / hash_threads.max(1);
-                    let iters_usize = iters_per_thread as usize;
+                        scope.spawn(move || {
+                            for k in start_k..end_k {
+                                if cancel.load(AtomicOrdering::Relaxed) {
+                                    break;
+                                }
 
-                    scope.spawn(move || {
-                        for k in start_k..end_k {
-                            if cancel.load(AtomicOrdering::Relaxed) {
-                                break;
-                            }
+                                let idx_words = k * 8;
+                                let mut le = [0u64; 8];
+                                let y_slice: &[u64] = y_arc.as_ref().as_ref();
+                                le.copy_from_slice(&y_slice[idx_words..idx_words + 8]);
+                                let y_norm = le_limbs_to_u512(&le);
 
-                            let idx_words = k * 8;
-                            let mut le = [0u64; 8];
-                            let y_slice: &[u64] = y_arc.as_ref().as_ref();
-                            le.copy_from_slice(&y_slice[idx_words..idx_words + 8]);
-                            let y_norm = le_limbs_to_u512(&le);
+                                let distance = pow_core::distance_from_y(&ctx_local, y_norm);
+                                if pow_core::is_valid_distance(&ctx_local, distance) {
+                                    let t = k / iters_usize;
+                                    let j = k % iters_usize;
+                                    let nonce = current.saturating_add(U512::from(
+                                        1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
+                                    ));
 
-                            let distance = pow_core::distance_from_y(&ctx_local, y_norm);
-                            if pow_core::is_valid_distance(&ctx_local, distance) {
-                                let t = k / iters_usize;
-                                let j = k % iters_usize;
-                                let nonce = current.saturating_add(U512::from(
-                                    1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
-                                ));
-
-                                let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
-                                if k < prev {
-                                    min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
-                                    if let Ok(mut guard) = info.lock() {
-                                        *guard = Some((nonce, distance));
+                                    let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
+                                    if k < prev {
+                                        min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
+                                        if let Ok(mut guard) = info.lock() {
+                                            *guard = Some((nonce, distance));
+                                        }
                                     }
                                 }
                             }
-                        }
+                        });
+                    }
+                });
+
+                // SHA3 (host) timing
+                let sha3_ms = t_sha_start.elapsed().as_millis();
+                log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
+
+                // Outcomes and accounting
+                let total_elems_u64 = total_to_hash as u64;
+
+                // GPU coverage limited by remaining range
+                let gpu_coverage = total_elems_u64;
+
+                // If found, compute hash_count up to the earliest index and return
+                if let Some((nonce, distance)) = found_info.lock().ok().and_then(|g| (*g).clone()) {
+                    let k = found_min_idx.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                    hash_count = hash_count.saturating_add(k + 1);
+                    let work = nonce.to_big_endian();
+                    return Ok(EngineStatus::Found {
+                        candidate: engine_cpu::EngineCandidate {
+                            nonce,
+                            work,
+                            distance,
+                        },
+                        hash_count,
                     });
                 }
-            });
 
-            // SHA3 (host) timing
-            let sha3_ms = t_sha_start.elapsed().as_millis();
-            log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
+                // No candidate found; update hash_count and either exhaust or advance
+                hash_count = hash_count.saturating_add(gpu_coverage);
 
-            // Outcomes and accounting
-            let total_elems_u64 = total_to_hash as u64;
+                if gpu_coverage < total_elems_u64 {
+                    return Ok(EngineStatus::Exhausted { hash_count });
+                }
 
-            // GPU coverage limited by remaining range
-            let gpu_coverage = total_elems_u64;
-
-            // If found, compute hash_count up to the earliest index and return
-            if let Some((nonce, distance)) = found_info.lock().ok().and_then(|g| (*g).clone()) {
-                let k = found_min_idx.load(std::sync::atomic::Ordering::Relaxed) as u64;
-                hash_count = hash_count.saturating_add(k + 1);
-                let work = nonce.to_big_endian();
-                return Ok(EngineStatus::Found {
-                    candidate: engine_cpu::EngineCandidate {
-                        nonce,
-                        work,
-                        distance,
-                    },
-                    hash_count,
-                });
+                // Advance: we covered 1 (CPU step) + num_threads * iters_per_thread nonces in this iteration
+                current = current.saturating_add(U512::from(1u64 + total_elems_u64));
             }
-
-            // No candidate found; update hash_count and either exhaust or advance
-            hash_count = hash_count.saturating_add(gpu_coverage);
-
-            if gpu_coverage < total_elems_u64 {
-                return Ok(EngineStatus::Exhausted { hash_count });
-            }
-
-            // Advance: we covered 1 (CPU step) + num_threads * iters_per_thread nonces in this iteration
-            current = current.saturating_add(U512::from(1u64 + total_elems_u64));
         }
 
         Ok(EngineStatus::Exhausted { hash_count })
