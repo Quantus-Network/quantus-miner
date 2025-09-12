@@ -127,6 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut include_dirs: Vec<PathBuf> = Vec::new();
+
+    // If CUDA_HOME was found (either env or derived from NVCC), add its common include locations.
     if let Some(home) = cuda_home_env.as_ref() {
         let t_inc = home.join("targets").join("x86_64-linux").join("include");
         let i_inc = home.join("include");
@@ -137,6 +139,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             include_dirs.push(i_inc);
         }
     }
+
+    // Fallback: common system install prefix in CUDA devel images.
+    // This allows builds to succeed even when CUDA_HOME isn't set in the container.
+    for fallback in [
+        Path::new("/usr/local/cuda/targets/x86_64-linux/include"),
+        Path::new("/usr/local/cuda/include"),
+    ] {
+        if fallback.is_dir() {
+            include_dirs.push(fallback.to_path_buf());
+        }
+    }
+
+    // Deduplicate include dirs to avoid noisy logs and duplicate -I flags
+    include_dirs.sort();
+    include_dirs.dedup();
+
     for inc in &include_dirs {
         println!("cargo:warning=CUDA_INCLUDE_DIR={}", inc.display());
     }
