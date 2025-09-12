@@ -19,7 +19,7 @@ The backend is feature‑gated. When built with `--features cuda`, the crate’s
   - Device: threshold compare + global early‑exit flag (atomic) + tiny candidate write.
   - Device: move constants to `__constant__` memory.
   - Host: poll early‑exit; no large copy‑backs (only candidate or counters).
-  - Result: removes PCIe and host‑SHA3 bottlenecks; enables real GPU‑bound throughput.
+  - Result: removes PCIe and host‑SHA3 bottlenecks; enables real GPU‑bound throughput. Selection will be enabled via `MINER_CUDA_MODE=g2` once available.
 
 ---
 
@@ -43,7 +43,7 @@ Notes:
 
 ## Runtime selection and embeds
 
-At startup, the engine prefers the embedded CUBIN. If no CUBIN is embedded, it falls back to the embedded PTX. You’ll see logs like:
+At startup, the engine prefers the embedded CUBIN; if absent it falls back to the embedded PTX. You can override with `MINER_CUDA_IMAGE=cubin|ptx`. You’ll see logs like:
 - `CUDA: using CUBIN (embedded)`
 - `CUDA: using PTX source = embedded`
 - (If neither exists, the engine logs the absence and delegates to CPU fast engine.)
@@ -68,6 +68,8 @@ These knobs affect GPU launch shape and how much work is returned to the host (a
   - Iterations per thread. Higher values produce larger output buffers and more host SHA3 work per launch.
 - `MINER_CUDA_IMAGE` = `cubin` | `ptx` (optional)
   - Overrides the embedded image choice (debugging/testing). Default is to prefer CUBIN.
+- `MINER_CUDA_HASH_THREADS` (optional)
+  - Number of host SHA3 worker threads to use to consume GPU output. Defaults to available parallelism.
 
 How much data per launch?
 - y_out bytes = `threads × iters × 64`.
@@ -179,6 +181,7 @@ Runtime:
 - `MINER_CUDA_THREADS` — total threads (increase for more blocks).
 - `MINER_CUDA_ITERS` — iterations per thread (controls y_out size).
 - `MINER_CUDA_IMAGE` = `cubin|ptx` — force embedded image selection (optional).
+- `MINER_CUDA_HASH_THREADS` — parallel host SHA3 workers (optional).
 
 Build-time:
 - `CUDA_ARCH` = `sm_86|sm_89|sm_120|…` — SM target for device images (normalized internally).

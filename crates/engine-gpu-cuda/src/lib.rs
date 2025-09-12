@@ -140,37 +140,111 @@ impl CudaEngine {
             }
         };
 
-        // Prefer embedded CUBIN (native SASS); fall back to embedded/env PTX if unavailable.
-        let module = if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
-            log::info!(target: "miner", "CUDA: using CUBIN (embedded)");
-            cuda::module::Module::from_cubin(cubin, &[]).with_context(|| "load CUBIN module")?
-        } else {
-            // Load PTX module: prefer embedded PTX; fall back to env-dir PTX
-            let (ptx_text, ptx_origin) = if let Some(s) = ptx_embedded::get("qpow_kernel") {
-                (s.to_string(), String::from("embedded"))
-            } else {
-                let ptx_dir = std::env::var("ENGINE_GPU_CUDA_PTX_DIR").map_err(|_| {
-                    anyhow::anyhow!("ENGINE_GPU_CUDA_PTX_DIR not set and no embedded PTX")
-                })?;
-                let ptx_path = std::path::Path::new(&ptx_dir).join("qpow_kernel.ptx");
-                let txt = std::fs::read_to_string(&ptx_path).map_err(|e| {
-                    anyhow::anyhow!("failed to read PTX at {}: {e}", ptx_path.display())
-                })?;
-                (txt, format!("env:{}", ptx_path.display()))
-            };
-            log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin}");
-            let ptx_cstr = CString::new(ptx_text)?;
-            cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
-                .with_context(|| "load PTX module")?
+        // Prefer embedded CUBIN (native SASS) by default; allow env override; fall back to embedded/env PTX if unavailable.
+        let image_override = std::env::var("MINER_CUDA_IMAGE")
+            .ok()
+            .map(|s| s.to_ascii_lowercase());
+        let module = match image_override.as_deref() {
+            Some("ptx") => {
+                // Force PTX
+                let (ptx_text, ptx_origin) = if let Some(s) = ptx_embedded::get("qpow_kernel") {
+                    (s.to_string(), String::from("embedded"))
+                } else {
+                    let ptx_dir = std::env::var("ENGINE_GPU_CUDA_PTX_DIR").map_err(|_| {
+                        anyhow::anyhow!("ENGINE_GPU_CUDA_PTX_DIR not set and no embedded PTX")
+                    })?;
+                    let ptx_path = std::path::Path::new(&ptx_dir).join("qpow_kernel.ptx");
+                    let txt = std::fs::read_to_string(&ptx_path).map_err(|e| {
+                        anyhow::anyhow!("failed to read PTX at {}: {e}", ptx_path.display())
+                    })?;
+                    (txt, format!("env:{}", ptx_path.display()))
+                };
+                log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin} (forced by MINER_CUDA_IMAGE=ptx)");
+                let ptx_cstr = CString::new(ptx_text)?;
+                cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
+                    .with_context(|| "load PTX module")?
+            }
+            Some("cubin") => {
+                // Force CUBIN
+                if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
+                    log::info!(target: "miner", "CUDA: using CUBIN (embedded) (forced by MINER_CUDA_IMAGE=cubin)");
+                    cuda::module::Module::from_cubin(cubin, &[])
+                        .with_context(|| "load CUBIN module")?
+                } else {
+                    anyhow::bail!(
+                        "MINER_CUDA_IMAGE=cubin requested but no embedded CUBIN image was found"
+                    );
+                }
+            }
+            _ => {
+                if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
+                    log::info!(target: "miner", "CUDA: using CUBIN (embedded)");
+                    cuda::module::Module::from_cubin(cubin, &[])
+                        .with_context(|| "load CUBIN module")?
+                } else {
+                    // Load PTX module: prefer embedded PTX; fall back to env-dir PTX
+                    let (ptx_text, ptx_origin) = if let Some(s) = ptx_embedded::get("qpow_kernel") {
+                        (s.to_string(), String::from("embedded"))
+                    } else {
+                        let ptx_dir = std::env::var("ENGINE_GPU_CUDA_PTX_DIR").map_err(|_| {
+                            anyhow::anyhow!("ENGINE_GPU_CUDA_PTX_DIR not set and no embedded PTX")
+                        })?;
+                        let ptx_path = std::path::Path::new(&ptx_dir).join("qpow_kernel.ptx");
+                        let txt = std::fs::read_to_string(&ptx_path).map_err(|e| {
+                            anyhow::anyhow!("failed to read PTX at {}: {e}", ptx_path.display())
+                        })?;
+                        (txt, format!("env:{}", ptx_path.display()))
+                    };
+                    log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin}");
+                    let ptx_cstr = CString::new(ptx_text)?;
+                    cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
+                        .with_context(|| "load PTX module")?
+                }
+            }
         };
         let stream = cuda::stream::Stream::new(cuda::stream::StreamFlags::DEFAULT, None)
             .with_context(|| "create stream")?;
-        let func = module
-            .get_function("qpow_montgomery_g1_kernel")
-            .with_context(|| "get kernel function 'qpow_montgomery_g1_kernel'")?;
+        // Select kernel by mode; try G2 when requested, otherwise use G1. If G2 unavailable, fall back to G1.
+        let func_name = match std::env::var("MINER_CUDA_MODE").ok().as_deref() {
+            Some("g2") => {
+                log::info!(target: "miner", "CUDA: MINER_CUDA_MODE=g2 requested; attempting to resolve G2 kernel");
+                "qpow_montgomery_g2_kernel"
+            }
+            _ => "qpow_montgomery_g1_kernel",
+        };
+        let func = match module.get_function(func_name) {
+            Ok(f) => f,
+            Err(e) => {
+                if func_name == "qpow_montgomery_g2_kernel" {
+                    log::warn!(target: "miner", "CUDA: G2 kernel unavailable ({e:?}); falling back to G1");
+                    module
+                        .get_function("qpow_montgomery_g1_kernel")
+                        .with_context(|| "get kernel function 'qpow_montgomery_g1_kernel'")?
+                } else {
+                    return Err(e).with_context(|| "get kernel function")?;
+                }
+            }
+        };
 
         // Precompute Montgomery constants (host-side)
         let gc = GpuConstants::from_ctx(ctx);
+
+        // Flatten constants (host)
+        let m_le = gc.m_le;
+        let n_le = gc.n_le;
+        let r2_le = gc.r2_le;
+        let m_hat_le = gc.m_hat_le;
+        let n0_inv = gc.n0_inv;
+
+        // Allocate device constant buffers once (persist across launches)
+        let d_m = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_le)
+            .with_context(|| "alloc/copy d_m")?;
+        let d_n = cuda::memory::DeviceBuffer::<u64>::from_slice(&n_le)
+            .with_context(|| "alloc/copy d_n")?;
+        let d_r2 = cuda::memory::DeviceBuffer::<u64>::from_slice(&r2_le)
+            .with_context(|| "alloc/copy d_r2")?;
+        let d_mhat = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_hat_le)
+            .with_context(|| "alloc/copy d_mhat")?;
 
         // Chunked loop: process the inclusive range [current ..= end]
         // Launcher tuning knobs (env overrides)
@@ -241,22 +315,7 @@ impl CudaEngine {
                 y0_host[off..off + 8].copy_from_slice(&y0_le);
             }
 
-            // Flatten constants
-            let m_le = gc.m_le;
-            let n_le = gc.n_le;
-            let r2_le = gc.r2_le;
-            let m_hat_le = gc.m_hat_le;
-            let n0_inv = gc.n0_inv;
-
-            // Allocate/copy device buffers
-            let d_m = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_le)
-                .with_context(|| "alloc/copy d_m")?;
-            let d_n = cuda::memory::DeviceBuffer::<u64>::from_slice(&n_le)
-                .with_context(|| "alloc/copy d_n")?;
-            let d_r2 = cuda::memory::DeviceBuffer::<u64>::from_slice(&r2_le)
-                .with_context(|| "alloc/copy d_r2")?;
-            let d_mhat = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_hat_le)
-                .with_context(|| "alloc/copy d_mhat")?;
+            // Prepare/update per-chunk inputs
             let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                 .with_context(|| "alloc/copy d_y0")?;
             let mut d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
@@ -295,52 +354,115 @@ impl CudaEngine {
             let copy_ms = t_copy_start.elapsed().as_millis();
             log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
 
-            // Consume GPU results in-order; each thread emitted `iters_per_thread` y values:
-            // nonce = current + 1 + (t * iters_per_thread) + j
+            // Parallel SHA3 over GPU results; compute earliest valid index (if any)
             let t_sha_start = std::time::Instant::now();
-            for t in 0..(num_threads as usize) {
-                for j in 0..(iters_per_thread as usize) {
-                    if cancel.load(AtomicOrdering::Relaxed) {
-                        return Ok(EngineStatus::Cancelled { hash_count });
+            let total_elems = (num_threads as usize) * (iters_per_thread as usize);
+            let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                });
+            log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_elems}");
+
+            // Share outputs across worker threads
+            let y_shared = std::sync::Arc::new(y_out_host);
+            let ctx_for_threads = ctx.clone();
+            let found_min_idx =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+            let found_info = std::sync::Arc::new(std::sync::Mutex::new(None::<(U512, U512)>));
+
+            let mut handles = Vec::with_capacity(hash_threads.max(1));
+            for tidx in 0..hash_threads.max(1) {
+                let y_arc = y_shared.clone();
+                let ctx_local = ctx_for_threads.clone();
+                let min_idx = found_min_idx.clone();
+                let info = found_info.clone();
+                let cancel_ref = cancel;
+                let start_k = (total_elems * tidx) / hash_threads.max(1);
+                let end_k = (total_elems * (tidx + 1)) / hash_threads.max(1);
+                let iters_usize = iters_per_thread as usize;
+
+                handles.push(std::thread::spawn(move || {
+                    for k in start_k..end_k {
+                        if cancel_ref.load(AtomicOrdering::Relaxed) {
+                            break;
+                        }
+
+                        let idx_words = k * 8;
+                        let mut le = [0u64; 8];
+                        le.copy_from_slice(&y_arc[idx_words..idx_words + 8]);
+                        let y_norm = le_limbs_to_u512(&le);
+
+                        let distance = pow_core::distance_from_y(&ctx_local, y_norm);
+                        if pow_core::is_valid_distance(&ctx_local, distance) {
+                            // Compute nonce for this index: nonce = current + 1 + (t * iters) + j
+                            let t = k / iters_usize;
+                            let j = k % iters_usize;
+                            let nonce = current.saturating_add(U512::from(
+                                1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
+                            ));
+
+                            // Update global minimum index and store candidate if earliest
+                            let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
+                            if k < prev {
+                                min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
+                                if let Ok(mut guard) = info.lock() {
+                                    *guard = Some((nonce, distance));
+                                }
+                            }
+                        }
                     }
+                }));
+            }
 
-                    let idx_words = (t * (iters_per_thread as usize) + j) * 8;
-                    let mut le = [0u64; 8];
-                    le.copy_from_slice(&y_out_host[idx_words..idx_words + 8]);
-                    let y_norm = le_limbs_to_u512(&le);
-
-                    let distance = pow_core::distance_from_y(ctx, y_norm);
-                    hash_count = hash_count.saturating_add(1);
-
-                    let nonce = current.saturating_add(U512::from(
-                        1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
-                    ));
-                    if pow_core::is_valid_distance(ctx, distance) {
-                        let work = nonce.to_big_endian();
-                        return Ok(EngineStatus::Found {
-                            candidate: engine_cpu::EngineCandidate {
-                                nonce,
-                                work,
-                                distance,
-                            },
-                            hash_count,
-                        });
-                    }
-
-                    if nonce >= end {
-                        return Ok(EngineStatus::Exhausted { hash_count });
-                    }
-                }
+            for h in handles {
+                let _ = h.join();
             }
 
             // SHA3 (host) timing
             let sha3_ms = t_sha_start.elapsed().as_millis();
             log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
 
+            // Outcomes and accounting
+            let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
+
+            // Remaining inclusive (nonces) after CPU step within this chunk
+            let rem_be = end.saturating_sub(current).to_big_endian();
+            let mut last8 = [0u8; 8];
+            last8.copy_from_slice(&rem_be[56..64]);
+            let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+
+            // GPU coverage limited by remaining range
+            let gpu_coverage = std::cmp::min(total_elems_u64, remaining_inclusive);
+
+            // If found, compute hash_count up to the earliest index and return
+            if let Some((nonce, distance)) = found_info.lock().ok().and_then(|g| (*g).clone()) {
+                let k = found_min_idx.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                hash_count = hash_count.saturating_add(k + 1);
+                let work = nonce.to_big_endian();
+                return Ok(EngineStatus::Found {
+                    candidate: engine_cpu::EngineCandidate {
+                        nonce,
+                        work,
+                        distance,
+                    },
+                    hash_count,
+                });
+            }
+
+            // No candidate found; update hash_count and either exhaust or advance
+            hash_count = hash_count.saturating_add(gpu_coverage);
+
+            if gpu_coverage < total_elems_u64 {
+                // We consumed to the end of the range in this chunk
+                return Ok(EngineStatus::Exhausted { hash_count });
+            }
+
             // Advance: we covered 1 (CPU step) + num_threads * iters_per_thread nonces in this iteration
-            current = current.saturating_add(U512::from(
-                1u64 + (num_threads as u64) * (iters_per_thread as u64),
-            ));
+            current = current.saturating_add(U512::from(1u64 + total_elems_u64));
         }
 
         Ok(EngineStatus::Exhausted { hash_count })
