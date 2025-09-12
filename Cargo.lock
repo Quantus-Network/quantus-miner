@@ -473,9 +473,12 @@ dependencies = [
  "cust",
  "engine-cpu",
  "log",
+ "num-bigint",
+ "num-traits 0.2.19",
  "pow-core",
  "primitive-types",
  "rustacuda",
+ "sha3",
  "thiserror",
 ]
 

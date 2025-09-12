@@ -18,6 +18,97 @@ cargo build --release
 
 This will compile the binary and place it in the `target/release/` directory.
 
+## CUDA Build (optional, Linux only)
+
+The CUDA backend is feature-gated and currently supported on Linux with NVIDIA GPUs. macOS is not supported for CUDA.
+
+Build with CUDA enabled:
+```bash
+# Build the CLI with CUDA feature (compiles .cu kernels to PTX via nvcc)
+cargo build -p miner-cli --features cuda --release
+```
+
+At runtime, select the engine with:
+```bash
+# Will error if CUDA runtime/driver is unavailable
+./target/release/quantus-miner --engine gpu-cuda --metrics-port 9919
+```
+
+Environment knobs used by the CUDA build:
+- NVCC: Path to the nvcc binary (optional if in PATH)
+- CUDA_HOME or CUDA_PATH: Used to locate nvcc at $CUDA_HOME/bin/nvcc when NVCC is unset
+- CUDA_ARCH: Compute capability target for PTX (default: sm_70)
+
+If nvcc isn’t found, the build will continue but skip compiling kernels; the GPU engine will then fall back to CPU at runtime.
+
+### Ubuntu (22.04/24.04) setup
+
+Install NVIDIA driver and CUDA toolkit:
+```bash
+# Install proprietary driver (pick latest recommended)
+sudo ubuntu-drivers autoinstall
+sudo reboot
+
+# CUDA toolkit (provides nvcc). Option A: Ubuntu package (may be older):
+sudo apt update
+sudo apt install -y nvidia-cuda-toolkit
+
+# Verify nvcc
+nvcc --version
+```
+For newer toolkits, consider NVIDIA’s official repo: https://developer.nvidia.com/cuda-downloads
+
+### Fedora 42 (dnf5) setup
+
+Install NVIDIA driver and CUDA toolkit:
+```bash
+# Enable RPM Fusion for proprietary NVIDIA drivers (driver comes from here)
+sudo dnf5 install -y https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+
+# Install driver (akmod builds the module for your current kernel)
+sudo dnf5 install -y akmod-nvidia
+sudo reboot
+
+# Add NVIDIA CUDA repo (for toolkit only) by creating a pinned repo file
+sudo tee /etc/yum.repos.d/cuda-fedora$(rpm -E %fedora).repo >/dev/null <<'EOF'
+[cuda-fedora$releasever-x86_64]
+name=NVIDIA CUDA Fedora $releasever - x86_64
+baseurl=https://developer.download.nvidia.com/compute/cuda/repos/fedora$releasever/x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://developer.download.nvidia.com/compute/cuda/repos/fedora$releasever/x86_64/7fa2af80.pub
+# Keep NVIDIA drivers from RPM Fusion; do not install any drivers from this repo
+excludepkgs=cuda-drivers*,nvidia-driver*,xorg-x11-drv-nvidia*,kernel*
+EOF
+
+# Install CUDA toolkit and versioned nvcc; drivers remain from RPM Fusion due to excludepkgs above
+# Discover nvcc package version and install alongside toolkit (example uses 13-0):
+sudo dnf5 search cuda-nvcc
+sudo dnf5 install -y cuda-toolkit cuda-nvcc-13-0
+
+# Verify nvcc
+nvcc --version
+
+# If nvcc is not on PATH, add it or set CUDA_HOME/NVCC (example for version 13.0):
+export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$CUDA_HOME/bin:$PATH"
+# Or point the build directly at nvcc:
+export NVCC="$CUDA_HOME/bin/nvcc"
+```
+
+### Notes
+
+- Ensure your user can access the GPU device nodes (e.g., part of the video group when required).
+- The build script compiles any .cu under crates/engine-gpu-cuda/src/kernels into PTX and sets ENGINE_GPU_CUDA_PTX_DIR for the crate to load at runtime.
+- Architecture targeting (optional, per-GPU tuning):
+  - Ampere (RTX 3060): `CUDA_ARCH=sm_86 cargo build -p miner-cli --features cuda --release`
+  - Ada (RTX 4090): `CUDA_ARCH=sm_89 cargo build -p miner-cli --features cuda --release`
+  - CC 12.0 (e.g., RTX 5090):
+    - Forward-compatible PTX: `CUDA_ARCH=compute_120 cargo build -p miner-cli --features cuda --release`
+    - Tuned for SM: `CUDA_ARCH=sm_120 cargo build -p miner-cli --features cuda --release`
+  - If unset, the default `sm_70` PTX will still JIT on newer GPUs (just with less arch-specific tuning).
+
 ## Configuration
 
 The service can be configured using command-line arguments or environment variables.

@@ -200,7 +200,7 @@ __device__ __forceinline__ void from_mont_512(
 //      Writes y (LE limbs) to y_out at [thread_offset + iter]
 // -------------------------------------------------------------------------------------------------
 
-__global__ void qpow_montgomery_g1_kernel(
+extern "C" __global__ void qpow_montgomery_g1_kernel(
     // Per-job constants (each 8 limbs, LE)
     const uint64_t* __restrict__ m,        // not used in G1 directly (we pass m_hat)
     const uint64_t* __restrict__ n,
