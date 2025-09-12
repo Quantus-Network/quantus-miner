@@ -133,30 +133,3 @@ jobs:
                   path: ${{ steps.extract.outputs.bin_path }}
                   if-no-files-found: error
                   retention-days: 14
-
-            - name: Optional rsync to CDN (if SSH key provided)
-              if: ${{ secrets.CDN_SSH_PRIVATE_KEY }}
-              env:
-                  BIN_PATH: ${{ steps.extract.outputs.bin_path }}
-                  SSH_PRIVATE_KEY: ${{ secrets.CDN_SSH_PRIVATE_KEY }}
-                  RSYNC_HOST: ${{ secrets.RSYNC_HOST || 'cdn.res.fm' }}
-                  RSYNC_PORT: ${{ secrets.RSYNC_PORT || '52201' }}
-                  RSYNC_USER: ${{ secrets.RSYNC_USER || 'resonance' }}
-                  RSYNC_PATH: ${{ secrets.RSYNC_PATH || '/usr/share/nginx/cdn.res.fm/releases/miner/' }}
-              run: |
-                  set -eux
-                  mkdir -p ~/.ssh
-                  chmod 700 ~/.ssh
-                  printf "%s\n" "${SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
-                  chmod 600 ~/.ssh/id_ed25519
-                  # Preload known_hosts (ignore failure if keyscan blocked; fallback StrictHostKeyChecking=no)
-                  ssh-keyscan -p "${RSYNC_PORT}" -t ed25519 "${RSYNC_HOST}" >> ~/.ssh/known_hosts || true
-                  chmod 644 ~/.ssh/known_hosts
-
-                  rsync \
-                    --archive \
-                    --compress \
-                    --verbose \
-                    --progress \
-                    -e "ssh -p ${RSYNC_PORT} -o StrictHostKeyChecking=no" \
-                    "${BIN_PATH}" "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}"
