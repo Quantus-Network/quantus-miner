@@ -43,7 +43,7 @@ Notes:
 
 ## Runtime selection and embeds
 
-At startup, the engine prefers the embedded CUBIN; if absent it falls back to the embedded PTX. You can override with `MINER_CUDA_IMAGE=cubin|ptx`. You’ll see logs like:
+At startup, the engine prefers the embedded CUBIN; if absent it falls back to the embedded PTX. You can override with `MINER_CUDA_IMAGE=cubin|ptx`. To attempt the G2 path (device SHA3 + early-exit), set `MINER_CUDA_MODE=g2`; if the G2 kernel isn’t embedded/available for the current device, the engine will fall back to G1 automatically. You’ll see logs like:
 - `CUDA: using CUBIN (embedded)`
 - `CUDA: using PTX source = embedded`
 - (If neither exists, the engine logs the absence and delegates to CPU fast engine.)
@@ -70,6 +70,10 @@ These knobs affect GPU launch shape and how much work is returned to the host (a
   - Overrides the embedded image choice (debugging/testing). Default is to prefer CUBIN.
 - `MINER_CUDA_HASH_THREADS` (optional)
   - Number of host SHA3 worker threads to use to consume GPU output. Defaults to available parallelism.
+- `MINER_CUDA_PINNED` = `1|true` (optional)
+  - Use pinned (page-locked) host buffers and asynchronous device-to-host copies for G1 copy-back to reduce PCIe latency.
+- `MINER_CUDA_MODE` = `g2` (optional)
+  - Attempt G2 kernel (device SHA3-512 + threshold compare + early-exit). Falls back to G1 if the G2 kernel is not available for the current device image.
 
 How much data per launch?
 - y_out bytes = `threads × iters × 64`.
@@ -182,6 +186,8 @@ Runtime:
 - `MINER_CUDA_ITERS` — iterations per thread (controls y_out size).
 - `MINER_CUDA_IMAGE` = `cubin|ptx` — force embedded image selection (optional).
 - `MINER_CUDA_HASH_THREADS` — parallel host SHA3 workers (optional).
+- `MINER_CUDA_PINNED` = `1|true` — use pinned host buffers + async D2H copy (G1 optimization).
+- `MINER_CUDA_MODE` = `g2` — try device SHA3 + early-exit; falls back to G1 if G2 kernel isn’t available.
 
 Build-time:
 - `CUDA_ARCH` = `sm_86|sm_89|sm_120|…` — SM target for device images (normalized internally).

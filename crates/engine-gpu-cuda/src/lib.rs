@@ -344,7 +344,103 @@ impl CudaEngine {
             let kernel_ms = t_kernel_start.elapsed().as_millis();
             log::info!(target: "miner", "CUDA kernel and sync OK (kernel_ms={kernel_ms})");
 
-            // Copy back results (optional pinned host buffer + async copy)
+            // Branch: if G2 kernel is selected, perform device SHA3 + early-exit handling
+            if func_name == "qpow_montgomery_g2_kernel" {
+                // Compute bounds
+                let rem_be = end.saturating_sub(current).to_big_endian();
+                let mut last8 = [0u8; 8];
+                last8.copy_from_slice(&rem_be[56..64]);
+                let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+                let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
+                let covered = std::cmp::min(total_elems_u64, remaining_inclusive);
+
+                // Prepare target/threshold (64-byte big-endian) for device
+                let target_be = ctx.target.to_big_endian();
+                let threshold_be = ctx.threshold.to_big_endian();
+                let d_target = cuda::memory::DeviceBuffer::<u8>::from_slice(&target_be)
+                    .with_context(|| "alloc/copy d_target")?;
+                let d_threshold = cuda::memory::DeviceBuffer::<u8>::from_slice(&threshold_be)
+                    .with_context(|| "alloc/copy d_threshold")?;
+
+                // Early-exit outputs
+                let d_found = cuda::memory::DeviceBuffer::<i32>::from_slice(&[0i32])
+                    .with_context(|| "alloc/copy d_found")?;
+                let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                    .with_context(|| "alloc/copy d_index")?;
+                let mut d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                    .with_context(|| "alloc d_distance")?;
+
+                // Launch G2 kernel: includes on-device SHA3 and threshold compare with early-exit
+                log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
+                let launch_result = unsafe {
+                    launch!(func<<<grid_dim, block_dim, 0, stream>>>(
+                        d_m.as_device_ptr(),
+                        d_n.as_device_ptr(),
+                        n0_inv as u64,
+                        d_r2.as_device_ptr(),
+                        d_mhat.as_device_ptr(),
+                        d_y0.as_device_ptr(),
+                        d_target.as_device_ptr(),
+                        d_threshold.as_device_ptr(),
+                        d_found.as_device_ptr(),
+                        d_index.as_device_ptr(),
+                        d_distance.as_device_ptr(),
+                        num_threads as u32,
+                        iters_per_thread as u32
+                    ))
+                };
+                launch_result.with_context(|| "launch G2 kernel")?;
+                stream
+                    .synchronize()
+                    .with_context(|| "stream synchronize (G2)")?;
+
+                // Copy back early-exit flag (and details if found)
+                let mut h_found = [0i32; 1];
+                d_found
+                    .copy_to(&mut h_found)
+                    .with_context(|| "copy found flag")?;
+                if h_found[0] != 0 {
+                    let mut h_idx = [0u32; 1];
+                    d_index.copy_to(&mut h_idx).with_context(|| "copy index")?;
+                    let k = h_idx[0] as u64;
+                    // Account: include the winning step
+                    hash_count = hash_count.saturating_add(k + 1);
+
+                    // Compute nonce from linear index (t, j)
+                    let t = (k as usize) / (iters_per_thread as usize);
+                    let j = (k as usize) % (iters_per_thread as usize);
+                    let nonce = current.saturating_add(U512::from(
+                        1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
+                    ));
+
+                    // Copy back distance (optional for completeness; threshold was already satisfied)
+                    let mut h_dist = [0u8; 64];
+                    d_distance
+                        .copy_to(&mut h_dist)
+                        .with_context(|| "copy distance")?;
+                    let distance = U512::from_big_endian(&h_dist);
+                    let work = nonce.to_big_endian();
+                    log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
+                    return Ok(EngineStatus::Found {
+                        candidate: engine_cpu::EngineCandidate {
+                            nonce,
+                            work,
+                            distance,
+                        },
+                        hash_count,
+                    });
+                }
+
+                // Not found in this window
+                hash_count = hash_count.saturating_add(covered);
+                if covered < total_elems_u64 {
+                    return Ok(EngineStatus::Exhausted { hash_count });
+                }
+                current = current.saturating_add(U512::from(1u64 + total_elems_u64));
+                continue;
+            }
+
+            // G1 path (host SHA3) — Copy back results (optional pinned host buffer + async copy)
             let use_pinned = std::env::var("MINER_CUDA_PINNED")
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -352,12 +448,10 @@ impl CudaEngine {
             let total_words = (num_threads as usize) * (iters_per_thread as usize) * 8;
             let t_copy_start = std::time::Instant::now();
             let y_host_arc: std::sync::Arc<dyn AsRef<[u64]> + Send + Sync> = if use_pinned {
-                // Page-locked host buffer with async copy on the same stream
                 let mut pinned =
                     unsafe { cust::memory::LockedBuffer::<u64>::uninitialized(total_words) }
                         .with_context(|| "alloc pinned host buffer")?;
                 unsafe {
-                    // Use fully-qualified trait path to avoid needing a 'use'
                     cust::memory::AsyncCopyDestination::async_copy_to(
                         &*d_y_out,
                         pinned.as_mut_slice(),
@@ -365,14 +459,12 @@ impl CudaEngine {
                     )
                     .with_context(|| "async copy d_y_out -> pinned")?;
                 }
-                // Ensure async copy completion before host access
                 stream
                     .synchronize()
                     .with_context(|| "stream synchronize (post async D2H)")?;
                 log::info!(target: "miner", "CUDA copy-back OK (pinned, async): elems={}, copy_ms={}", total_words, t_copy_start.elapsed().as_millis());
                 std::sync::Arc::new(pinned)
             } else {
-                // Pageable host buffer with synchronous copy
                 let mut y_out_host = vec![0u64; total_words];
                 d_y_out
                     .copy_to(&mut y_out_host)
@@ -435,14 +527,12 @@ impl CudaEngine {
 
                             let distance = pow_core::distance_from_y(&ctx_local, y_norm);
                             if pow_core::is_valid_distance(&ctx_local, distance) {
-                                // Compute nonce for this index: nonce = current + 1 + (t * iters) + j
                                 let t = k / iters_usize;
                                 let j = k % iters_usize;
                                 let nonce = current.saturating_add(U512::from(
                                     1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
                                 ));
 
-                                // Update global minimum index and store candidate if earliest
                                 let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
                                 if k < prev {
                                     min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
@@ -485,7 +575,6 @@ impl CudaEngine {
             hash_count = hash_count.saturating_add(gpu_coverage);
 
             if gpu_coverage < total_elems_u64 {
-                // We consumed to the end of the range in this chunk
                 return Ok(EngineStatus::Exhausted { hash_count });
             }
 
