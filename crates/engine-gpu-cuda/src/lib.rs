@@ -318,7 +318,7 @@ impl CudaEngine {
             // Prepare/update per-chunk inputs
             let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                 .with_context(|| "alloc/copy d_y0")?;
-            let mut d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
+            let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
                 (num_threads as usize) * (iters_per_thread as usize) * 8,
             )
             .with_context(|| "alloc d_y_out")?;
@@ -356,7 +356,16 @@ impl CudaEngine {
 
             // Parallel SHA3 over GPU results; compute earliest valid index (if any)
             let t_sha_start = std::time::Instant::now();
+
+            // Bound hashing work to remaining range in this chunk
+            let rem_be = end.saturating_sub(current).to_big_endian();
+            let mut last8 = [0u8; 8];
+            last8.copy_from_slice(&rem_be[56..64]);
+            let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+
             let total_elems = (num_threads as usize) * (iters_per_thread as usize);
+            let total_to_hash = std::cmp::min(total_elems as u64, remaining_inclusive) as usize;
+
             let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -365,7 +374,7 @@ impl CudaEngine {
                         .map(|n| n.get())
                         .unwrap_or(1)
                 });
-            log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_elems}");
+            log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_to_hash}");
 
             // Share outputs across worker threads
             let y_shared = std::sync::Arc::new(y_out_host);
@@ -374,69 +383,59 @@ impl CudaEngine {
                 std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
             let found_info = std::sync::Arc::new(std::sync::Mutex::new(None::<(U512, U512)>));
 
-            let mut handles = Vec::with_capacity(hash_threads.max(1));
-            for tidx in 0..hash_threads.max(1) {
-                let y_arc = y_shared.clone();
-                let ctx_local = ctx_for_threads.clone();
-                let min_idx = found_min_idx.clone();
-                let info = found_info.clone();
-                let cancel_ref = cancel;
-                let start_k = (total_elems * tidx) / hash_threads.max(1);
-                let end_k = (total_elems * (tidx + 1)) / hash_threads.max(1);
-                let iters_usize = iters_per_thread as usize;
+            std::thread::scope(|scope| {
+                for tidx in 0..hash_threads.max(1) {
+                    let y_arc = y_shared.clone();
+                    let ctx_local = ctx_for_threads.clone();
+                    let min_idx = found_min_idx.clone();
+                    let info = found_info.clone();
+                    let start_k = (total_to_hash * tidx) / hash_threads.max(1);
+                    let end_k = (total_to_hash * (tidx + 1)) / hash_threads.max(1);
+                    let iters_usize = iters_per_thread as usize;
 
-                handles.push(std::thread::spawn(move || {
-                    for k in start_k..end_k {
-                        if cancel_ref.load(AtomicOrdering::Relaxed) {
-                            break;
-                        }
+                    scope.spawn(move || {
+                        for k in start_k..end_k {
+                            if cancel.load(AtomicOrdering::Relaxed) {
+                                break;
+                            }
 
-                        let idx_words = k * 8;
-                        let mut le = [0u64; 8];
-                        le.copy_from_slice(&y_arc[idx_words..idx_words + 8]);
-                        let y_norm = le_limbs_to_u512(&le);
+                            let idx_words = k * 8;
+                            let mut le = [0u64; 8];
+                            le.copy_from_slice(&y_arc[idx_words..idx_words + 8]);
+                            let y_norm = le_limbs_to_u512(&le);
 
-                        let distance = pow_core::distance_from_y(&ctx_local, y_norm);
-                        if pow_core::is_valid_distance(&ctx_local, distance) {
-                            // Compute nonce for this index: nonce = current + 1 + (t * iters) + j
-                            let t = k / iters_usize;
-                            let j = k % iters_usize;
-                            let nonce = current.saturating_add(U512::from(
-                                1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
-                            ));
+                            let distance = pow_core::distance_from_y(&ctx_local, y_norm);
+                            if pow_core::is_valid_distance(&ctx_local, distance) {
+                                // Compute nonce for this index: nonce = current + 1 + (t * iters) + j
+                                let t = k / iters_usize;
+                                let j = k % iters_usize;
+                                let nonce = current.saturating_add(U512::from(
+                                    1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
+                                ));
 
-                            // Update global minimum index and store candidate if earliest
-                            let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
-                            if k < prev {
-                                min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
-                                if let Ok(mut guard) = info.lock() {
-                                    *guard = Some((nonce, distance));
+                                // Update global minimum index and store candidate if earliest
+                                let prev = min_idx.load(std::sync::atomic::Ordering::Relaxed);
+                                if k < prev {
+                                    min_idx.store(k, std::sync::atomic::Ordering::Relaxed);
+                                    if let Ok(mut guard) = info.lock() {
+                                        *guard = Some((nonce, distance));
+                                    }
                                 }
                             }
                         }
-                    }
-                }));
-            }
-
-            for h in handles {
-                let _ = h.join();
-            }
+                    });
+                }
+            });
 
             // SHA3 (host) timing
             let sha3_ms = t_sha_start.elapsed().as_millis();
             log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
 
             // Outcomes and accounting
-            let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
-
-            // Remaining inclusive (nonces) after CPU step within this chunk
-            let rem_be = end.saturating_sub(current).to_big_endian();
-            let mut last8 = [0u8; 8];
-            last8.copy_from_slice(&rem_be[56..64]);
-            let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+            let total_elems_u64 = total_to_hash as u64;
 
             // GPU coverage limited by remaining range
-            let gpu_coverage = std::cmp::min(total_elems_u64, remaining_inclusive);
+            let gpu_coverage = total_elems_u64;
 
             // If found, compute hash_count up to the earliest index and return
             if let Some((nonce, distance)) = found_info.lock().ok().and_then(|g| (*g).clone()) {
