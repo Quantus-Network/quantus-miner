@@ -194,3 +194,19 @@ Build-time:
 - `NVCC` or `CUDA_HOME` or `CUDA_PATH` — where to find the toolkit.
 - `MINER_CUDA_ALLOW_UNSUPPORTED_COMPILER` = `1` — add `-allow-unsupported-compiler`.
 - `MINER_NVCC_CCBIN` = `/path/to/g++-14` — force a specific host compiler.
+
+---
+
+## Example environment presets
+
+Presets are provided under `examples/.env` and follow a “lower” (≈1× SMs blocks) and “upper” (≈2× SMs blocks) pattern per GPU:
+- RTX 3060: `cuda-miner-3060-lower.env`, `cuda-miner-3060-upper.env`
+- RTX 3080: `cuda-miner-3080-lower.env`, `cuda-miner-3080-upper.env`
+- RTX 3090: `cuda-miner-3090-lower.env`, `cuda-miner-3090-upper.env`
+- RTX 4080: `cuda-miner-4080-lower.env`, `cuda-miner-4080-upper.env`
+- RTX 4090: `cuda-miner-4090-lower.env`, `cuda-miner-4090-upper.env`
+- RTX 5090: `cuda-miner-5090-lower.env`, `cuda-miner-5090-upper.env`
+- RTX A5000: `cuda-miner-a5000-lower.env`, `cuda-miner-a5000-upper.env`
+- RTX A6000: `cuda-miner-a6000-lower.env`, `cuda-miner-a6000-upper.env`
+
+Each preset uses `MINER_CUDA_MODE=g2` (device SHA3 + early-exit) and `MINER_CUDA_BLOCK_DIM=256`, and sizes `MINER_CUDA_THREADS` as `blocks × 256`. Adjust `MINER_CUDA_ITERS` to tune kernel dwell time vs early-exit responsiveness. If a G2 kernel image isn’t embedded for your device, the engine falls back to G1 automatically.
