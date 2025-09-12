@@ -65,7 +65,9 @@ RUN --mount=type=cache,target=/opt/cargo/registry \
     echo "CUDA version:" && nvcc --version; \
     echo "Building for SM=${SM}, CUDA_TAG=${CUDA_TAG} (CUDA_ARCH=${CUDA_ARCH})"; \
     cargo build -p miner-cli --features cuda --release; \
-    strip /src/target/release/quantus-miner || true
+    strip /src/target/release/quantus-miner || true; \
+    mkdir -p /artifacts; \
+    cp -a /src/target/release/quantus-miner /artifacts/quantus-miner
 
 ################################################################################
 # Stage 2: Minimal runtime image with the miner binary
@@ -77,7 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /src/target/release/quantus-miner /usr/local/bin/quantus-miner
+COPY --from=builder /artifacts/quantus-miner /usr/local/bin/quantus-miner
 
 # Default entrypoint; override with args as needed
 ENTRYPOINT ["/usr/local/bin/quantus-miner"]
