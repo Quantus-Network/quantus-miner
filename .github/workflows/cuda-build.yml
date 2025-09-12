@@ -5,9 +5,21 @@ on:
     push:
         branches:
             - cuda
+        paths-ignore:
+            - ".github/workflows/**"
+            - ".github/actions/**"
+            - "docs/**"
+            - "*.md"
+            - "LICENSE"
     pull_request:
         branches:
             - cuda
+        paths-ignore:
+            - ".github/workflows/**"
+            - ".github/actions/**"
+            - "docs/**"
+            - "*.md"
+            - "LICENSE"
 
 permissions:
     contents: read
@@ -23,6 +35,8 @@ jobs:
                 sm: ["86", "89", "120"]
 
         steps:
+            - uses: ./.github/actions/disk
+
             - name: Checkout repository
               uses: actions/checkout@v4
 
