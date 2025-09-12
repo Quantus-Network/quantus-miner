@@ -355,6 +355,40 @@ impl CudaEngine {
                     .with_context(|| "alloc d_distance")?;
 
                 // Launch G2 kernel
+                // Attempt to populate __constant__ symbols for per-job constants (G2 fast path).
+                // If any symbol is unavailable, leave C_CONSTS_READY at 0 and the kernel will use parameters.
+                {
+                    let mut consts_ready_set = false;
+                    if let (
+                        Ok(mut c_n),
+                        Ok(mut c_r2),
+                        Ok(mut c_mhat),
+                        Ok(mut c_n0),
+                        Ok(mut c_ready),
+                    ) = (
+                        module.get_global::<[u64; 8]>("C_N"),
+                        module.get_global::<[u64; 8]>("C_R2"),
+                        module.get_global::<[u64; 8]>("C_MHAT"),
+                        module.get_global::<u64>("C_N0_INV"),
+                        module.get_global::<i32>("C_CONSTS_READY"),
+                    ) {
+                        // Copy constants into constant memory
+                        c_n.copy_from(&n_le)?;
+                        c_r2.copy_from(&r2_le)?;
+                        c_mhat.copy_from(&m_hat_le)?;
+                        c_n0.copy_from(&(n0_inv as u64))?;
+                        // Flag ready = 1
+                        let one: i32 = 1;
+                        c_ready.copy_from(&one)?;
+                        consts_ready_set = true;
+                    }
+                    if !consts_ready_set {
+                        if let Ok(mut c_ready) = module.get_global::<i32>("C_CONSTS_READY") {
+                            let zero: i32 = 0;
+                            c_ready.copy_from(&zero)?;
+                        }
+                    }
+                }
                 log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {

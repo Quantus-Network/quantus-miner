@@ -240,8 +240,9 @@ extern "C" __global__ void qpow_montgomery_g1_kernel(
     }
 
     // Transform to Montgomery domain
-    uint64_t yhat[8];
-    to_mont_512(y0_loc, r2_loc, n_loc, n0_inv, yhat);
+        uint64_t yhat[8];
+        const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
+        to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
 
     // Iterate and emit normalized y per step
     // Output stride per thread: iters_per_thread * 8 limbs
@@ -316,6 +317,13 @@ __device__ __constant__ uint64_t KECCAK_RC[24] = {
     0x8000000080008081ULL, 0x8000000000008080ULL,
     0x0000000080000001ULL, 0x8000000080008008ULL
 };
+// Optional per-job constants in constant memory (host may set; kernel remains compatible)
+// If C_CONSTS_READY == 1, G2 kernel will prefer these over parameter pointers.
+__device__ __constant__ uint64_t C_N[8];
+__device__ __constant__ uint64_t C_R2[8];
+__device__ __constant__ uint64_t C_MHAT[8];
+__device__ __constant__ uint64_t C_N0_INV;
+__device__ __constant__ int      C_CONSTS_READY;
  
 // Load/store helpers (little-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
@@ -496,14 +504,23 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
         return;
     }
  
-    // Local copies of constants
-    uint64_t n_loc[8], r2_loc[8], mhat_loc[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        n_loc[i]    = n[i];
-        r2_loc[i]   = r2[i];
-        mhat_loc[i] = m_hat[i];
-    }
+    // Local copies of constants (prefer __constant__ if available)
+        uint64_t n_loc[8], r2_loc[8], mhat_loc[8];
+        if (C_CONSTS_READY) {
+    #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                n_loc[i]    = C_N[i];
+                r2_loc[i]   = C_R2[i];
+                mhat_loc[i] = C_MHAT[i];
+            }
+        } else {
+    #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                n_loc[i]    = n[i];
+                r2_loc[i]   = r2[i];
+                mhat_loc[i] = m_hat[i];
+            }
+        }
  
     // Load this thread's y0 (normal domain) and move to Montgomery domain
     uint64_t y0_loc[8];
@@ -524,7 +541,7 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
  
         // y_hat = y_hat * m_hat
         uint64_t yhat_next[8];
-        mont_mul_512(yhat, mhat_loc, n_loc, n0_inv, yhat_next);
+        mont_mul_512(yhat, mhat_loc, n_loc, n0i, yhat_next);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             yhat[i] = yhat_next[i];
@@ -532,7 +549,7 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
  
         // y = from_mont(y_hat)
         uint64_t y_norm[8];
-        from_mont_512(yhat, n_loc, n0_inv, y_norm);
+        from_mont_512(yhat, n_loc, n0i, y_norm);
  
         // y_be64 (64 bytes) from LE limbs
         uint8_t y_be[64];
