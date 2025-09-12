@@ -212,7 +212,7 @@ impl CudaEngine {
             }
             _ => "qpow_montgomery_g1_kernel",
         };
-        let mut is_g2 = false;
+        let is_g2;
         let func = match module.get_function(func_name) {
             Ok(f) => {
                 is_g2 = func_name == "qpow_montgomery_g2_kernel";
@@ -351,7 +351,7 @@ impl CudaEngine {
                     .with_context(|| "alloc/copy d_found")?;
                 let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
                     .with_context(|| "alloc/copy d_index")?;
-                let mut d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                     .with_context(|| "alloc d_distance")?;
 
                 // Launch G2 kernel
