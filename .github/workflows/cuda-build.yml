@@ -132,4 +132,4 @@ jobs:
                   name: ${{ format('quantus-miner-cuda-{0}-sm-{1}', steps.extract.outputs.short_tag, matrix.sm) }}
                   path: ${{ steps.extract.outputs.bin_path }}
                   if-no-files-found: error
-                  retention-days: 14
+                  retention-days: 3
