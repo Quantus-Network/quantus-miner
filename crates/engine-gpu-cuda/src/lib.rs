@@ -212,11 +212,16 @@ impl CudaEngine {
             }
             _ => "qpow_montgomery_g1_kernel",
         };
+        let mut is_g2 = false;
         let func = match module.get_function(func_name) {
-            Ok(f) => f,
+            Ok(f) => {
+                is_g2 = func_name == "qpow_montgomery_g2_kernel";
+                f
+            }
             Err(e) => {
                 if func_name == "qpow_montgomery_g2_kernel" {
                     log::warn!(target: "miner", "CUDA: G2 kernel unavailable ({e:?}); falling back to G1");
+                    is_g2 = false;
                     module
                         .get_function("qpow_montgomery_g1_kernel")
                         .with_context(|| "get kernel function 'qpow_montgomery_g1_kernel'")?
@@ -318,13 +323,10 @@ impl CudaEngine {
             // Prepare/update per-chunk inputs
             let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                 .with_context(|| "alloc/copy d_y0")?;
-            let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
-                (num_threads as usize) * (iters_per_thread as usize) * 8,
-            )
-            .with_context(|| "alloc d_y_out")?;
+            // G1 will allocate y_out locally before launch
 
             // Branch kernel launch by mode: G2 (device SHA3 + early-exit) vs G1 (return y values)
-            if func_name == "qpow_montgomery_g2_kernel" {
+            if is_g2 {
                 // Compute bounds for accounting
                 let rem_be = end.saturating_sub(current).to_big_endian();
                 let mut last8 = [0u8; 8];
@@ -424,6 +426,10 @@ impl CudaEngine {
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
                 log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
+                let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
+                    (num_threads as usize) * (iters_per_thread as usize) * 8,
+                )
+                .with_context(|| "alloc d_y_out")?;
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
