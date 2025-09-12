@@ -323,30 +323,9 @@ impl CudaEngine {
             )
             .with_context(|| "alloc d_y_out")?;
 
-            // Launch kernel: computes y for (current + t + 1) for each thread t in [0, num_threads)
-            log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
-            let launch_result = unsafe {
-                launch!(func<<<grid_dim, block_dim, 0, stream>>>(
-                    d_m.as_device_ptr(),
-                    d_n.as_device_ptr(),
-                    n0_inv as u64,
-                    d_r2.as_device_ptr(),
-                    d_mhat.as_device_ptr(),
-                    d_y0.as_device_ptr(),
-                    d_y_out.as_device_ptr(),
-                    num_threads as u32,
-                    iters_per_thread as u32
-                ))
-            };
-            let t_kernel_start = std::time::Instant::now();
-            launch_result.with_context(|| "launch kernel")?;
-            stream.synchronize().with_context(|| "stream synchronize")?;
-            let kernel_ms = t_kernel_start.elapsed().as_millis();
-            log::info!(target: "miner", "CUDA kernel and sync OK (kernel_ms={kernel_ms})");
-
-            // Branch: if G2 kernel is selected, perform device SHA3 + early-exit handling
+            // Branch kernel launch by mode: G2 (device SHA3 + early-exit) vs G1 (return y values)
             if func_name == "qpow_montgomery_g2_kernel" {
-                // Compute bounds
+                // Compute bounds for accounting
                 let rem_be = end.saturating_sub(current).to_big_endian();
                 let mut last8 = [0u8; 8];
                 last8.copy_from_slice(&rem_be[56..64]);
@@ -370,8 +349,9 @@ impl CudaEngine {
                 let mut d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                     .with_context(|| "alloc d_distance")?;
 
-                // Launch G2 kernel: includes on-device SHA3 and threshold compare with early-exit
+                // Launch G2 kernel
                 log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
+                let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
                         d_m.as_device_ptr(),
@@ -393,6 +373,8 @@ impl CudaEngine {
                 stream
                     .synchronize()
                     .with_context(|| "stream synchronize (G2)")?;
+                let kernel_ms = t_kernel_start.elapsed().as_millis();
+                log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
 
                 // Copy back early-exit flag (and details if found)
                 let mut h_found = [0i32; 1];
@@ -407,10 +389,10 @@ impl CudaEngine {
                     hash_count = hash_count.saturating_add(k + 1);
 
                     // Compute nonce from linear index (t, j)
-                    let t = (k as usize) / (iters_per_thread as usize);
-                    let j = (k as usize) % (iters_per_thread as usize);
+                    let t_idx = (k as usize) / (iters_per_thread as usize);
+                    let j_idx = (k as usize) % (iters_per_thread as usize);
                     let nonce = current.saturating_add(U512::from(
-                        1u64 + (t as u64) * (iters_per_thread as u64) + (j as u64),
+                        1u64 + (t_idx as u64) * (iters_per_thread as u64) + (j_idx as u64),
                     ));
 
                     // Copy back distance (optional for completeness; threshold was already satisfied)
@@ -436,9 +418,33 @@ impl CudaEngine {
                 if covered < total_elems_u64 {
                     return Ok(EngineStatus::Exhausted { hash_count });
                 }
+                // Advance and continue loop (no G1 copy-back in G2 mode)
                 current = current.saturating_add(U512::from(1u64 + total_elems_u64));
                 continue;
+            } else {
+                // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
+                log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
+                let t_kernel_start = std::time::Instant::now();
+                let launch_result = unsafe {
+                    launch!(func<<<grid_dim, block_dim, 0, stream>>>(
+                        d_m.as_device_ptr(),
+                        d_n.as_device_ptr(),
+                        n0_inv as u64,
+                        d_r2.as_device_ptr(),
+                        d_mhat.as_device_ptr(),
+                        d_y0.as_device_ptr(),
+                        d_y_out.as_device_ptr(),
+                        num_threads as u32,
+                        iters_per_thread as u32
+                    ))
+                };
+                launch_result.with_context(|| "launch kernel")?;
+                stream.synchronize().with_context(|| "stream synchronize")?;
+                let kernel_ms = t_kernel_start.elapsed().as_millis();
+                log::info!(target: "miner", "CUDA kernel and sync OK (kernel_ms={kernel_ms})");
             }
+
+            // G2 handled in the launch branch above; proceed with G1 copy-back path below.
 
             // G1 path (host SHA3) — Copy back results (optional pinned host buffer + async copy)
             let use_pinned = std::env::var("MINER_CUDA_PINNED")
