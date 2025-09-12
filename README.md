@@ -97,6 +97,66 @@ export PATH="$CUDA_HOME/bin:$PATH"
 export NVCC="$CUDA_HOME/bin/nvcc"
 ```
 
+#### Fedora 42 (dnf5): match CUDA toolkit to the installed driver (RPM Fusion)
+
+If your NVIDIA driver comes from RPM Fusion (recommended) and reports a CUDA Version (via nvidia-smi) that doesn’t match the CUDA toolkit available in the NVIDIA Fedora 42 repo, install the matching toolkit from the NVIDIA archive. This avoids PTX/CUBIN incompatibilities between toolkit and driver.
+
+- Check your driver’s CUDA Version:
+```bash
+nvidia-smi | grep "CUDA Version"
+# Example: CUDA Version: 12.9
+```
+
+- Download the matching “local installer” repo RPM from the NVIDIA archive with a resilient downloader (NVIDIA servers can be flaky; use resume/retry):
+```bash
+# Example for CUDA 12.9 on Fedora 41 (works on Fedora 42 too):
+curl --fail --location --retry 9999 --retry-delay 3 --retry-max-time 0 \
+  --continue-at - \
+  --output ~/Downloads/cuda-repo-fedora41-12-9-local-12.9.0_575.51.03-1.x86_64.rpm \
+  --url https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda-repo-fedora41-12-9-local-12.9.0_575.51.03-1.x86_64.rpm
+```
+
+- Install the local repo RPM:
+```bash
+sudo dnf5 install -y ~/Downloads/cuda-repo-fedora41-12-9-local-12.9.0_575.51.03-1.x86_64.rpm
+```
+
+- Prevent driver packages from the NVIDIA repo (keep drivers from RPM Fusion):
+```bash
+# Add excludes to the generated repo file (name may vary slightly)
+sudo sed -i '/^\[cuda-/,/^$/ {
+  /^\s*excludepkgs=/d
+}' /etc/yum.repos.d/cuda-fedora41-12-9-local.repo
+
+echo "excludepkgs=cuda-drivers*,nvidia-driver*,xorg-x11-drv-nvidia*,kernel*" | \
+  sudo tee -a /etc/yum.repos.d/cuda-fedora41-12-9-local.repo
+```
+
+- Install the matching toolkit and nvcc from the local NVIDIA repo (exclude drivers):
+```bash
+sudo dnf5 install -y cuda-toolkit cuda-nvcc-12-9 --exclude='cuda-drivers*'
+```
+
+- Make nvcc available to the build (12.9 example):
+```bash
+export CUDA_HOME=/usr/local/cuda-12.9
+export PATH="$CUDA_HOME/bin:$PATH"
+export NVCC="$CUDA_HOME/bin/nvcc"
+
+# Verify
+nvcc --version
+```
+
+- Build with the matching toolkit (example, RTX 3060/Ampere):
+```bash
+CUDA_ARCH=sm_86 cargo build -p miner-cli --features cuda --release
+```
+
+Notes:
+- Using the Fedora 41 local repo RPM on Fedora 42 is acceptable for the CUDA user-space toolkit; we only need nvcc and toolchain, not the driver.
+- Always keep the NVIDIA driver from RPM Fusion. The excludepkgs line ensures the toolkit install will not replace your driver.
+- If nvcc is still not on PATH after install, set NVCC explicitly as above.
+
 ### Notes
 
 - Ensure your user can access the GPU device nodes (e.g., part of the video group when required).

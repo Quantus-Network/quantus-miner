@@ -1,0 +1,162 @@
+name: CUDA Build
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - cuda
+    pull_request:
+        branches:
+            - cuda
+
+permissions:
+    contents: read
+
+jobs:
+    build-matrix:
+        name: cuda=${{ matrix.cuda_tag }} sm=${{ matrix.sm }}
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                cuda_tag: ["12.9.0", "13.0.0"]
+                sm: ["86", "89", "120"]
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Prepare Buildx cache
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/.buildx-cache
+                  key: ${{ runner.os }}-buildx-${{ matrix.cuda_tag }}-sm${{ matrix.sm }}-${{ github.sha }}
+                  restore-keys: |
+                      ${{ runner.os }}-buildx-${{ matrix.cuda_tag }}-sm${{ matrix.sm }}-
+
+            - name: Create CI Dockerfile (containerized CUDA build)
+              run: |
+                  cat > ci.Containerfile <<'DOCKERFILE'
+                  # syntax=docker/dockerfile:1.7
+                  ARG CUDA_TAG=12.9.0
+                  FROM nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04 AS builder
+
+                  ARG SM=86
+
+                  RUN apt-get update && \
+                      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                        curl ca-certificates pkg-config build-essential \
+                        libssl-dev git clang cmake && \
+                      rm -rf /var/lib/apt/lists/*
+
+                  ENV RUSTUP_HOME=/opt/rustup \
+                      CARGO_HOME=/opt/cargo \
+                      PATH=/opt/cargo/bin:/usr/local/cuda/bin:${PATH}
+
+                  RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                      | sh -s -- -y --profile minimal --default-toolchain stable && \
+                      rustc --version && cargo --version
+
+                  WORKDIR /src
+
+                  # Build-time selection for device code arch (normalized to compute_XX / sm_XX by build.rs).
+                  ENV CUDA_ARCH=sm_${SM}
+
+                  # Copy manifests and sources
+                  COPY Cargo.toml Cargo.lock ./
+                  COPY crates ./crates
+
+                  # Build with CUDA feature. Use BuildKit cache mounts to speed repeated builds.
+                  RUN --mount=type=cache,target=/opt/cargo/registry \
+                      --mount=type=cache,target=/src/target \
+                      set -eux; \
+                      echo "CUDA:" && nvcc --version || true; \
+                      echo "Building miner for SM=${SM} (CUDA_ARCH=${CUDA_ARCH})"; \
+                      cargo build -p miner-cli --features cuda --release; \
+                      strip /src/target/release/quantus-miner || true
+
+                  FROM ubuntu:22.04 AS dist
+                  RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+                      rm -rf /var/lib/apt/lists/*
+                  COPY --from=builder /src/target/release/quantus-miner /usr/local/bin/quantus-miner
+                  ENTRYPOINT ["/usr/local/bin/quantus-miner"]
+                  DOCKERFILE
+
+            - name: Build miner in container
+              env:
+                  CUDA_TAG: ${{ matrix.cuda_tag }}
+                  SM: ${{ matrix.sm }}
+              run: |
+                  set -eux
+                  # Build & load the image into the local docker image store
+                  docker buildx build \
+                    --progress=plain \
+                    --cache-from=type=local,src=/tmp/.buildx-cache \
+                    --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
+                    --load \
+                    -t quantus-miner:${CUDA_TAG}-sm${SM} \
+                    --build-arg CUDA_TAG=${CUDA_TAG} \
+                    --build-arg SM=${SM} \
+                    -f ci.Containerfile .
+
+                  # Move new cache into place to avoid unbounded growth
+                  rm -rf /tmp/.buildx-cache
+                  mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+            - name: Extract binary from image
+              id: extract
+              env:
+                  CUDA_TAG: ${{ matrix.cuda_tag }}
+                  SM: ${{ matrix.sm }}
+              run: |
+                  set -eux
+                  # Short CUDA tag (e.g., 12.9 from 12.9.0)
+                  SHORT_TAG="$(echo "${CUDA_TAG}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+                  IMG="quantus-miner:${CUDA_TAG}-sm${SM}"
+                  BIN="quantus-miner-cuda-${SHORT_TAG}-sm-${SM}"
+
+                  cid="$(docker create "${IMG}")"
+                  docker cp "${cid}:/usr/local/bin/quantus-miner" "./${BIN}"
+                  docker rm "${cid}"
+
+                  chmod +x "./${BIN}"
+                  echo "bin_path=./${BIN}" >> "$GITHUB_OUTPUT"
+                  echo "short_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ format('quantus-miner-cuda-{0}-sm-{1}', steps.extract.outputs.short_tag, matrix.sm) }}
+                  path: ${{ steps.extract.outputs.bin_path }}
+                  if-no-files-found: error
+                  retention-days: 14
+
+            - name: Optional rsync to CDN (if SSH key provided)
+              if: ${{ secrets.CDN_SSH_PRIVATE_KEY != '' }}
+              env:
+                  BIN_PATH: ${{ steps.extract.outputs.bin_path }}
+                  SSH_PRIVATE_KEY: ${{ secrets.CDN_SSH_PRIVATE_KEY }}
+                  RSYNC_HOST: ${{ secrets.RSYNC_HOST || 'cdn.res.fm' }}
+                  RSYNC_PORT: ${{ secrets.RSYNC_PORT || '52201' }}
+                  RSYNC_USER: ${{ secrets.RSYNC_USER || 'resonance' }}
+                  RSYNC_PATH: ${{ secrets.RSYNC_PATH || '/usr/share/nginx/cdn.res.fm/releases/miner/' }}
+              run: |
+                  set -eux
+                  mkdir -p ~/.ssh
+                  chmod 700 ~/.ssh
+                  printf "%s\n" "${SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+                  chmod 600 ~/.ssh/id_ed25519
+                  # Preload known_hosts (ignore failure if keyscan blocked; fallback StrictHostKeyChecking=no)
+                  ssh-keyscan -p "${RSYNC_PORT}" -t ed25519 "${RSYNC_HOST}" >> ~/.ssh/known_hosts || true
+                  chmod 644 ~/.ssh/known_hosts
+
+                  rsync \
+                    --archive \
+                    --compress \
+                    --verbose \
+                    --progress \
+                    -e "ssh -p ${RSYNC_PORT} -o StrictHostKeyChecking=no" \
+                    "${BIN_PATH}" "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}"
