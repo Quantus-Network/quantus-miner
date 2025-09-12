@@ -130,6 +130,8 @@ impl MiningService {
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "completed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "failed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "cancelled", 0);
+            // initialize estimated rate gauge so it appears immediately
+            metrics::set_job_estimated_rate(self.engine.name(), &job_id, 0.0);
             // increment active jobs
             {
                 let mut g = self.active_jobs_gauge.lock().await;

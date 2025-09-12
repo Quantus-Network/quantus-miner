@@ -485,6 +485,11 @@ impl CudaEngine {
                             metrics::inc_candidates_false_positive("gpu-cuda");
                         }
                         hash_count = hash_count.saturating_add(covered);
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics::inc_candidates_false_positive("gpu-cuda");
+                        }
+                        hash_count = hash_count.saturating_add(covered);
                         if covered < total_elems_u64 {
                             return Ok(EngineStatus::Exhausted { hash_count });
                         }
