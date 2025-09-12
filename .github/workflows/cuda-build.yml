@@ -15,8 +15,6 @@ on:
         branches:
             - cuda
         paths-ignore:
-            - ".github/workflows/**"
-            - ".github/actions/**"
             - "docs/**"
             - "*.md"
             - "LICENSE"
@@ -35,10 +33,10 @@ jobs:
                 sm: ["86", "89", "120"]
 
         steps:
-            - uses: ./.github/actions/disk
-
             - name: Checkout repository
               uses: actions/checkout@v4
+
+            - uses: ./.github/actions/disk
 
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@v3
