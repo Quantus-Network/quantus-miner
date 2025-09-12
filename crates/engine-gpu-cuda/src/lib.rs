@@ -279,17 +279,21 @@ impl CudaEngine {
                     iters_per_thread as u32
                 ))
             };
+            let t_kernel_start = std::time::Instant::now();
             launch_result.with_context(|| "launch kernel")?;
             stream.synchronize().with_context(|| "stream synchronize")?;
-            log::info!(target: "miner", "CUDA kernel and sync OK");
+            let kernel_ms = t_kernel_start.elapsed().as_millis();
+            log::info!(target: "miner", "CUDA kernel and sync OK (kernel_ms={kernel_ms})");
 
             // Copy back results
             let mut y_out_host =
                 vec![0u64; (num_threads as usize) * (iters_per_thread as usize) * 8];
+            let t_copy_start = std::time::Instant::now();
             d_y_out
                 .copy_to(&mut y_out_host)
                 .with_context(|| "copy d_y_out -> host")?;
-            log::info!(target: "miner", "CUDA copy-back OK: elems={}", y_out_host.len());
+            let copy_ms = t_copy_start.elapsed().as_millis();
+            log::info!(target: "miner", "CUDA copy-back OK: elems={}, copy_ms={copy_ms}", y_out_host.len());
 
             // Consume GPU results in-order; each thread emitted `iters_per_thread` y values:
             // nonce = current + 1 + (t * iters_per_thread) + j
