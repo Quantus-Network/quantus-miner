@@ -366,11 +366,11 @@ impl CudaEngine {
                         Ok(mut c_n0),
                         Ok(mut c_ready),
                     ) = (
-                        module.get_global::<[u64; 8]>("C_N"),
-                        module.get_global::<[u64; 8]>("C_R2"),
-                        module.get_global::<[u64; 8]>("C_MHAT"),
-                        module.get_global::<u64>("C_N0_INV"),
-                        module.get_global::<i32>("C_CONSTS_READY"),
+                        module.get_global::<[u64; 8]>(CString::new("C_N")?.as_c_str()),
+                        module.get_global::<[u64; 8]>(CString::new("C_R2")?.as_c_str()),
+                        module.get_global::<[u64; 8]>(CString::new("C_MHAT")?.as_c_str()),
+                        module.get_global::<u64>(CString::new("C_N0_INV")?.as_c_str()),
+                        module.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str()),
                     ) {
                         // Copy constants into constant memory
                         c_n.copy_from(&n_le)?;
@@ -383,7 +383,9 @@ impl CudaEngine {
                         consts_ready_set = true;
                     }
                     if !consts_ready_set {
-                        if let Ok(mut c_ready) = module.get_global::<i32>("C_CONSTS_READY") {
+                        if let Ok(mut c_ready) =
+                            module.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str())
+                        {
                             let zero: i32 = 0;
                             c_ready.copy_from(&zero)?;
                         }
