@@ -41,6 +41,7 @@ RUN apt-get update && \
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
     CUDA_HOME=/usr/local/cuda \
+    CARGO_TERM_COLOR=always \
     PATH=/opt/cargo/bin:/usr/local/cuda/bin:${PATH}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain stable && \
