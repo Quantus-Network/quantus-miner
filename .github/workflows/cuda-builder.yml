@@ -12,9 +12,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_NAME: ghcr.io/${{ lower(github.repository_owner) }}/cuda-builder
-
 jobs:
   build-and-push:
     name: cuda-builder:${{ matrix.cuda_tag }}
@@ -26,6 +23,11 @@ jobs:
           - 12.9.0
           - 13.0.0
     steps:
+      - name: Normalize owner and set IMAGE_NAME
+        shell: bash
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cuda-builder" >> "$GITHUB_ENV"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
