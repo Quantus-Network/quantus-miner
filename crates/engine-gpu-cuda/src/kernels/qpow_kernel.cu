@@ -637,13 +637,13 @@ for (uint32_t j = 0; j < iters; ++j) {
     uint8_t h_le[64];
     sha3_512_64bytes_le(y_be, h_le);
 
-    // Convert digest to big-endian numeric bytes
-    uint8_t digest_be[64];
-    #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        uint64_t w = load64_le(&h_le[i * 8]);
-        store64_be(&digest_be[(7 - i) * 8], w);
-    }
+    // Convert digest to big-endian numeric bytes (preserve lane order; convert each lane LE->BE in-place)
+        uint8_t digest_be[64];
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            uint64_t w = load64_le(&h_le[i * 8]);
+            store64_be(&digest_be[i * 8], w);
+        }
 
     // distance = target_be XOR digest_be (bytewise, big-endian order)
     uint8_t dist_be[64];
