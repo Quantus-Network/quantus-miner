@@ -36,61 +36,32 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v4
 
-            - uses: ./.github/actions/disk
-
-            - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v3
-
-            - name: Prepare Buildx cache
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/.buildx-cache
-                  key: ${{ runner.os }}-buildx-${{ matrix.cuda_tag }}-sm${{ matrix.sm }}-${{ github.sha }}
-                  restore-keys: |
-                      ${{ runner.os }}-buildx-${{ matrix.cuda_tag }}-sm${{ matrix.sm }}-
-
-            - name: Build miner image and export dist filesystem
+            - name: Build with cuda-builder image
+              id: build
               env:
                   CUDA_TAG: ${{ matrix.cuda_tag }}
                   SM: ${{ matrix.sm }}
               run: |
                   set -eux
-                  # Build the dist stage and export its filesystem to ./out
-                  docker buildx build \
-                    --progress=plain \
-                    --cache-from=type=local,src=/tmp/.buildx-cache \
-                    --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
-                    --target dist \
-                    --output type=local,dest=./out \
-                    --build-arg CUDA_TAG=${CUDA_TAG} \
-                    --build-arg SM=${SM} \
-                    -f Containerfile .
-
-                  # Move new cache into place to avoid unbounded growth
-                  rm -rf /tmp/.buildx-cache
-                  mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-            - name: Collect binary artifact
-              id: extract
-              env:
-                  CUDA_TAG: ${{ matrix.cuda_tag }}
-                  SM: ${{ matrix.sm }}
-              run: |
-                  set -eux
-                  # Short CUDA tag (e.g., 12.9 from 12.9.0)
                   SHORT_TAG="$(echo "${CUDA_TAG}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
                   BIN="quantus-miner-cuda-${SHORT_TAG}-sm-${SM}"
-
-                  # Binary exported by the dist stage is under ./out/usr/local/bin
-                  install -m 0755 ./out/usr/local/bin/quantus-miner "./${BIN}"
-
+                  mkdir -p .cargo-cache target
+                  docker run --rm \
+                    -e CUDA_ARCH=sm_${SM} \
+                    -e CARGO_TERM_COLOR=always \
+                    -v "${PWD}:/workspace" \
+                    -v "${PWD}/.cargo-cache:/opt/cargo/registry" \
+                    -v "${PWD}/target:/workspace/target" \
+                    ghcr.io/quantus-network/cuda-builder:${CUDA_TAG} \
+                    bash -lc 'cd /workspace && echo "CUDA version:" && nvcc --version && cargo build -p miner-cli --features cuda --release && strip target/release/quantus-miner || true'
+                  install -m 0755 ./target/release/quantus-miner "./${BIN}"
                   echo "bin_path=./${BIN}" >> "$GITHUB_OUTPUT"
                   echo "short_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
 
             - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: ${{ format('quantus-miner-cuda-{0}-sm-{1}', steps.extract.outputs.short_tag, matrix.sm) }}
-                  path: ${{ steps.extract.outputs.bin_path }}
+                  name: ${{ format('quantus-miner-cuda-{0}-sm-{1}', steps.build.outputs.short_tag, matrix.sm) }}
+                  path: ${{ steps.build.outputs.bin_path }}
                   if-no-files-found: error
                   retention-days: 3
