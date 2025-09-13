@@ -13,7 +13,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/cuda-builder
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner.toLowerCase() }}/cuda-builder
 
 jobs:
   build-and-push:
