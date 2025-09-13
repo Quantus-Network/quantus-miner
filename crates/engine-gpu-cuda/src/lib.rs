@@ -562,8 +562,24 @@ impl CudaEngine {
                     hash_count = hash_count.saturating_add(k + 1);
 
                     // Compute nonce from linear index (t, j)
-                    let t_idx = (k as usize) / (iters_per_thread as usize);
-                    let j_idx = (k as usize) % (iters_per_thread as usize);
+                    let mut t_idx = (k as usize) / (iters_per_thread as usize);
+                    let mut j_idx = (k as usize) % (iters_per_thread as usize);
+                    // If the device exported winner coordinates, prefer them
+                    if let (Ok(win_tid_sym), Ok(win_j_sym)) = (
+                        module.get_global::<u32>(std::ffi::CString::new("C_WIN_TID")?.as_c_str()),
+                        module.get_global::<u32>(std::ffi::CString::new("C_WIN_J")?.as_c_str()),
+                    ) {
+                        let mut dev_tid: u32 = u32::MAX;
+                        let mut dev_j: u32 = u32::MAX;
+                        let _ = win_tid_sym.copy_to(&mut dev_tid);
+                        let _ = win_j_sym.copy_to(&mut dev_j);
+                        if (dev_tid as usize) < (num_threads as usize)
+                            && (dev_j as usize) < (iters_per_thread as usize)
+                        {
+                            t_idx = dev_tid as usize;
+                            j_idx = dev_j as usize;
+                        }
+                    }
                     // Reconstruct nonce using the exact per-thread base nonce used for y0:
                     // nonce = base_nonces[t_idx] + (j_idx + 1)
                     let base_nonce = base_nonces[t_idx];
