@@ -496,7 +496,9 @@ for (int round = 0; round < 24; ++round) {
 }
 
 // Device SHA3-512 for a single 64-byte message; writes lane-LE bytes to out_le64
-__device__ __forceinline__ void sha3_512_64bytes_le(const uint8_t in_be64[64], uint8_t out_le64[64]) {
+// Note: Input is treated as raw message bytes. We absorb them directly into the Keccak rate
+// as little-endian 64-bit lanes to mirror the host sha3 crate semantics.
+__device__ __forceinline__ void sha3_512_64bytes_le(const uint8_t in_msg_bytes[64], uint8_t out_le64[64]) {
 // Initialize state to zero
 uint64_t s[25];
 #pragma unroll
@@ -507,7 +509,7 @@ uint8_t block[72];
 #pragma unroll
 for (int i = 0; i < 72; ++i) block[i] = 0;
 #pragma unroll
-for (int i = 0; i < 64; ++i) block[i] = in_be64[i];
+for (int i = 0; i < 64; ++i) block[i] = in_msg_bytes[i];
 block[64] = 0x06;
 block[71] ^= 0x80;
 
