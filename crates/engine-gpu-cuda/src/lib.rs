@@ -370,9 +370,9 @@ impl CudaEngine {
                 let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
                     .with_context(|| "alloc/copy d_index")?;
                 // Winner coordinates (thread id and iteration)
-                let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
                     .with_context(|| "alloc/copy d_win_tid")?;
-                let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
                     .with_context(|| "alloc/copy d_win_j")?;
                 let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                     .with_context(|| "alloc d_distance")?;
@@ -588,7 +588,9 @@ impl CudaEngine {
                     // Prefer device-returned winner coordinates; fall back to k-derived indices only if unavailable/invalid
                     let _ = d_win_tid.copy_to(&mut h_win_tid);
                     let _ = d_win_j.copy_to(&mut h_win_j);
-                    if (h_win_tid[0] as usize) < (num_threads as usize)
+                    if h_win_tid[0] != u32::MAX
+                        && h_win_j[0] != u32::MAX
+                        && (h_win_tid[0] as usize) < (num_threads as usize)
                         && (h_win_j[0] as usize) < (iters_per_thread as usize)
                     {
                         t_idx = h_win_tid[0] as usize;
