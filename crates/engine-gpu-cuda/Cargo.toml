@@ -13,14 +13,25 @@ crate-type = ["rlib"]
 default = []
 # Enable CUDA integrations when implementing the engine.
 cuda = ["dep:cust"]
+# Enable metrics emission from the CUDA engine (e.g., false-positive counter).
+metrics = ["dep:metrics"]
 
 [dependencies]
 pow-core = { path = "../pow-core" }
+engine-cpu = { path = "../engine-cpu" }
 primitive-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+hex = { workspace = true }
+# Metrics (optional; used for emitting generic counters/gauges from this engine)
+metrics = { path = "../metrics", optional = true }
 
 # CUDA ecosystem (optional for now; will be used when implementing GPU backend)
 cust = { version = "0.3", optional = true }
 rustacuda = { version = "0.1", optional = true }
+
+# Host-side hashing and big-int precompute for GPU constants
+sha3 = { workspace = true }
+num-bigint = "0.4"
+num-traits = { workspace = true }

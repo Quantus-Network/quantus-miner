@@ -130,6 +130,8 @@ impl MiningService {
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "completed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "failed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "cancelled", 0);
+            // initialize estimated rate gauge so it appears immediately
+            metrics::set_job_estimated_rate(self.engine.name(), &job_id, 0.0);
             // increment active jobs
             {
                 let mut g = self.active_jobs_gauge.lock().await;
@@ -208,6 +210,11 @@ impl MiningService {
                             running_jobs += 1;
                             total_rate += job.last_hash_rate;
                             metrics::set_job_hash_rate(job.engine_name, job_id, job.last_hash_rate);
+                            metrics::set_job_estimated_rate(
+                                job.engine_name,
+                                job_id,
+                                job.last_hash_rate,
+                            );
                         }
                     }
                     metrics::set_hash_rate(total_rate);
@@ -453,6 +460,7 @@ impl MiningJob {
                     let job_rate: f64 = self.thread_rate_ema.values().copied().sum();
                     self.last_hash_rate = job_rate;
                     metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
+                    metrics::set_job_estimated_rate(self.engine_name, job_id, job_rate);
                 }
             }
 
@@ -501,6 +509,8 @@ impl MiningJob {
                     metrics::inc_job_status("completed");
                     if let Some(job_id) = &self.job_id {
                         metrics::inc_jobs_by_engine(self.engine_name, "completed");
+                        metrics::inc_candidates_found(self.engine_name, job_id);
+                        // TODO(metrics): engine-level false-positive metric is emitted in engine implementations (e.g., gpu-cuda G2 host re-verification)
                         metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 1);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
@@ -1082,8 +1092,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             Arc::new(eng)
         }
         EngineSelection::GpuCuda => {
-            log::error!("Requested engine gpu-cuda is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
-            return Err(anyhow::anyhow!("engine 'gpu-cuda' is not implemented yet"));
+            #[cfg(feature = "cuda")]
+            {
+                let eng = engine_gpu_cuda::CudaEngine::new();
+                if !eng.cuda_available() {
+                    log::error!("Requested engine gpu-cuda but CUDA driver/device is not available or initialization failed. Build has 'cuda' feature but runtime support is missing.");
+                    return Err(anyhow::anyhow!(
+                        "engine 'gpu-cuda' unavailable at runtime (CUDA init failed)"
+                    ));
+                }
+                Arc::new(eng)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                log::error!("Requested engine gpu-cuda, but this binary was built without the 'cuda' feature. Rebuild miner-service with --features cuda.");
+                return Err(anyhow::anyhow!(
+                    "engine 'gpu-cuda' not built (missing 'cuda' feature)"
+                ));
+            }
         }
         EngineSelection::GpuOpenCl => {
             log::error!("Requested engine gpu-opencl is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
