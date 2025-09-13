@@ -373,55 +373,102 @@ __device__ __forceinline__ void store64_be(uint8_t* p, uint64_t v) {
 __device__ __forceinline__ void keccak_f1600(uint64_t s[25]) {
 #pragma unroll
     for (int round = 0; round < 24; ++round) {
-        // Theta
-        uint64_t C[5], D[5];
-#pragma unroll
-        for (int x = 0; x < 5; ++x) {
-            C[x] = s[x] ^ s[x + 5] ^ s[x + 10] ^ s[x + 15] ^ s[x + 20];
-        }
-#pragma unroll
-        for (int x = 0; x < 5; ++x) {
-            D[x] = C[(x + 4) % 5] ^ rotl64(C[(x + 1) % 5], 1);
-        }
-#pragma unroll
-        for (int x = 0; x < 5; ++x) {
-#pragma unroll
-            for (int y = 0; y < 5; ++y) {
-                s[x + 5 * y] ^= D[x];
-            }
-        }
- 
-        // Rho and Pi
-        uint64_t B[25];
-        const int r[25] = {
-            0,  1, 62, 28, 27,
-           36, 44,  6, 55, 20,
-            3, 10, 43, 25, 39,
-           41, 45, 15, 21,  8,
-           18,  2, 61, 56, 14
-        };
-#pragma unroll
-        for (int x = 0; x < 5; ++x) {
-#pragma unroll
-            for (int y = 0; y < 5; ++y) {
-                int idx = x + 5 * y;
-                int X = y;
-                int Y = (2 * x + 3 * y) % 5;
-                B[X + 5 * Y] = rotl64(s[idx], r[idx]);
-            }
-        }
- 
-        // Chi
-#pragma unroll
-        for (int x = 0; x < 5; ++x) {
-#pragma unroll
-            for (int y = 0; y < 5; ++y) {
-                s[x + 5 * y] = B[x + 5 * y] ^ ((~B[((x + 1) % 5) + 5 * y]) & B[((x + 2) % 5) + 5 * y]);
-            }
-        }
- 
-        // Iota
-        s[0] ^= KECCAK_RC[round];
+        // ---- Theta ---------------------------------------------------------
+        uint64_t Aba=s[0],  Abe=s[1],  Abi=s[2],  Abo=s[3],  Abu=s[4];
+        uint64_t Aga=s[5],  Age=s[6],  Agi=s[7],  Ago=s[8],  Agu=s[9];
+        uint64_t Aka=s[10], Ake=s[11], Aki=s[12], Ako=s[13], Aku=s[14];
+        uint64_t Ama=s[15], Ame=s[16], Ami=s[17], Amo=s[18], Amu=s[19];
+        uint64_t Asa=s[20], Ase=s[21], Asi=s[22], Aso=s[23], Asu=s[24];
+
+        uint64_t Ca = Aba ^ Aga ^ Aka ^ Ama ^ Asa;
+        uint64_t Ce = Abe ^ Age ^ Ake ^ Ame ^ Ase;
+        uint64_t Ci = Abi ^ Agi ^ Aki ^ Ami ^ Asi;
+        uint64_t Co = Abo ^ Ago ^ Ako ^ Amo ^ Aso;
+        uint64_t Cu = Abu ^ Agu ^ Aku ^ Amu ^ Asu;
+
+        uint64_t Da = rotl64(Ce, 1) ^ Cu;
+        uint64_t De = rotl64(Ci, 1) ^ Ca;
+        uint64_t Di = rotl64(Co, 1) ^ Ce;
+        uint64_t Do = rotl64(Cu, 1) ^ Ci;
+        uint64_t Du = rotl64(Ca, 1) ^ Co;
+
+        Aba ^= Da; Abe ^= De; Abi ^= Di; Abo ^= Do; Abu ^= Du;
+        Aga ^= Da; Age ^= De; Agi ^= Di; Ago ^= Do; Agu ^= Du;
+        Aka ^= Da; Ake ^= De; Aki ^= Di; Ako ^= Do; Aku ^= Du;
+        Ama ^= Da; Ame ^= De; Ami ^= Di; Amo ^= Do; Amu ^= Du;
+        Asa ^= Da; Ase ^= De; Asi ^= Di; Aso ^= Do; Asu ^= Du;
+
+        // ---- Rho + Pi (explicit unrolled mapping) -------------------------
+        uint64_t Bba = Aba;
+        uint64_t Bbe = rotl64(Age, 44);
+        uint64_t Bbi = rotl64(Aki, 43);
+        uint64_t Bbo = rotl64(Amo, 21);
+        uint64_t Bbu = rotl64(Asu, 14);
+
+        uint64_t Bga = rotl64(Abo, 28);
+        uint64_t Bge = rotl64(Agu, 20);
+        uint64_t Bgi = rotl64(Aka, 3);
+        uint64_t Bgo = rotl64(Ame, 45);
+        uint64_t Bgu = rotl64(Asi, 61);
+
+        uint64_t Bka = rotl64(Abe, 1);
+        uint64_t Bke = rotl64(Agi, 6);
+        uint64_t Bki = rotl64(Ako, 25);
+        uint64_t Bko = rotl64(Amu, 8);
+        uint64_t Bku = rotl64(Asa, 18);
+
+        uint64_t Bma = rotl64(Abu, 27);
+        uint64_t Bme = rotl64(Aga, 36);
+        uint64_t Bmi = rotl64(Ake, 10);
+        uint64_t Bmo = rotl64(Ami, 15);
+        uint64_t Bmu = rotl64(Aso, 56);
+
+        uint64_t Bsa = rotl64(Abi, 62);
+        uint64_t Bse = rotl64(Ago, 55);
+        uint64_t Bsi = rotl64(Aku, 39);
+        uint64_t Bso = rotl64(Ama, 41);
+        uint64_t Bsu = rotl64(Ase, 2);
+
+        // ---- Chi -----------------------------------------------------------
+        Aba = Bba ^ ((~Bbe) & Bbi);
+        Abe = Bbe ^ ((~Bbi) & Bbo);
+        Abi = Bbi ^ ((~Bbo) & Bbu);
+        Abo = Bbo ^ ((~Bbu) & Bba);
+        Abu = Bbu ^ ((~Bba) & Bbe);
+
+        Aga = Bga ^ ((~Bge) & Bgi);
+        Age = Bge ^ ((~Bgi) & Bgo);
+        Agi = Bgi ^ ((~Bgo) & Bgu);
+        Ago = Bgo ^ ((~Bgu) & Bga);
+        Agu = Bgu ^ ((~Bga) & Bge);
+
+        Aka = Bka ^ ((~Bke) & Bki);
+        Ake = Bke ^ ((~Bki) & Bko);
+        Aki = Bki ^ ((~Bko) & Bku);
+        Ako = Bko ^ ((~Bku) & Bka);
+        Aku = Bku ^ ((~Bka) & Bke);
+
+        Ama = Bma ^ ((~Bme) & Bmi);
+        Ame = Bme ^ ((~Bmi) & Bmo);
+        Ami = Bmi ^ ((~Bmo) & Bmu);
+        Amo = Bmo ^ ((~Bmu) & Bma);
+        Amu = Bmu ^ ((~Bma) & Bme);
+
+        Asa = Bsa ^ ((~Bse) & Bsi);
+        Ase = Bse ^ ((~Bsi) & Bso);
+        Asi = Bsi ^ ((~Bso) & Bsu);
+        Aso = Bso ^ ((~Bsu) & Bsa);
+        Asu = Bsu ^ ((~Bsa) & Bse);
+
+        // ---- Iota ----------------------------------------------------------
+        Aba ^= KECCAK_RC[round];
+
+        // Store back
+        s[0]=Aba;  s[1]=Abe;  s[2]=Abi;  s[3]=Abo;  s[4]=Abu;
+        s[5]=Aga;  s[6]=Age;  s[7]=Agi;  s[8]=Ago;  s[9]=Agu;
+        s[10]=Aka; s[11]=Ake; s[12]=Aki; s[13]=Ako; s[14]=Aku;
+        s[15]=Ama; s[16]=Ame; s[17]=Ami; s[18]=Amo; s[19]=Amu;
+        s[20]=Asa; s[21]=Ase; s[22]=Asi; s[23]=Aso; s[24]=Asu;
     }
 }
  
