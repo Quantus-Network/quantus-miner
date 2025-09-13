@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+
+# Pristine CUDA builder image:
+# - Based on NVIDIA CUDA devel (Ubuntu 22.04)
+# - Installs toolchain and Rust
+# - No source copied, no build performed
+#   Use this image in CI to mount your workspace and build artifacts.
+
+ARG CUDA_TAG=12.9.0
+FROM nvcr.io/nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04
+ARG CUDA_TAG
+ENV CUDA_TAG=${CUDA_TAG}
+
+# System dependencies for building Rust/CUDA projects
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates pkg-config build-essential \
+      libssl-dev git clang cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Rust (stable, minimal profile)
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    CUDA_HOME=/usr/local/cuda \
+    CARGO_TERM_COLOR=always \
+    PATH=/opt/cargo/bin:/usr/local/cuda/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable && \
+    rustc --version && cargo --version
+
+# Working directory for consumers (CI jobs mount source here)
+WORKDIR /workspace
+
+# Notes:
+# - CI should use this image as a base and run cargo build inside the workspace.
+# - Optional environment knobs like CUDA_ARCH, MINER_CUDA_ALLOW_UNSUPPORTED_COMPILER,
+#   MINER_NVCC_CCBIN can be provided at runtime as needed.
