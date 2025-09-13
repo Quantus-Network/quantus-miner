@@ -315,10 +315,12 @@ impl CudaEngine {
             let grid_dim = ((num_threads + block_dim - 1) / block_dim).max(1);
 
             // Prepare per-thread y0 for base nonces: current + t
+            let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
             let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
             for t in 0..(num_threads as usize) {
                 let stride = iters_per_thread as u64;
                 let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
+                base_nonces[t] = base_nonce;
                 let y0_u512 = pow_core::init_worker_y0(ctx, base_nonce);
                 let y0_le = u512_to_le_limbs(y0_u512);
                 let off = t * 8;
@@ -562,9 +564,10 @@ impl CudaEngine {
                     // Compute nonce from linear index (t, j)
                     let t_idx = (k as usize) / (iters_per_thread as usize);
                     let j_idx = (k as usize) % (iters_per_thread as usize);
-                    let nonce = current.saturating_add(U512::from(
-                        1u64 + (t_idx as u64) * (iters_per_thread as u64) + (j_idx as u64),
-                    ));
+                    // Reconstruct nonce using the exact per-thread base nonce used for y0:
+                    // nonce = base_nonces[t_idx] + (j_idx + 1)
+                    let base_nonce = base_nonces[t_idx];
+                    let nonce = base_nonce.saturating_add(U512::from(1u64 + (j_idx as u64)));
 
                     // Copy back distance (optional for completeness; threshold was already satisfied)
                     let mut h_dist = [0u8; 64];
