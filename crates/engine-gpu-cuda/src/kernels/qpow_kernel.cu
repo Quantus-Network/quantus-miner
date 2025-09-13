@@ -593,36 +593,19 @@ const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
 uint64_t yhat[8];
 to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
 
-// Prepare target/threshold lane-LE bytes (match SHA3 output layout) for XOR with h_le
+// Prepare target/threshold big-endian bytes (numeric)
 uint8_t target_be_bytes[64], thresh_be_bytes[64];
 if (C_CONSTS_READY) {
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        // C_TARGET/C_THRESH are big-endian 64-bit limbs [0]=MSL; map to lane-LE with reversed limb order
-        store64_le(&target_be_bytes[(7 - i) * 8], C_TARGET[i]);
-        store64_le(&thresh_be_bytes[(7 - i) * 8], C_THRESH[i]);
+        store64_be(&target_be_bytes[i * 8], C_TARGET[i]);
+        store64_be(&thresh_be_bytes[i * 8], C_THRESH[i]);
     }
 } else {
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        // Convert input big-endian bytes to lane-LE with reversed limb order
-        target_be_bytes[(7 - i) * 8 + 0] = target_be[i * 8 + 7];
-        target_be_bytes[(7 - i) * 8 + 1] = target_be[i * 8 + 6];
-        target_be_bytes[(7 - i) * 8 + 2] = target_be[i * 8 + 5];
-        target_be_bytes[(7 - i) * 8 + 3] = target_be[i * 8 + 4];
-        target_be_bytes[(7 - i) * 8 + 4] = target_be[i * 8 + 3];
-        target_be_bytes[(7 - i) * 8 + 5] = target_be[i * 8 + 2];
-        target_be_bytes[(7 - i) * 8 + 6] = target_be[i * 8 + 1];
-        target_be_bytes[(7 - i) * 8 + 7] = target_be[i * 8 + 0];
-
-        thresh_be_bytes[(7 - i) * 8 + 0] = threshold_be[i * 8 + 7];
-        thresh_be_bytes[(7 - i) * 8 + 1] = threshold_be[i * 8 + 6];
-        thresh_be_bytes[(7 - i) * 8 + 2] = threshold_be[i * 8 + 5];
-        thresh_be_bytes[(7 - i) * 8 + 3] = threshold_be[i * 8 + 4];
-        thresh_be_bytes[(7 - i) * 8 + 4] = threshold_be[i * 8 + 3];
-        thresh_be_bytes[(7 - i) * 8 + 5] = threshold_be[i * 8 + 2];
-        thresh_be_bytes[(7 - i) * 8 + 6] = threshold_be[i * 8 + 1];
-        thresh_be_bytes[(7 - i) * 8 + 7] = threshold_be[i * 8 + 0];
+    for (int i = 0; i < 64; ++i) {
+        target_be_bytes[i] = target_be[i];
+        thresh_be_bytes[i] = threshold_be[i];
     }
 }
 
@@ -654,11 +637,12 @@ for (uint32_t j = 0; j < iters; ++j) {
     uint8_t h_le[64];
     sha3_512_64bytes_le(y_be, h_le);
 
-    // Use raw SHA3 output bytes (lane-LE) directly for distance and debug
+    // Convert digest to big-endian numeric bytes
     uint8_t digest_be[64];
     #pragma unroll
-    for (int i = 0; i < 64; ++i) {
-        digest_be[i] = h_le[i];
+    for (int i = 0; i < 8; ++i) {
+        uint64_t w = load64_le(&h_le[i * 8]);
+        store64_be(&digest_be[(7 - i) * 8], w);
     }
 
     // distance = target_be XOR digest_be (bytewise, big-endian order)
@@ -668,7 +652,7 @@ for (uint32_t j = 0; j < iters; ++j) {
         dist_be[i] = target_be_bytes[i] ^ digest_be[i];
     }
 
-    // Compare distance <= threshold (lexicographic on lane-LE bytes)
+    // Compare distance <= threshold (lexicographic on big-endian bytes)
     bool decision = be64_leq(dist_be, thresh_be_bytes);
 
     // Optional sampler (first thread/iter): capture y/H/target/thresh for parity
@@ -676,7 +660,7 @@ for (uint32_t j = 0; j < iters; ++j) {
 #pragma unroll
         for (int i = 0; i < 64; ++i) {
             C_SAMPLER_Y_BE[i]       = y_be[i];
-            C_SAMPLER_H_BE[i]       = h_le[i];
+            C_SAMPLER_H_BE[i]       = digest_be[i];
             C_SAMPLER_TARGET_BE[i]  = target_be_bytes[i];
             C_SAMPLER_THRESH_BE[i]  = thresh_be_bytes[i];
         }
@@ -707,7 +691,7 @@ for (uint32_t j = 0; j < iters; ++j) {
             if (out_dbg_h_be) {
 #pragma unroll
                 for (int i = 0; i < 64; ++i) {
-                    out_dbg_h_be[i] = h_le[i];
+                    out_dbg_h_be[i] = digest_be[i];
                 }
             }
         }
