@@ -323,9 +323,18 @@ __device__ __constant__ uint64_t C_R2[8];
 __device__ __constant__ uint64_t C_MHAT[8];
 __device__ __constant__ uint64_t C_N0_INV;
 __device__ __constant__ int      C_CONSTS_READY;
-// Optional device-side target/threshold in constant memory (set by host when available)
+// Optional constant-memory target/threshold for device compare
 __device__ __constant__ uint64_t C_TARGET[8];
 __device__ __constant__ uint64_t C_THRESH[8];
+// Optional sampler controls/output (host may read these symbols when enabled)
+__device__ __constant__ int      C_SAMPLER_ENABLE;
+__device__ uint8_t               C_SAMPLER_Y_BE[64];
+__device__ uint8_t               C_SAMPLER_H_BE[64];
+__device__ uint8_t               C_SAMPLER_TARGET_BE[64];
+__device__ uint8_t               C_SAMPLER_THRESH_BE[64];
+__device__ uint32_t              C_SAMPLER_INDEX;
+__device__ uint32_t              C_SAMPLER_DECISION;
+/* removed duplicate C_TARGET/C_THRESH definitions */
  
 // Load/store helpers (little-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
@@ -347,6 +356,16 @@ __device__ __forceinline__ void store64_le(uint8_t* p, uint64_t v) {
     p[5] = (uint8_t)(v >> 40);
     p[6] = (uint8_t)(v >> 48);
     p[7] = (uint8_t)(v >> 56);
+}
+__device__ __forceinline__ void store64_be(uint8_t* p, uint64_t v) {
+    p[0] = (uint8_t)(v >> 56);
+    p[1] = (uint8_t)(v >> 48);
+    p[2] = (uint8_t)(v >> 40);
+    p[3] = (uint8_t)(v >> 32);
+    p[4] = (uint8_t)(v >> 24);
+    p[5] = (uint8_t)(v >> 16);
+    p[6] = (uint8_t)(v >> 8);
+    p[7] = (uint8_t)(v);
 }
  
 // Keccak-f[1600] permutation
@@ -430,18 +449,10 @@ __device__ __forceinline__ void sha3_512_64bytes(const uint8_t in_be64[64], uint
     // Permute
     keccak_f1600(s);
  
-    // Squeeze 64 bytes (8 lanes)
-    uint8_t out_le[64];
-#pragma unroll
+    // Squeeze 64 bytes (8 lanes) into big-endian digest bytes (match host SHA3 output)
+    #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        store64_le(&out_le[i * 8], s[i]);
-    }
- 
-    // The standard digest byte order expected by host libraries is the emitted byte stream.
-    // We keep it as-is; host target/threshold bytes should be in the same orientation to XOR/compare.
-#pragma unroll
-    for (int i = 0; i < 64; ++i) {
-        out_be64[i] = out_le[i];
+        store64_be(&out_be64[i * 8], s[i]);
     }
 }
  

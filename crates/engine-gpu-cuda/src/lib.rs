@@ -399,6 +399,53 @@ impl CudaEngine {
                         c_n0.copy_from(&(n0_inv as u64))?;
                         c_target.copy_from(&target_limbs)?;
                         c_thresh.copy_from(&thresh_limbs)?;
+                        // Optional sampler: initialize when env MINER_CUDA_SAMPLER=1
+                        if std::env::var("MINER_CUDA_SAMPLER")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false)
+                        {
+                            if let (
+                                Ok(mut c_samp_en),
+                                Ok(mut c_samp_y),
+                                Ok(mut c_samp_h),
+                                Ok(mut c_samp_target_be),
+                                Ok(mut c_samp_thresh_be),
+                                Ok(mut c_samp_index),
+                                Ok(mut c_samp_dec),
+                            ) = (
+                                module.get_global::<i32>(
+                                    CString::new("C_SAMPLER_ENABLE")?.as_c_str(),
+                                ),
+                                module.get_global::<[u8; 64]>(
+                                    CString::new("C_SAMPLER_Y_BE")?.as_c_str(),
+                                ),
+                                module.get_global::<[u8; 64]>(
+                                    CString::new("C_SAMPLER_H_BE")?.as_c_str(),
+                                ),
+                                module.get_global::<[u8; 64]>(
+                                    CString::new("C_SAMPLER_TARGET_BE")?.as_c_str(),
+                                ),
+                                module.get_global::<[u8; 64]>(
+                                    CString::new("C_SAMPLER_THRESH_BE")?.as_c_str(),
+                                ),
+                                module
+                                    .get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
+                                module.get_global::<u32>(
+                                    CString::new("C_SAMPLER_DECISION")?.as_c_str(),
+                                ),
+                            ) {
+                                let one_i32: i32 = 1;
+                                c_samp_en.copy_from(&one_i32)?;
+                                // Initialize sampler buffers (copy target/threshold; zero y/h/index/decision)
+                                c_samp_target_be.copy_from(&target_be)?;
+                                c_samp_thresh_be.copy_from(&threshold_be)?;
+                                c_samp_index.copy_from(&0u32)?;
+                                c_samp_dec.copy_from(&0u32)?;
+                                let zero64 = [0u8; 64];
+                                c_samp_y.copy_from(&zero64)?;
+                                c_samp_h.copy_from(&zero64)?;
+                            }
+                        }
                         // Flag ready = 1
                         let one: i32 = 1;
                         c_ready.copy_from(&one)?;
@@ -480,11 +527,6 @@ impl CudaEngine {
                     } else {
                         // Treat as not found: account coverage and advance like the "not found" path
                         log::warn!(target: "miner", "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}");
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics::inc_candidates_false_positive("gpu-cuda");
-                        }
-                        hash_count = hash_count.saturating_add(covered);
                         #[cfg(feature = "metrics")]
                         {
                             metrics::inc_candidates_false_positive("gpu-cuda");

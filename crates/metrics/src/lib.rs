@@ -230,6 +230,21 @@ static CANDIDATES_FALSE_POSITIVE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     c
 });
 
+static SAMPLE_MISMATCH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_sample_mismatch_total",
+            "Total decision parity mismatches between engine and host per engine"
+        ),
+        &["engine"],
+    )
+    .expect("create miner_sample_mismatch_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_sample_mismatch_total");
+    c
+});
+
 static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -342,6 +357,10 @@ pub fn inc_candidates_false_positive(engine: &str) {
     CANDIDATES_FALSE_POSITIVE_TOTAL
         .with_label_values(&[engine])
         .inc();
+}
+
+pub fn inc_sample_mismatch(engine: &str) {
+    SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
 }
 
 pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
