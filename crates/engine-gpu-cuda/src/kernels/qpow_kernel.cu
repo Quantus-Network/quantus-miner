@@ -598,14 +598,16 @@ uint8_t target_be_bytes[64], thresh_be_bytes[64];
 if (C_CONSTS_READY) {
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        store64_be(&target_be_bytes[i * 8], C_TARGET[i]);
-        store64_be(&thresh_be_bytes[i * 8], C_THRESH[i]);
+        store64_be(&target_be_bytes[(7 - i) * 8], C_TARGET[i]);
+        store64_be(&thresh_be_bytes[(7 - i) * 8], C_THRESH[i]);
     }
 } else {
 #pragma unroll
-    for (int i = 0; i < 64; ++i) {
-        target_be_bytes[i] = target_be[i];
-        thresh_be_bytes[i] = threshold_be[i];
+    for (int i = 0; i < 8; ++i) {
+        for (int b = 0; b < 8; ++b) {
+            target_be_bytes[i * 8 + b] = target_be[(7 - i) * 8 + b];
+            thresh_be_bytes[i * 8 + b] = threshold_be[(7 - i) * 8 + b];
+        }
     }
 }
 
@@ -642,7 +644,7 @@ for (uint32_t j = 0; j < iters; ++j) {
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
             uint64_t w = load64_le(&h_le[i * 8]);
-            store64_be(&digest_be[i * 8], w);
+            store64_be(&digest_be[(7 - i) * 8], w);
         }
 
     // distance = target_be XOR digest_be (bytewise, big-endian order)
