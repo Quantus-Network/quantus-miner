@@ -358,6 +358,11 @@ impl CudaEngine {
                     .with_context(|| "alloc/copy d_found")?;
                 let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
                     .with_context(|| "alloc/copy d_index")?;
+                // Winner coordinates (thread id and iteration)
+                let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                    .with_context(|| "alloc/copy d_win_tid")?;
+                let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                    .with_context(|| "alloc/copy d_win_j")?;
                 let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                     .with_context(|| "alloc d_distance")?;
                 let d_dbg_y = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
@@ -480,6 +485,8 @@ impl CudaEngine {
                         d_threshold.as_device_ptr(),
                         d_found.as_device_ptr(),
                         d_index.as_device_ptr(),
+                        d_win_tid.as_device_ptr(),
+                        d_win_j.as_device_ptr(),
                         d_distance.as_device_ptr(),
                         d_dbg_y.as_device_ptr(),
                         d_dbg_h.as_device_ptr(),
@@ -564,21 +571,17 @@ impl CudaEngine {
                     // Compute nonce from linear index (t, j)
                     let mut t_idx = (k as usize) / (iters_per_thread as usize);
                     let mut j_idx = (k as usize) % (iters_per_thread as usize);
-                    // If the device exported winner coordinates, prefer them
-                    if let (Ok(win_tid_sym), Ok(win_j_sym)) = (
-                        module.get_global::<u32>(std::ffi::CString::new("C_WIN_TID")?.as_c_str()),
-                        module.get_global::<u32>(std::ffi::CString::new("C_WIN_J")?.as_c_str()),
-                    ) {
-                        let mut dev_tid: u32 = u32::MAX;
-                        let mut dev_j: u32 = u32::MAX;
-                        let _ = win_tid_sym.copy_to(&mut dev_tid);
-                        let _ = win_j_sym.copy_to(&mut dev_j);
-                        if (dev_tid as usize) < (num_threads as usize)
-                            && (dev_j as usize) < (iters_per_thread as usize)
-                        {
-                            t_idx = dev_tid as usize;
-                            j_idx = dev_j as usize;
-                        }
+                    // Prefer winner coordinates returned via device buffers when available
+                    let mut h_win_tid = [u32::MAX; 1];
+                    let mut h_win_j = [u32::MAX; 1];
+                    // Ignore copy errors; fall back to k-derived indices
+                    let _ = d_win_tid.copy_to(&mut h_win_tid);
+                    let _ = d_win_j.copy_to(&mut h_win_j);
+                    if (h_win_tid[0] as usize) < (num_threads as usize)
+                        && (h_win_j[0] as usize) < (iters_per_thread as usize)
+                    {
+                        t_idx = h_win_tid[0] as usize;
+                        j_idx = h_win_j[0] as usize;
                     }
                     // Reconstruct nonce using the exact per-thread base nonce used for y0:
                     // nonce = base_nonces[t_idx] + (j_idx + 1)

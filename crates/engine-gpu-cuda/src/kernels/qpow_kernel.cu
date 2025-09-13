@@ -336,8 +336,6 @@ __device__ uint8_t               C_SAMPLER_TARGET_BE[64];
 __device__ uint8_t               C_SAMPLER_THRESH_BE[64];
 __device__ uint32_t              C_SAMPLER_INDEX;
 __device__ uint32_t              C_SAMPLER_DECISION;
-__device__ uint32_t              C_WIN_TID;
-__device__ uint32_t              C_WIN_J;
 
 // Load/store helpers (little- and big-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
@@ -548,6 +546,8 @@ const uint8_t*  __restrict__ target_be,     // 64 bytes
 const uint8_t*  __restrict__ threshold_be,  // 64 bytes
 int*            __restrict__ found_flag,    // 0 -> not found, 1 -> found
 uint32_t*       __restrict__ out_index,     // linear index (t * iters + j)
+uint32_t*       __restrict__ out_win_tid,   // winner thread id (optional)
+uint32_t*       __restrict__ out_win_j,     // winner iteration j (optional)
 uint8_t*        __restrict__ out_distance_be, // 64 bytes
 // Debug output buffers (optional; host may pass nullptrs)
 uint8_t*        __restrict__ out_dbg_y_be,    // 64 bytes (optional)
@@ -678,8 +678,12 @@ for (uint32_t j = 0; j < iters; ++j) {
                 *out_index = tid * iters + j;
             }
             // Record winner thread and iteration for host-side nonce reconstruction
-            C_WIN_TID = tid;
-            C_WIN_J = j;
+            if (out_win_tid) {
+                *out_win_tid = tid;
+            }
+            if (out_win_j) {
+                *out_win_j = j;
+            }
             // Write distance and debug buffers (if provided)
             if (out_distance_be) {
 #pragma unroll
