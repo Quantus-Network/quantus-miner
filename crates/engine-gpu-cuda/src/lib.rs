@@ -618,15 +618,68 @@ impl CudaEngine {
                         let thresh_hex = hex::encode(&thresh_be[..16]);
 
                         // Device decided "found" (dev_ok=true) but host rejected (host_ok=false)
+                        // Additional diagnostics: compute alternative nonce mappings to detect index reconstruction mismatches.
+                        let iters_usize = iters_per_thread as usize;
+                        let threads_usize = num_threads as usize;
+                        let k_usize = k as usize;
+
+                        // Row-major (+1): t = k / iters, j = k % iters
+                        let t_row = k_usize / iters_usize;
+                        let j_row = k_usize % iters_usize;
+                        let nonce_row_p1 = current.saturating_add(U512::from(
+                            1u64 + (t_row as u64) * (iters_per_thread as u64) + (j_row as u64),
+                        ));
+                        let dist_row_p1 = pow_core::distance_for_nonce(ctx, nonce_row_p1);
+                        let dist_row_p1_hex = {
+                            let be = dist_row_p1.to_big_endian();
+                            hex::encode(&be[..16])
+                        };
+
+                        // Column-major (+1): t = k % threads, j = k / threads
+                        let t_col = k_usize % threads_usize;
+                        let j_col = k_usize / threads_usize;
+                        let nonce_col_p1 = current.saturating_add(U512::from(
+                            1u64 + (t_col as u64) * (iters_per_thread as u64) + (j_col as u64),
+                        ));
+                        let dist_col_p1 = pow_core::distance_for_nonce(ctx, nonce_col_p1);
+                        let dist_col_p1_hex = {
+                            let be = dist_col_p1.to_big_endian();
+                            hex::encode(&be[..16])
+                        };
+
+                        // Row-major (+0)
+                        let nonce_row_p0 = current.saturating_add(U512::from(
+                            (t_row as u64) * (iters_per_thread as u64) + (j_row as u64),
+                        ));
+                        let dist_row_p0 = pow_core::distance_for_nonce(ctx, nonce_row_p0);
+                        let dist_row_p0_hex = {
+                            let be = dist_row_p0.to_big_endian();
+                            hex::encode(&be[..16])
+                        };
+
+                        // Column-major (+0)
+                        let nonce_col_p0 = current.saturating_add(U512::from(
+                            (t_col as u64) * (iters_per_thread as u64) + (j_col as u64),
+                        ));
+                        let dist_col_p0 = pow_core::distance_for_nonce(ctx, nonce_col_p0);
+                        let dist_col_p0_hex = {
+                            let be = dist_col_p0.to_big_endian();
+                            hex::encode(&be[..16])
+                        };
+
                         log::warn!(
                             target: "miner",
-                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, host_y_dist[0..16]={}, target[0..16]={}, thresh[0..16]={}",
+                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, host_y_dist[0..16]={}, map_r+1[0..16]={}, map_c+1[0..16]={}, map_r+0[0..16]={}, map_c+0[0..16]={}, target[0..16]={}, thresh[0..16]={}",
                             y_hex,
                             h_hex,
                             host_hash_hex,
                             dev_dist_hex,
                             host_dist_hex,
                             host_dist_y_hex,
+                            dist_row_p1_hex,
+                            dist_col_p1_hex,
+                            dist_row_p0_hex,
+                            dist_col_p0_hex,
                             target_hex,
                             thresh_hex
                         );
