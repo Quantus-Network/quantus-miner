@@ -606,6 +606,11 @@ impl CudaEngine {
                         let host_dist_be = host_distance.to_big_endian();
                         let host_dist_hex = hex::encode(&host_dist_be[..16]);
 
+                        // Additionally compute expected host distance directly from dbg_y to diagnose nonce/target mismatches
+                        let host_dist_from_y = pow_core::distance_from_y(ctx, y_u512);
+                        let host_dist_y_be = host_dist_from_y.to_big_endian();
+                        let host_dist_y_hex = hex::encode(&host_dist_y_be[..16]);
+
                         // Target/threshold prefixes
                         let target_be = ctx.target.to_big_endian();
                         let thresh_be = ctx.threshold.to_big_endian();
@@ -615,12 +620,13 @@ impl CudaEngine {
                         // Device decided "found" (dev_ok=true) but host rejected (host_ok=false)
                         log::warn!(
                             target: "miner",
-                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, target[0..16]={}, thresh[0..16]={}",
+                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, host_y_dist[0..16]={}, target[0..16]={}, thresh[0..16]={}",
                             y_hex,
                             h_hex,
                             host_hash_hex,
                             dev_dist_hex,
                             host_dist_hex,
+                            host_dist_y_hex,
                             target_hex,
                             thresh_hex
                         );
