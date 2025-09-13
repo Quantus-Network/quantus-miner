@@ -374,11 +374,11 @@ __device__ __forceinline__ void keccak_f1600(uint64_t s[25]) {
 #pragma unroll
     for (int round = 0; round < 24; ++round) {
         // ---- Theta ---------------------------------------------------------
-        uint64_t Aba=s[0],  Abe=s[1],  Abi=s[2],  Abo=s[3],  Abu=s[4];
-        uint64_t Aga=s[5],  Age=s[6],  Agi=s[7],  Ago=s[8],  Agu=s[9];
-        uint64_t Aka=s[10], Ake=s[11], Aki=s[12], Ako=s[13], Aku=s[14];
-        uint64_t Ama=s[15], Ame=s[16], Ami=s[17], Amo=s[18], Amu=s[19];
-        uint64_t Asa=s[20], Ase=s[21], Asi=s[22], Aso=s[23], Asu=s[24];
+        uint64_t Aba=s[0],  Aga=s[5],  Aka=s[10],  Ama=s[15],  Asa=s[20];
+        uint64_t Abe=s[1],  Age=s[6],  Ake=s[11],  Ame=s[16],  Ase=s[21];
+        uint64_t Abi=s[2],  Agi=s[7],  Aki=s[12],  Ami=s[17],  Asi=s[22];
+        uint64_t Abo=s[3],  Ago=s[8],  Ako=s[13],  Amo=s[18],  Aso=s[23];
+        uint64_t Abu=s[4],  Agu=s[9],  Aku=s[14],  Amu=s[19],  Asu=s[24];
 
         uint64_t Ca = Aba ^ Aga ^ Aka ^ Ama ^ Asa;
         uint64_t Ce = Abe ^ Age ^ Ake ^ Ame ^ Ase;
@@ -464,11 +464,11 @@ __device__ __forceinline__ void keccak_f1600(uint64_t s[25]) {
         Aba ^= KECCAK_RC[round];
 
         // Store back
-        s[0]=Aba;  s[1]=Abe;  s[2]=Abi;  s[3]=Abo;  s[4]=Abu;
-        s[5]=Aga;  s[6]=Age;  s[7]=Agi;  s[8]=Ago;  s[9]=Agu;
-        s[10]=Aka; s[11]=Ake; s[12]=Aki; s[13]=Ako; s[14]=Aku;
-        s[15]=Ama; s[16]=Ame; s[17]=Ami; s[18]=Amo; s[19]=Amu;
-        s[20]=Asa; s[21]=Ase; s[22]=Asi; s[23]=Aso; s[24]=Asu;
+        s[0]=Aba;  s[5]=Aga;  s[10]=Aka;  s[15]=Ama;  s[20]=Asa;
+        s[1]=Abe;  s[6]=Age;  s[11]=Ake;  s[16]=Ame;  s[21]=Ase;
+        s[2]=Abi;  s[7]=Agi;  s[12]=Aki;  s[17]=Ami;  s[22]=Asi;
+        s[3]=Abo;  s[8]=Ago;  s[13]=Ako;  s[18]=Amo;  s[23]=Aso;
+        s[4]=Abu;  s[9]=Agu;  s[14]=Aku;  s[19]=Amu;  s[24]=Asu;
     }
 }
  
