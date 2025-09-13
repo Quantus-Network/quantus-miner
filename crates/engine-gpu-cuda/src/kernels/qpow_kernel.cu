@@ -330,6 +330,7 @@ __device__ __constant__ uint64_t C_TARGET[8];
 __device__ __constant__ uint64_t C_THRESH[8];
 // Optional sampler controls/output (host may read these symbols when enabled)
 __device__ __constant__ int      C_SAMPLER_ENABLE;
+__device__ __constant__ uint32_t C_ABI_VERSION = 1u;
 __device__ uint8_t               C_SAMPLER_Y_BE[64];
 __device__ uint8_t               C_SAMPLER_H_BE[64];
 __device__ uint8_t               C_SAMPLER_TARGET_BE[64];

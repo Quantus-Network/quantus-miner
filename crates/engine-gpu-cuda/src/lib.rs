@@ -236,6 +236,17 @@ impl CudaEngine {
         {
             metrics::set_engine_backend("gpu-cuda", if is_g2 { "g2" } else { "g1" });
         }
+        // Probe device kernel ABI version if symbol is present (best-effort)
+        if is_g2 {
+            if let Ok(sym) =
+                module.get_global::<u32>(std::ffi::CString::new("C_ABI_VERSION")?.as_c_str())
+            {
+                let mut abi: u32 = 0;
+                if sym.copy_to(&mut abi).is_ok() {
+                    log::info!(target: "miner", "CUDA G2: kernel ABI version = {abi}");
+                }
+            }
+        }
         // Precompute Montgomery constants (host-side)
         let gc = GpuConstants::from_ctx(ctx);
 
@@ -574,7 +585,7 @@ impl CudaEngine {
                     // Prefer winner coordinates returned via device buffers when available
                     let mut h_win_tid = [u32::MAX; 1];
                     let mut h_win_j = [u32::MAX; 1];
-                    // Ignore copy errors; fall back to k-derived indices
+                    // Prefer device-returned winner coordinates; fall back to k-derived indices only if unavailable/invalid
                     let _ = d_win_tid.copy_to(&mut h_win_tid);
                     let _ = d_win_j.copy_to(&mut h_win_j);
                     if (h_win_tid[0] as usize) < (num_threads as usize)
@@ -582,6 +593,8 @@ impl CudaEngine {
                     {
                         t_idx = h_win_tid[0] as usize;
                         j_idx = h_win_j[0] as usize;
+                    } else {
+                        log::debug!(target: "miner", "CUDA G2: winner (tid,j) readback unavailable/invalid; falling back to k-derived indices");
                     }
                     // Reconstruct nonce using the exact per-thread base nonce used for y0:
                     // nonce = base_nonces[t_idx] + (j_idx + 1)
