@@ -485,6 +485,69 @@ impl CudaEngine {
                     .with_context(|| "stream synchronize (G2)")?;
                 let kernel_ms = t_kernel_start.elapsed().as_millis();
                 log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
+                // Optional sampler readback and host parity check
+                if std::env::var("MINER_CUDA_SAMPLER")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    if let (
+                        Ok(mut c_en),
+                        Ok(mut c_idx),
+                        Ok(mut c_dec),
+                        Ok(mut c_y),
+                        Ok(mut c_h),
+                        Ok(mut c_t),
+                        Ok(mut c_th),
+                    ) = (
+                        module.get_global::<i32>(CString::new("C_SAMPLER_ENABLE")?.as_c_str()),
+                        module.get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
+                        module.get_global::<u32>(CString::new("C_SAMPLER_DECISION")?.as_c_str()),
+                        module.get_global::<[u8; 64]>(CString::new("C_SAMPLER_Y_BE")?.as_c_str()),
+                        module.get_global::<[u8; 64]>(CString::new("C_SAMPLER_H_BE")?.as_c_str()),
+                        module.get_global::<[u8; 64]>(
+                            CString::new("C_SAMPLER_TARGET_BE")?.as_c_str(),
+                        ),
+                        module.get_global::<[u8; 64]>(
+                            CString::new("C_SAMPLER_THRESH_BE")?.as_c_str(),
+                        ),
+                    ) {
+                        let mut en: i32 = 0;
+                        c_en.copy_to(&mut en)?;
+                        if en != 0 {
+                            let mut y_be = [0u8; 64];
+                            let mut h_be = [0u8; 64];
+                            let mut t_be = [0u8; 64];
+                            let mut th_be = [0u8; 64];
+                            let mut samp_idx: u32 = 0;
+                            let mut samp_dec: u32 = 0;
+                            c_y.copy_to(&mut y_be)?;
+                            c_h.copy_to(&mut h_be)?;
+                            c_t.copy_to(&mut t_be)?;
+                            c_th.copy_to(&mut th_be)?;
+                            c_idx.copy_to(&mut samp_idx)?;
+                            c_dec.copy_to(&mut samp_dec)?;
+                            // Host recompute using pow_core from y
+                            let y_u512 = U512::from_big_endian(&y_be);
+                            let host_distance = pow_core::distance_from_y(ctx, y_u512);
+                            let host_ok = pow_core::is_valid_distance(ctx, host_distance);
+                            let dev_ok = samp_dec != 0;
+                            if host_ok != dev_ok {
+                                log::warn!(
+                                    target: "miner",
+                                    "CUDA G2 sampler mismatch: idx={}, host_ok={}, dev_ok={}, host_distance={}",
+                                    samp_idx,
+                                    host_ok,
+                                    dev_ok,
+                                    host_distance
+                                );
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics::inc_sample_mismatch("gpu-cuda");
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Copy back early-exit flag (and details if found)
                 let mut h_found = [0i32; 1];

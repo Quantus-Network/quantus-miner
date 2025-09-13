@@ -1,4 +1,4 @@
-name: CUDA Build
+name: cuda build
 
 on:
     workflow_dispatch:
