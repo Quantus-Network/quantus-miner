@@ -626,37 +626,49 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
         uint8_t h_be[64];
         sha3_512_64bytes(y_be, h_be);
 
-        // distance = target XOR H in big-endian numeric (limb-wise), then compare as big-endian limbs
-        uint64_t target_limbs[8], thresh_limbs[8], h_limbs[8], dist_limbs[8];
-        if (C_CONSTS_READY) {
-        #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                target_limbs[i] = C_TARGET[i];
-                thresh_limbs[i] = C_THRESH[i];
-            }
-        } else {
-            be64_bytes_to_u64_8(target_be, target_limbs);
-            be64_bytes_to_u64_8(threshold_be, thresh_limbs);
-        }
-        // Convert SHA3 digest (lane-LE bytes) into big-endian numeric limb order
+        // Convert device digest to big-endian numeric bytes for distance compare; also keep raw device bytes for debug
+        uint8_t digest_be[64];
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
             uint64_t w = load64_le(&h_be[i * 8]);
-            h_limbs[7 - i] = w;
+            store64_be(&digest_be[(7 - i) * 8], w);
         }
-        // dist = target XOR h (big-endian limbs)
+
+        // Build big-endian target/threshold bytes
+        uint8_t target_be_bytes[64], thresh_be_bytes[64];
+        if (C_CONSTS_READY) {
         #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            dist_limbs[i] = target_limbs[i] ^ h_limbs[i];
+            for (int i = 0; i < 8; ++i) {
+                uint64_t tl = C_TARGET[i];
+                uint64_t th = C_THRESH[i];
+                store64_be(&target_be_bytes[i * 8], tl);
+                store64_be(&thresh_be_bytes[i * 8], th);
+            }
+        } else {
+        #pragma unroll
+            for (int i = 0; i < 64; ++i) {
+                target_be_bytes[i] = target_be[i];
+                thresh_be_bytes[i] = threshold_be[i];
+            }
         }
-        bool decision = be_u64x8_leq(dist_limbs, thresh_limbs);
-        // Optional sampler: copy y as BE numeric; write h as BE numeric
+
+        // distance = target_be XOR digest_be (bytewise, big-endian order)
+        uint8_t dist_be[64];
+        #pragma unroll
+        for (int i = 0; i < 64; ++i) {
+            dist_be[i] = target_be_bytes[i] ^ digest_be[i];
+        }
+
+        // Compare distance <= threshold (lexicographic on big-endian bytes)
+        bool decision = be64_leq(dist_be, thresh_be_bytes);
+
+        // Optional sampler: copy y as BE numeric; emit raw device SHA3 bytes to sampler for debugging
         if (C_SAMPLER_ENABLE && tid == 0 && j == 0) {
         #pragma unroll
             for (int i = 0; i < 64; ++i) {
                 C_SAMPLER_Y_BE[i] = y_be[i];
+                C_SAMPLER_H_BE[i] = digest_be[i]; // device SHA3 bytes as big-endian numeric
             }
-            be_u64x8_to_be64_bytes(h_limbs, C_SAMPLER_H_BE);
             C_SAMPLER_INDEX = tid * iters + j;
             C_SAMPLER_DECISION = decision ? 1u : 0u;
         }
@@ -669,7 +681,10 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
                 }
                 // Write distance and debug buffers (if provided)
                 if (out_distance_be) {
-                    be_u64x8_to_be64_bytes(dist_limbs, out_distance_be);
+#pragma unroll
+                    for (int i = 0; i < 64; ++i) {
+                        out_distance_be[i] = dist_be[i];
+                    }
                 }
                 if (out_dbg_y_be) {
 #pragma unroll
@@ -678,7 +693,10 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
                     }
                 }
                 if (out_dbg_h_be) {
-                    be_u64x8_to_be64_bytes(h_limbs, out_dbg_h_be);
+#pragma unroll
+                    for (int i = 0; i < 64; ++i) {
+                        out_dbg_h_be[i] = digest_be[i]; // device SHA3 bytes as big-endian numeric
+                    }
                 }
             }
             return; // early-exit after claiming
