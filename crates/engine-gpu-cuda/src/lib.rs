@@ -595,11 +595,34 @@ impl CudaEngine {
                         let _ = d_dbg_h.copy_to(&mut dbg_h);
                         let y_hex = hex::encode(&dbg_y[..16]);
                         let h_hex = hex::encode(&dbg_h[..16]);
+                        // Compute richer diagnostics (host hash, host/device distances, target/threshold prefixes)
+                        let y_u512 = U512::from_big_endian(&dbg_y);
+                        let host_hash_u512 = pow_core::compat::sha3_512(y_u512);
+                        let host_hash_be = host_hash_u512.to_big_endian();
+                        let host_hash_hex = hex::encode(&host_hash_be[..16]);
+
+                        // Device distance bytes (already written by kernel) and host distance bytes
+                        let dev_dist_hex = hex::encode(&h_dist[..16]);
+                        let host_dist_be = host_distance.to_big_endian();
+                        let host_dist_hex = hex::encode(&host_dist_be[..16]);
+
+                        // Target/threshold prefixes
+                        let target_be = ctx.target.to_big_endian();
+                        let thresh_be = ctx.threshold.to_big_endian();
+                        let target_hex = hex::encode(&target_be[..16]);
+                        let thresh_hex = hex::encode(&thresh_be[..16]);
+
+                        // Device decided "found" (dev_ok=true) but host rejected (host_ok=false)
                         log::warn!(
                             target: "miner",
-                            "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}, y[0..16]={}, h[0..16]={}",
+                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, target[0..16]={}, thresh[0..16]={}",
                             y_hex,
-                            h_hex
+                            h_hex,
+                            host_hash_hex,
+                            dev_dist_hex,
+                            host_dist_hex,
+                            target_hex,
+                            thresh_hex
                         );
                         #[cfg(feature = "metrics")]
                         {
