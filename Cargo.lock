@@ -472,6 +472,7 @@ dependencies = [
  "anyhow",
  "cust",
  "engine-cpu",
+ "hex",
  "log",
  "metrics",
  "num-bigint",

@@ -538,6 +538,9 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
     int*            __restrict__ found_flag,    // 0 -> not found, 1 -> found
     uint32_t*       __restrict__ out_index,     // linear index (t * iters + j)
     uint8_t*        __restrict__ out_distance_be, // 64 bytes
+    // Debug output buffers (optional; host may pass nullptrs)
+    uint8_t*        __restrict__ out_dbg_y_be,    // 64 bytes (optional)
+    uint8_t*        __restrict__ out_dbg_h_be,    // 64 bytes (optional)
  
     // Threading parameters
     const uint32_t num_threads,
@@ -648,13 +651,25 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
                 if (out_index) {
                     *out_index = tid * iters + j;
                 }
-                // Write distance
+                // Write distance and debug buffers (if provided)
                 if (out_distance_be) {
-uint8_t dist_out[64];
+                    uint8_t dist_out[64];
                     be_u64x8_to_be64_bytes(dist_limb, dist_out);
 #pragma unroll
                     for (int i = 0; i < 64; ++i) {
                         out_distance_be[i] = dist_out[i];
+                    }
+                }
+                if (out_dbg_y_be) {
+#pragma unroll
+                    for (int i = 0; i < 64; ++i) {
+                        out_dbg_y_be[i] = y_be[i];
+                    }
+                }
+                if (out_dbg_h_be) {
+#pragma unroll
+                    for (int i = 0; i < 64; ++i) {
+                        out_dbg_h_be[i] = h_be[i];
                     }
                 }
             }

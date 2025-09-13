@@ -358,6 +358,10 @@ impl CudaEngine {
                     .with_context(|| "alloc/copy d_index")?;
                 let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                     .with_context(|| "alloc d_distance")?;
+                let d_dbg_y = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                    .with_context(|| "alloc d_dbg_y")?;
+                let d_dbg_h = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                    .with_context(|| "alloc d_dbg_h")?;
 
                 // Launch G2 kernel
                 // Attempt to populate __constant__ symbols for per-job constants (G2 fast path).
@@ -475,6 +479,8 @@ impl CudaEngine {
                         d_found.as_device_ptr(),
                         d_index.as_device_ptr(),
                         d_distance.as_device_ptr(),
+                        d_dbg_y.as_device_ptr(),
+                        d_dbg_h.as_device_ptr(),
                         num_threads as u32,
                         iters_per_thread as u32
                     ))
@@ -490,15 +496,7 @@ impl CudaEngine {
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                 {
-                    if let (
-                        Ok(mut c_en),
-                        Ok(mut c_idx),
-                        Ok(mut c_dec),
-                        Ok(mut c_y),
-                        Ok(mut c_h),
-                        Ok(mut c_t),
-                        Ok(mut c_th),
-                    ) = (
+                    if let (Ok(c_en), Ok(c_idx), Ok(c_dec), Ok(c_y), Ok(c_h), Ok(c_t), Ok(c_th)) = (
                         module.get_global::<i32>(CString::new("C_SAMPLER_ENABLE")?.as_c_str()),
                         module.get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
                         module.get_global::<u32>(CString::new("C_SAMPLER_DECISION")?.as_c_str()),
@@ -589,10 +587,24 @@ impl CudaEngine {
                         });
                     } else {
                         // Treat as not found: account coverage and advance like the "not found" path
-                        log::warn!(target: "miner", "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}");
+                        // Copy debug y/h bytes from device and log first 16 bytes (hex) for diagnosis
+                        let mut dbg_y = [0u8; 64];
+                        let mut dbg_h = [0u8; 64];
+                        // Ignore copy errors in logging path; continue accounting regardless
+                        let _ = d_dbg_y.copy_to(&mut dbg_y);
+                        let _ = d_dbg_h.copy_to(&mut dbg_h);
+                        let y_hex = hex::encode(&dbg_y[..16]);
+                        let h_hex = hex::encode(&dbg_h[..16]);
+                        log::warn!(
+                            target: "miner",
+                            "CUDA G2: candidate rejected by host re-verification (false positive): idx={k}, y[0..16]={}, h[0..16]={}",
+                            y_hex,
+                            h_hex
+                        );
                         #[cfg(feature = "metrics")]
                         {
                             metrics::inc_candidates_false_positive("gpu-cuda");
+                            metrics::inc_sample_mismatch("gpu-cuda");
                         }
                         hash_count = hash_count.saturating_add(covered);
                         if covered < total_elems_u64 {
