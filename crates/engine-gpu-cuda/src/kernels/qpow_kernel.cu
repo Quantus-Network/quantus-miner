@@ -449,11 +449,11 @@ __device__ __forceinline__ void sha3_512_64bytes(const uint8_t in_be64[64], uint
     // Permute
     keccak_f1600(s);
  
-    // Squeeze 64 bytes (8 lanes) into big-endian digest bytes (match host SHA3 output)
-    #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        store64_be(&out_be64[i * 8], s[i]);
-    }
+    // Squeeze 64 bytes (8 lanes) into little-endian lane bytes (matches host sha3 crate output)
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            store64_le(&out_be64[i * 8], s[i]);
+        }
 }
  
 // Convert 8 LE limbs into 64 BE bytes (big-endian numeric representation)
@@ -625,16 +625,44 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
         uint8_t h_be[64];
         sha3_512_64bytes(y_be, h_be);
 
-        // distance = target XOR H (limb-wise, big-endian)
-        uint64_t h_limb[8], dist_limb[8];
-        be64_bytes_to_u64_8(h_be, h_limb);
+        // Prepare target/threshold as big-endian bytes and compute distance byte-wise: dist = target XOR H
+        uint8_t target_be_bytes[64], thresh_be_bytes[64], dist_be[64];
+        if (C_CONSTS_READY) {
         #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            dist_limb[i] = target_loc[i] ^ h_limb[i];
+            for (int i = 0; i < 8; ++i) {
+                uint64_t tl = target_loc[i];
+                uint64_t th = thresh_loc[i];
+                target_be_bytes[i * 8 + 0] = (uint8_t)(tl >> 56);
+                target_be_bytes[i * 8 + 1] = (uint8_t)(tl >> 48);
+                target_be_bytes[i * 8 + 2] = (uint8_t)(tl >> 40);
+                target_be_bytes[i * 8 + 3] = (uint8_t)(tl >> 32);
+                target_be_bytes[i * 8 + 4] = (uint8_t)(tl >> 24);
+                target_be_bytes[i * 8 + 5] = (uint8_t)(tl >> 16);
+                target_be_bytes[i * 8 + 6] = (uint8_t)(tl >> 8);
+                target_be_bytes[i * 8 + 7] = (uint8_t)(tl);
+                thresh_be_bytes[i * 8 + 0] = (uint8_t)(th >> 56);
+                thresh_be_bytes[i * 8 + 1] = (uint8_t)(th >> 48);
+                thresh_be_bytes[i * 8 + 2] = (uint8_t)(th >> 40);
+                thresh_be_bytes[i * 8 + 3] = (uint8_t)(th >> 32);
+                thresh_be_bytes[i * 8 + 4] = (uint8_t)(th >> 24);
+                thresh_be_bytes[i * 8 + 5] = (uint8_t)(th >> 16);
+                thresh_be_bytes[i * 8 + 6] = (uint8_t)(th >> 8);
+                thresh_be_bytes[i * 8 + 7] = (uint8_t)(th);
+            }
+        } else {
+        #pragma unroll
+            for (int i = 0; i < 64; ++i) {
+                target_be_bytes[i] = target_be[i];
+                thresh_be_bytes[i] = threshold_be[i];
+            }
+        }
+        #pragma unroll
+        for (int i = 0; i < 64; ++i) {
+            dist_be[i] = target_be_bytes[i] ^ h_be[i];
         }
 
         // Compare distance <= threshold (limb-wise, big-endian) and optionally record a sampler
-                bool decision = be_u64x8_leq(dist_limb, thresh_loc);
+                bool decision = be64_leq(dist_be, thresh_be_bytes);
                 if (C_SAMPLER_ENABLE && tid == 0 && j == 0) {
         #pragma unroll
                     for (int i = 0; i < 64; ++i) {
@@ -653,11 +681,9 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
                 }
                 // Write distance and debug buffers (if provided)
                 if (out_distance_be) {
-                    uint8_t dist_out[64];
-                    be_u64x8_to_be64_bytes(dist_limb, dist_out);
 #pragma unroll
                     for (int i = 0; i < 64; ++i) {
-                        out_distance_be[i] = dist_out[i];
+                        out_distance_be[i] = dist_be[i];
                     }
                 }
                 if (out_dbg_y_be) {
