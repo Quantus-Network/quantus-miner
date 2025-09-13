@@ -12,11 +12,17 @@ ARG CUDA_TAG
 ENV CUDA_TAG=${CUDA_TAG}
 
 # System dependencies for building Rust/CUDA projects
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      curl ca-certificates pkg-config build-essential \
-      libssl-dev git clang cmake && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        pkg-config \
+        build-essential \
+        libssl-dev \
+        git \
+        clang \
+        cmake \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Rust (stable, minimal profile)
 ENV RUSTUP_HOME=/opt/rustup \
