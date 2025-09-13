@@ -240,8 +240,8 @@ extern "C" __global__ void qpow_montgomery_g1_kernel(
     }
 
     // Transform to Montgomery domain
-        uint64_t yhat[8];
-        to_mont_512(y0_loc, r2_loc, n_loc, n0_inv, yhat);
+    uint64_t yhat[8];
+    to_mont_512(y0_loc, r2_loc, n_loc, n0_inv, yhat);
 
     // Iterate and emit normalized y per step
     // Output stride per thread: iters_per_thread * 8 limbs
@@ -291,32 +291,33 @@ extern "C" __global__ void qpow_montgomery_g1_kernel(
 // Note: For G1, the host will compute SHA3-512(y) and distances on the CPU,
 // validating correctness against cpu-fast/cpu-montgomery on small ranges.
 //
- 
+
 // -------------------------------------------------------------------------------------------------
 // G2 additions: device SHA3-512, threshold compare, and early-exit
 // -------------------------------------------------------------------------------------------------
- 
-// 64-bit rotate-left
+
+// 64-bit rotate-left with defined behavior for all n
 __device__ __forceinline__ uint64_t rotl64(uint64_t x, unsigned int n) {
-    n &= 63u;
-    return (x << n) | (x >> ((64u - n) & 63u));
+n &= 63u;
+return (x << n) | (x >> ((64u - n) & 63u));
 }
- 
+
 // Keccak-f[1600] round constants
 __device__ __constant__ uint64_t KECCAK_RC[24] = {
-    0x0000000000000001ULL, 0x0000000000008082ULL,
-    0x800000000000808aULL, 0x8000000080008000ULL,
-    0x000000000000808bULL, 0x0000000080000001ULL,
-    0x8000000080008081ULL, 0x8000000000008009ULL,
-    0x000000000000008aULL, 0x0000000000000088ULL,
-    0x0000000080008009ULL, 0x000000008000000aULL,
-    0x000000008000808bULL, 0x800000000000008bULL,
-    0x8000000000008089ULL, 0x8000000000008003ULL,
-    0x8000000000008002ULL, 0x8000000000000080ULL,
-    0x000000000000800aULL, 0x800000008000000aULL,
-    0x8000000080008081ULL, 0x8000000000008080ULL,
-    0x0000000080000001ULL, 0x8000000080008008ULL
+0x0000000000000001ULL, 0x0000000000008082ULL,
+0x800000000000808aULL, 0x8000000080008000ULL,
+0x000000000000808bULL, 0x0000000080000001ULL,
+0x8000000080008081ULL, 0x8000000000008009ULL,
+0x000000000000008aULL, 0x0000000000000088ULL,
+0x0000000080008009ULL, 0x000000008000000aULL,
+0x000000008000808bULL, 0x800000000000008bULL,
+0x8000000000008089ULL, 0x8000000000008003ULL,
+0x8000000000008002ULL, 0x8000000000000080ULL,
+0x000000000000800aULL, 0x800000008000000aULL,
+0x8000000080008081ULL, 0x8000000000008080ULL,
+0x0000000080000001ULL, 0x8000000080008008ULL
 };
+
 // Optional per-job constants in constant memory (host may set; kernel remains compatible)
 // If C_CONSTS_READY == 1, G2 kernel will prefer these over parameter pointers.
 __device__ __constant__ uint64_t C_N[8];
@@ -335,420 +336,366 @@ __device__ uint8_t               C_SAMPLER_TARGET_BE[64];
 __device__ uint8_t               C_SAMPLER_THRESH_BE[64];
 __device__ uint32_t              C_SAMPLER_INDEX;
 __device__ uint32_t              C_SAMPLER_DECISION;
-/* removed duplicate C_TARGET/C_THRESH definitions */
- 
-// Load/store helpers (little-endian)
+
+// Load/store helpers (little- and big-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
-    return ((uint64_t)p[0])       |
-           ((uint64_t)p[1] << 8)  |
-           ((uint64_t)p[2] << 16) |
-           ((uint64_t)p[3] << 24) |
-           ((uint64_t)p[4] << 32) |
-           ((uint64_t)p[5] << 40) |
-           ((uint64_t)p[6] << 48) |
-           ((uint64_t)p[7] << 56);
+return ((uint64_t)p[0])       |
+       ((uint64_t)p[1] << 8)  |
+       ((uint64_t)p[2] << 16) |
+       ((uint64_t)p[3] << 24) |
+       ((uint64_t)p[4] << 32) |
+       ((uint64_t)p[5] << 40) |
+       ((uint64_t)p[6] << 48) |
+       ((uint64_t)p[7] << 56);
 }
 __device__ __forceinline__ void store64_le(uint8_t* p, uint64_t v) {
-    p[0] = (uint8_t)(v);
-    p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16);
-    p[3] = (uint8_t)(v >> 24);
-    p[4] = (uint8_t)(v >> 32);
-    p[5] = (uint8_t)(v >> 40);
-    p[6] = (uint8_t)(v >> 48);
-    p[7] = (uint8_t)(v >> 56);
+p[0] = (uint8_t)(v);
+p[1] = (uint8_t)(v >> 8);
+p[2] = (uint8_t)(v >> 16);
+p[3] = (uint8_t)(v >> 24);
+p[4] = (uint8_t)(v >> 32);
+p[5] = (uint8_t)(v >> 40);
+p[6] = (uint8_t)(v >> 48);
+p[7] = (uint8_t)(v >> 56);
 }
 __device__ __forceinline__ void store64_be(uint8_t* p, uint64_t v) {
-    p[0] = (uint8_t)(v >> 56);
-    p[1] = (uint8_t)(v >> 48);
-    p[2] = (uint8_t)(v >> 40);
-    p[3] = (uint8_t)(v >> 32);
-    p[4] = (uint8_t)(v >> 24);
-    p[5] = (uint8_t)(v >> 16);
-    p[6] = (uint8_t)(v >> 8);
-    p[7] = (uint8_t)(v);
+p[0] = (uint8_t)(v >> 56);
+p[1] = (uint8_t)(v >> 48);
+p[2] = (uint8_t)(v >> 40);
+p[3] = (uint8_t)(v >> 32);
+p[4] = (uint8_t)(v >> 24);
+p[5] = (uint8_t)(v >> 16);
+p[6] = (uint8_t)(v >> 8);
+p[7] = (uint8_t)(v);
 }
- 
-// Keccak-f[1600] permutation
-__device__ __forceinline__ void keccak_f1600(uint64_t s[25]) {
-#pragma unroll
-    for (int round = 0; round < 24; ++round) {
-        // ---- Theta ---------------------------------------------------------
-        uint64_t Aba=s[0],  Aga=s[5],  Aka=s[10],  Ama=s[15],  Asa=s[20];
-        uint64_t Abe=s[1],  Age=s[6],  Ake=s[11],  Ame=s[16],  Ase=s[21];
-        uint64_t Abi=s[2],  Agi=s[7],  Aki=s[12],  Ami=s[17],  Asi=s[22];
-        uint64_t Abo=s[3],  Ago=s[8],  Ako=s[13],  Amo=s[18],  Aso=s[23];
-        uint64_t Abu=s[4],  Agu=s[9],  Aku=s[14],  Amu=s[19],  Asu=s[24];
 
-        uint64_t Ca = Aba ^ Aga ^ Aka ^ Ama ^ Asa;
-        uint64_t Ce = Abe ^ Age ^ Ake ^ Ame ^ Ase;
-        uint64_t Ci = Abi ^ Agi ^ Aki ^ Ami ^ Asi;
-        uint64_t Co = Abo ^ Ago ^ Ako ^ Amo ^ Aso;
-        uint64_t Cu = Abu ^ Agu ^ Aku ^ Amu ^ Asu;
-
-        uint64_t Da = rotl64(Ce, 1) ^ Cu;
-        uint64_t De = rotl64(Ci, 1) ^ Ca;
-        uint64_t Di = rotl64(Co, 1) ^ Ce;
-        uint64_t Do = rotl64(Cu, 1) ^ Ci;
-        uint64_t Du = rotl64(Ca, 1) ^ Co;
-
-        Aba ^= Da; Abe ^= De; Abi ^= Di; Abo ^= Do; Abu ^= Du;
-        Aga ^= Da; Age ^= De; Agi ^= Di; Ago ^= Do; Agu ^= Du;
-        Aka ^= Da; Ake ^= De; Aki ^= Di; Ako ^= Do; Aku ^= Du;
-        Ama ^= Da; Ame ^= De; Ami ^= Di; Amo ^= Do; Amu ^= Du;
-        Asa ^= Da; Ase ^= De; Asi ^= Di; Aso ^= Do; Asu ^= Du;
-
-        // ---- Rho + Pi (explicit unrolled mapping) -------------------------
-        uint64_t Bba = Aba;
-        uint64_t Bbe = rotl64(Age, 44);
-        uint64_t Bbi = rotl64(Aki, 43);
-        uint64_t Bbo = rotl64(Amo, 21);
-        uint64_t Bbu = rotl64(Asu, 14);
-
-        uint64_t Bga = rotl64(Abo, 28);
-        uint64_t Bge = rotl64(Agu, 20);
-        uint64_t Bgi = rotl64(Aka, 3);
-        uint64_t Bgo = rotl64(Ame, 45);
-        uint64_t Bgu = rotl64(Asi, 61);
-
-        uint64_t Bka = rotl64(Abe, 1);
-        uint64_t Bke = rotl64(Agi, 6);
-        uint64_t Bki = rotl64(Ako, 25);
-        uint64_t Bko = rotl64(Amu, 8);
-        uint64_t Bku = rotl64(Asa, 18);
-
-        uint64_t Bma = rotl64(Abu, 27);
-        uint64_t Bme = rotl64(Aga, 36);
-        uint64_t Bmi = rotl64(Ake, 10);
-        uint64_t Bmo = rotl64(Ami, 15);
-        uint64_t Bmu = rotl64(Aso, 56);
-
-        uint64_t Bsa = rotl64(Abi, 62);
-        uint64_t Bse = rotl64(Ago, 55);
-        uint64_t Bsi = rotl64(Aku, 39);
-        uint64_t Bso = rotl64(Ama, 41);
-        uint64_t Bsu = rotl64(Ase, 2);
-
-        // ---- Chi -----------------------------------------------------------
-        Aba = Bba ^ ((~Bbe) & Bbi);
-        Abe = Bbe ^ ((~Bbi) & Bbo);
-        Abi = Bbi ^ ((~Bbo) & Bbu);
-        Abo = Bbo ^ ((~Bbu) & Bba);
-        Abu = Bbu ^ ((~Bba) & Bbe);
-
-        Aga = Bga ^ ((~Bge) & Bgi);
-        Age = Bge ^ ((~Bgi) & Bgo);
-        Agi = Bgi ^ ((~Bgo) & Bgu);
-        Ago = Bgo ^ ((~Bgu) & Bga);
-        Agu = Bgu ^ ((~Bga) & Bge);
-
-        Aka = Bka ^ ((~Bke) & Bki);
-        Ake = Bke ^ ((~Bki) & Bko);
-        Aki = Bki ^ ((~Bko) & Bku);
-        Ako = Bko ^ ((~Bku) & Bka);
-        Aku = Bku ^ ((~Bka) & Bke);
-
-        Ama = Bma ^ ((~Bme) & Bmi);
-        Ame = Bme ^ ((~Bmi) & Bmo);
-        Ami = Bmi ^ ((~Bmo) & Bmu);
-        Amo = Bmo ^ ((~Bmu) & Bma);
-        Amu = Bmu ^ ((~Bma) & Bme);
-
-        Asa = Bsa ^ ((~Bse) & Bsi);
-        Ase = Bse ^ ((~Bsi) & Bso);
-        Asi = Bsi ^ ((~Bso) & Bsu);
-        Aso = Bso ^ ((~Bsu) & Bsa);
-        Asu = Bsu ^ ((~Bsa) & Bse);
-
-        // ---- Iota ----------------------------------------------------------
-        Aba ^= KECCAK_RC[round];
-
-        // Store back
-        s[0]=Aba;  s[5]=Aga;  s[10]=Aka;  s[15]=Ama;  s[20]=Asa;
-        s[1]=Abe;  s[6]=Age;  s[11]=Ake;  s[16]=Ame;  s[21]=Ase;
-        s[2]=Abi;  s[7]=Agi;  s[12]=Aki;  s[17]=Ami;  s[22]=Asi;
-        s[3]=Abo;  s[8]=Ago;  s[13]=Ako;  s[18]=Amo;  s[23]=Aso;
-        s[4]=Abu;  s[9]=Agu;  s[14]=Aku;  s[19]=Amu;  s[24]=Asu;
-    }
-}
- 
-// Device SHA3-512 for a single 64-byte message
-__device__ __forceinline__ void sha3_512_64bytes(const uint8_t in_be64[64], uint8_t out_be64[64]) {
-    // Initialize state to zero
-    uint64_t s[25];
-#pragma unroll
-    for (int i = 0; i < 25; ++i) s[i] = 0ull;
- 
-    // Absorb (rate = 72 bytes). Message is 64 bytes: append 0x06 then pad with zeros and set last of rate |= 0x80
-    uint8_t block[72];
-#pragma unroll
-    for (int i = 0; i < 72; ++i) block[i] = 0;
-#pragma unroll
-    for (int i = 0; i < 64; ++i) block[i] = in_be64[i];
-    block[64] = 0x06;
-    block[71] ^= 0x80;
- 
-    // XOR into state lanes as little-endian 64-bit words
-#pragma unroll
-    for (int i = 0; i < 9; ++i) {
-        s[i] ^= load64_le(&block[i * 8]);
-    }
- 
-    // Permute
-    keccak_f1600(s);
- 
-    // Squeeze 64 bytes (8 lanes) into little-endian lane bytes (matches host sha3 crate output)
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            store64_le(&out_be64[i * 8], s[i]);
-        }
-}
- 
 // Convert 8 LE limbs into 64 BE bytes (big-endian numeric representation)
 __device__ __forceinline__ void le8_to_be64_bytes(const uint64_t le[8], uint8_t out[64]) {
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        uint64_t limb = le[7 - i]; // most significant limb first
+for (int i = 0; i < 8; ++i) {
+    uint64_t limb = le[7 - i]; // most significant limb first
 #pragma unroll
-        for (int b = 0; b < 8; ++b) {
-            out[i * 8 + (7 - b)] = (uint8_t)((limb >> (b * 8)) & 0xFF);
-        }
+    for (int b = 0; b < 8; ++b) {
+        out[i * 8 + (7 - b)] = (uint8_t)((limb >> (b * 8)) & 0xFF);
     }
 }
- 
+}
+
 // Compare two 64-byte big-endian numbers: return true if a <= b
 __device__ __forceinline__ bool be64_leq(const uint8_t a[64], const uint8_t b[64]) {
 #pragma unroll
-    for (int i = 0; i < 64; ++i) {
-        if (a[i] != b[i]) {
-            return a[i] < b[i];
-        }
-    }
-    return true; // equal
-}
-// Convert 64 big-endian bytes into 8 big-endian 64-bit limbs: out[0] holds the most significant limb.
-__device__ __forceinline__ void be64_bytes_to_u64_8(const uint8_t in[64], uint64_t out[8]) {
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        uint64_t v = 0ull;
-#pragma unroll
-        for (int b = 0; b < 8; ++b) {
-            v = (v << 8) | (uint64_t)in[i * 8 + b];
-        }
-        out[i] = v;
+for (int i = 0; i < 64; ++i) {
+    if (a[i] != b[i]) {
+        return a[i] < b[i];
     }
 }
-// Compare two 8-limb big-endian u64 arrays: return true if a <= b.
-__device__ __forceinline__ bool be_u64x8_leq(const uint64_t a[8], const uint64_t b[8]) {
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        if (a[i] != b[i]) {
-            return a[i] < b[i];
-        }
-    }
-    return true;
+return true; // equal
 }
-__device__ __forceinline__ void be_u64x8_to_be64_bytes(const uint64_t in[8], uint8_t out[64]) {
+
+// Keccak-f[1600] permutation (unrolled mapping)
+__device__ __forceinline__ void keccak_f1600(uint64_t s[25]) {
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        uint64_t limb = in[i];
-        out[i * 8 + 0] = (uint8_t)(limb >> 56);
-        out[i * 8 + 1] = (uint8_t)(limb >> 48);
-        out[i * 8 + 2] = (uint8_t)(limb >> 40);
-        out[i * 8 + 3] = (uint8_t)(limb >> 32);
-        out[i * 8 + 4] = (uint8_t)(limb >> 24);
-        out[i * 8 + 5] = (uint8_t)(limb >> 16);
-        out[i * 8 + 6] = (uint8_t)(limb >> 8);
-        out[i * 8 + 7] = (uint8_t)(limb);
-    }
+for (int round = 0; round < 24; ++round) {
+    // ---- Theta ---------------------------------------------------------
+    uint64_t Aba=s[0],  Aga=s[5],  Aka=s[10],  Ama=s[15],  Asa=s[20];
+    uint64_t Abe=s[1],  Age=s[6],  Ake=s[11],  Ame=s[16],  Ase=s[21];
+    uint64_t Abi=s[2],  Agi=s[7],  Aki=s[12],  Ami=s[17],  Asi=s[22];
+    uint64_t Abo=s[3],  Ago=s[8],  Ako=s[13],  Amo=s[18],  Aso=s[23];
+    uint64_t Abu=s[4],  Agu=s[9],  Aku=s[14],  Amu=s[19],  Asu=s[24];
+
+    uint64_t Ca = Aba ^ Aga ^ Aka ^ Ama ^ Asa;
+    uint64_t Ce = Abe ^ Age ^ Ake ^ Ame ^ Ase;
+    uint64_t Ci = Abi ^ Agi ^ Aki ^ Ami ^ Asi;
+    uint64_t Co = Abo ^ Ago ^ Ako ^ Amo ^ Aso;
+    uint64_t Cu = Abu ^ Agu ^ Aku ^ Amu ^ Asu;
+
+    uint64_t Da = rotl64(Ce, 1) ^ Cu;
+    uint64_t De = rotl64(Ci, 1) ^ Ca;
+    uint64_t Di = rotl64(Co, 1) ^ Ce;
+    uint64_t Do = rotl64(Cu, 1) ^ Ci;
+    uint64_t Du = rotl64(Ca, 1) ^ Co;
+
+    Aba ^= Da; Abe ^= De; Abi ^= Di; Abo ^= Do; Abu ^= Du;
+    Aga ^= Da; Age ^= De; Agi ^= Di; Ago ^= Do; Agu ^= Du;
+    Aka ^= Da; Ake ^= De; Aki ^= Di; Ako ^= Do; Aku ^= Du;
+    Ama ^= Da; Ame ^= De; Ami ^= Di; Amo ^= Do; Amu ^= Du;
+    Asa ^= Da; Ase ^= De; Asi ^= Di; Aso ^= Do; Asu ^= Du;
+
+    // ---- Rho + Pi ------------------------------------------------------
+    uint64_t Bba = Aba;
+    uint64_t Bbe = rotl64(Age, 44);
+    uint64_t Bbi = rotl64(Aki, 43);
+    uint64_t Bbo = rotl64(Amo, 21);
+    uint64_t Bbu = rotl64(Asu, 14);
+
+    uint64_t Bga = rotl64(Abo, 28);
+    uint64_t Bge = rotl64(Agu, 20);
+    uint64_t Bgi = rotl64(Aka, 3);
+    uint64_t Bgo = rotl64(Ame, 45);
+    uint64_t Bgu = rotl64(Asi, 61);
+
+    uint64_t Bka = rotl64(Abe, 1);
+    uint64_t Bke = rotl64(Agi, 6);
+    uint64_t Bki = rotl64(Ako, 25);
+    uint64_t Bko = rotl64(Amu, 8);
+    uint64_t Bku = rotl64(Asa, 18);
+
+    uint64_t Bma = rotl64(Abu, 27);
+    uint64_t Bme = rotl64(Aga, 36);
+    uint64_t Bmi = rotl64(Ake, 10);
+    uint64_t Bmo = rotl64(Ami, 15);
+    uint64_t Bmu = rotl64(Aso, 56);
+
+    uint64_t Bsa = rotl64(Abi, 62);
+    uint64_t Bse = rotl64(Ago, 55);
+    uint64_t Bsi = rotl64(Aku, 39);
+    uint64_t Bso = rotl64(Ama, 41);
+    uint64_t Bsu = rotl64(Ase, 2);
+
+    // ---- Chi -----------------------------------------------------------
+    Aba = Bba ^ ((~Bbe) & Bbi);
+    Abe = Bbe ^ ((~Bbi) & Bbo);
+    Abi = Bbi ^ ((~Bbo) & Bbu);
+    Abo = Bbo ^ ((~Bbu) & Bba);
+    Abu = Bbu ^ ((~Bba) & Bbe);
+
+    Aga = Bga ^ ((~Bge) & Bgi);
+    Age = Bge ^ ((~Bgi) & Bgo);
+    Agi = Bgi ^ ((~Bgo) & Bgu);
+    Ago = Bgo ^ ((~Bgu) & Bga);
+    Agu = Bgu ^ ((~Bga) & Bge);
+
+    Aka = Bka ^ ((~Bke) & Bki);
+    Ake = Bke ^ ((~Bki) & Bko);
+    Aki = Bki ^ ((~Bko) & Bku);
+    Ako = Bko ^ ((~Bku) & Bka);
+    Aku = Bku ^ ((~Bka) & Bke);
+
+    Ama = Bma ^ ((~Bme) & Bmi);
+    Ame = Bme ^ ((~Bmi) & Bmo);
+    Ami = Bmi ^ ((~Bmo) & Bmu);
+    Amo = Bmo ^ ((~Bmu) & Bma);
+    Amu = Bmu ^ ((~Bma) & Bme);
+
+    Asa = Bsa ^ ((~Bse) & Bsi);
+    Ase = Bse ^ ((~Bsi) & Bso);
+    Asi = Bsi ^ ((~Bso) & Bsu);
+    Aso = Bso ^ ((~Bsu) & Bsa);
+    Asu = Bsu ^ ((~Bsa) & Bse);
+
+    // ---- Iota ----------------------------------------------------------
+    Aba ^= KECCAK_RC[round];
+
+    // Store back
+    s[0]=Aba;  s[5]=Aga;  s[10]=Aka;  s[15]=Ama;  s[20]=Asa;
+    s[1]=Abe;  s[6]=Age;  s[11]=Ake;  s[16]=Ame;  s[21]=Ase;
+    s[2]=Abi;  s[7]=Agi;  s[12]=Aki;  s[17]=Ami;  s[22]=Asi;
+    s[3]=Abo;  s[8]=Ago;  s[13]=Ako;  s[18]=Amo;  s[23]=Aso;
+    s[4]=Abu;  s[9]=Agu;  s[14]=Aku;  s[19]=Amu;  s[24]=Asu;
 }
- 
- // Kernel: G2 — device SHA3-512 + threshold compare + early-exit
-//
-// Notes:
-// - Signature includes additional G2 parameters; host launcher must be updated to pass them.
-// - Early-exit: a single global int flag claimed via atomicCAS; earliest winning thread writes result.
-//
+}
+
+// Device SHA3-512 for a single 64-byte message; writes lane-LE bytes to out_le64
+__device__ __forceinline__ void sha3_512_64bytes_le(const uint8_t in_be64[64], uint8_t out_le64[64]) {
+// Initialize state to zero
+uint64_t s[25];
+#pragma unroll
+for (int i = 0; i < 25; ++i) s[i] = 0ull;
+
+// Absorb (rate = 72 bytes). Message is 64 bytes: append 0x06 then pad with zeros and set last of rate |= 0x80
+uint8_t block[72];
+#pragma unroll
+for (int i = 0; i < 72; ++i) block[i] = 0;
+#pragma unroll
+for (int i = 0; i < 64; ++i) block[i] = in_be64[i];
+block[64] = 0x06;
+block[71] ^= 0x80;
+
+// XOR into state lanes as little-endian 64-bit words
+#pragma unroll
+for (int i = 0; i < 9; ++i) {
+    s[i] ^= load64_le(&block[i * 8]);
+}
+
+// Permute
+keccak_f1600(s);
+
+// Squeeze 64 bytes (8 lanes) into little-endian lane bytes
+#pragma unroll
+for (int i = 0; i < 8; ++i) {
+    store64_le(&out_le64[i * 8], s[i]);
+}
+}
+
+// Kernel: G2 — device SHA3-512 + threshold compare + early-exit
 extern "C" __global__ void qpow_montgomery_g2_kernel(
-    // Per-job constants (each 8 limbs, LE)
-    const uint64_t* __restrict__ m,
-    const uint64_t* __restrict__ n,
-    const uint64_t  n0_inv,
-    const uint64_t* __restrict__ r2,
-    const uint64_t* __restrict__ m_hat,
- 
-    // Per-thread starting state (normal domain)
-    const uint64_t* __restrict__ y0,            // length: num_threads * 8 limbs
- 
-    // G2-specific inputs/outputs
-    const uint8_t*  __restrict__ target_be,     // 64 bytes
-    const uint8_t*  __restrict__ threshold_be,  // 64 bytes
-    int*            __restrict__ found_flag,    // 0 -> not found, 1 -> found
-    uint32_t*       __restrict__ out_index,     // linear index (t * iters + j)
-    uint8_t*        __restrict__ out_distance_be, // 64 bytes
-    // Debug output buffers (optional; host may pass nullptrs)
-    uint8_t*        __restrict__ out_dbg_y_be,    // 64 bytes (optional)
-    uint8_t*        __restrict__ out_dbg_h_be,    // 64 bytes (optional)
- 
-    // Threading parameters
-    const uint32_t num_threads,
-    const uint32_t iters_per_thread
+// Per-job constants (each 8 limbs, LE)
+const uint64_t* __restrict__ m,
+const uint64_t* __restrict__ n,
+const uint64_t  n0_inv,
+const uint64_t* __restrict__ r2,
+const uint64_t* __restrict__ m_hat,
+
+// Per-thread starting state (normal domain)
+const uint64_t* __restrict__ y0,            // length: num_threads * 8 limbs
+
+// G2-specific inputs/outputs
+const uint8_t*  __restrict__ target_be,     // 64 bytes
+const uint8_t*  __restrict__ threshold_be,  // 64 bytes
+int*            __restrict__ found_flag,    // 0 -> not found, 1 -> found
+uint32_t*       __restrict__ out_index,     // linear index (t * iters + j)
+uint8_t*        __restrict__ out_distance_be, // 64 bytes
+// Debug output buffers (optional; host may pass nullptrs)
+uint8_t*        __restrict__ out_dbg_y_be,    // 64 bytes (optional)
+uint8_t*        __restrict__ out_dbg_h_be,    // 64 bytes (optional)
+
+// Threading parameters
+const uint32_t num_threads,
+const uint32_t iters_per_thread
 ) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_threads) {
-        return;
+const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+if (tid >= num_threads) {
+    return;
+}
+
+// Quick early-exit check
+if (atomicAdd(found_flag, 0) != 0) {
+    return;
+}
+
+// Local copies of constants (prefer __constant__ if available)
+uint64_t n_loc[8], r2_loc[8], mhat_loc[8];
+if (C_CONSTS_READY) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        n_loc[i]    = C_N[i];
+        r2_loc[i]   = C_R2[i];
+        mhat_loc[i] = C_MHAT[i];
     }
- 
-    // Quick early-exit check
+} else {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        n_loc[i]    = n[i];
+        r2_loc[i]   = r2[i];
+        mhat_loc[i] = m_hat[i];
+    }
+}
+
+// Load this thread's y0 (normal domain) and move to Montgomery domain
+uint64_t y0_loc[8];
+#pragma unroll
+for (int i = 0; i < 8; ++i) {
+    y0_loc[i] = y0[tid * 8u + i];
+}
+const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
+uint64_t yhat[8];
+to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
+
+// Prepare target/threshold big-endian bytes
+uint8_t target_be_bytes[64], thresh_be_bytes[64];
+if (C_CONSTS_READY) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        store64_be(&target_be_bytes[i * 8], C_TARGET[i]);
+        store64_be(&thresh_be_bytes[i * 8], C_THRESH[i]);
+    }
+} else {
+#pragma unroll
+    for (int i = 0; i < 64; ++i) {
+        target_be_bytes[i] = target_be[i];
+        thresh_be_bytes[i] = threshold_be[i];
+    }
+}
+
+// Iterate and check threshold
+const uint32_t iters = iters_per_thread;
+for (uint32_t j = 0; j < iters; ++j) {
+    // Respect early-exit
     if (atomicAdd(found_flag, 0) != 0) {
         return;
     }
- 
-    // Local copies of constants (prefer __constant__ if available)
-        uint64_t n_loc[8], r2_loc[8], mhat_loc[8];
-        if (C_CONSTS_READY) {
-    #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                n_loc[i]    = C_N[i];
-                r2_loc[i]   = C_R2[i];
-                mhat_loc[i] = C_MHAT[i];
-            }
-        } else {
-    #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                n_loc[i]    = n[i];
-                r2_loc[i]   = r2[i];
-                mhat_loc[i] = m_hat[i];
-            }
-        }
- 
-    // Load this thread's y0 (normal domain) and move to Montgomery domain
-    uint64_t y0_loc[8];
-    #pragma unroll
+
+    // y_hat = y_hat * m_hat
+    uint64_t yhat_next[8];
+    mont_mul_512(yhat, mhat_loc, n_loc, n0i, yhat_next);
+#pragma unroll
     for (int i = 0; i < 8; ++i) {
-        y0_loc[i] = y0[tid * 8u + i];
+        yhat[i] = yhat_next[i];
     }
-    const uint64_t n0i = C_CONSTS_READY ? C_N0_INV : n0_inv;
-    uint64_t yhat[8];
-    to_mont_512(y0_loc, r2_loc, n_loc, n0i, yhat);
 
-    // Prepare target/threshold limbs (prefer __constant__ if available)
-    uint64_t target_loc[8], thresh_loc[8];
-    if (C_CONSTS_READY) {
-    #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            target_loc[i] = C_TARGET[i];
-            thresh_loc[i] = C_THRESH[i];
-        }
-    } else {
-        be64_bytes_to_u64_8(target_be, target_loc);
-        be64_bytes_to_u64_8(threshold_be, thresh_loc);
-    }
- 
-    // Iterate and check threshold
-    const uint32_t iters = iters_per_thread;
-    for (uint32_t j = 0; j < iters; ++j) {
-        // Respect early-exit
-        if (atomicAdd(found_flag, 0) != 0) {
-            return;
-        }
- 
-        // y_hat = y_hat * m_hat
-        uint64_t yhat_next[8];
-        mont_mul_512(yhat, mhat_loc, n_loc, n0i, yhat_next);
+    // y = from_mont(y_hat)
+    uint64_t y_norm[8];
+    from_mont_512(yhat, n_loc, n0i, y_norm);
+
+    // y_be64 (64 bytes) from LE limbs
+    uint8_t y_be[64];
+    le8_to_be64_bytes(y_norm, y_be);
+
+    // H = SHA3-512(y_be) -> produce lane-LE bytes
+    uint8_t h_le[64];
+    sha3_512_64bytes_le(y_be, h_le);
+
+    // Convert digest to big-endian numeric bytes
+    uint8_t digest_be[64];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            yhat[i] = yhat_next[i];
-        }
- 
-        // y = from_mont(y_hat)
-        uint64_t y_norm[8];
-        from_mont_512(yhat, n_loc, n0i, y_norm);
- 
-        // y_be64 (64 bytes) from LE limbs
-        uint8_t y_be[64];
-        le8_to_be64_bytes(y_norm, y_be);
- 
-        // H = SHA3-512(y_be)
-        uint8_t h_be[64];
-        sha3_512_64bytes(y_be, h_be);
+    for (int i = 0; i < 8; ++i) {
+        uint64_t w = load64_le(&h_le[i * 8]);
+        store64_be(&digest_be[(7 - i) * 8], w);
+    }
 
-        // Convert device digest to big-endian numeric bytes for distance compare; also keep raw device bytes for debug
-        uint8_t digest_be[64];
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            uint64_t w = load64_le(&h_be[i * 8]);
-            store64_be(&digest_be[(7 - i) * 8], w);
-        }
+    // distance = target_be XOR digest_be (bytewise, big-endian order)
+    uint8_t dist_be[64];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) {
+        dist_be[i] = target_be_bytes[i] ^ digest_be[i];
+    }
 
-        // Build big-endian target/threshold bytes
-        uint8_t target_be_bytes[64], thresh_be_bytes[64];
-        if (C_CONSTS_READY) {
-        #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                uint64_t tl = C_TARGET[i];
-                uint64_t th = C_THRESH[i];
-                store64_be(&target_be_bytes[i * 8], tl);
-                store64_be(&thresh_be_bytes[i * 8], th);
-            }
-        } else {
-        #pragma unroll
-            for (int i = 0; i < 64; ++i) {
-                target_be_bytes[i] = target_be[i];
-                thresh_be_bytes[i] = threshold_be[i];
-            }
-        }
+    // Compare distance <= threshold (lexicographic on big-endian bytes)
+    bool decision = be64_leq(dist_be, thresh_be_bytes);
 
-        // distance = target_be XOR digest_be (bytewise, big-endian order)
-        uint8_t dist_be[64];
-        #pragma unroll
+    // Optional sampler (first thread/iter): capture y/H/target/thresh for parity
+    if (C_SAMPLER_ENABLE && tid == 0 && j == 0) {
+#pragma unroll
         for (int i = 0; i < 64; ++i) {
-            dist_be[i] = target_be_bytes[i] ^ digest_be[i];
+            C_SAMPLER_Y_BE[i]       = y_be[i];
+            C_SAMPLER_H_BE[i]       = digest_be[i];
+            C_SAMPLER_TARGET_BE[i]  = target_be_bytes[i];
+            C_SAMPLER_THRESH_BE[i]  = thresh_be_bytes[i];
         }
+        C_SAMPLER_INDEX = tid * iters + j;
+        C_SAMPLER_DECISION = decision ? 1u : 0u;
+    }
 
-        // Compare distance <= threshold (lexicographic on big-endian bytes)
-        bool decision = be64_leq(dist_be, thresh_be_bytes);
-
-        // Optional sampler: copy y as BE numeric; emit raw device SHA3 bytes to sampler for debugging
-        if (C_SAMPLER_ENABLE && tid == 0 && j == 0) {
-        #pragma unroll
-            for (int i = 0; i < 64; ++i) {
-                C_SAMPLER_Y_BE[i] = y_be[i];
-                C_SAMPLER_H_BE[i] = digest_be[i]; // device SHA3 bytes as big-endian numeric
+    if (decision) {
+        // Try to claim the flag
+        if (atomicCAS(found_flag, 0, 1) == 0) {
+            // Write linear index for host to reconstruct nonce
+            if (out_index) {
+                *out_index = tid * iters + j;
             }
-            C_SAMPLER_INDEX = tid * iters + j;
-            C_SAMPLER_DECISION = decision ? 1u : 0u;
-        }
-                if (decision) {
-            // Try to claim the flag
-            if (atomicCAS(found_flag, 0, 1) == 0) {
-                // Write linear index for host to reconstruct nonce
-                if (out_index) {
-                    *out_index = tid * iters + j;
-                }
-                // Write distance and debug buffers (if provided)
-                if (out_distance_be) {
+            // Write distance and debug buffers (if provided)
+            if (out_distance_be) {
 #pragma unroll
-                    for (int i = 0; i < 64; ++i) {
-                        out_distance_be[i] = dist_be[i];
-                    }
-                }
-                if (out_dbg_y_be) {
-#pragma unroll
-                    for (int i = 0; i < 64; ++i) {
-                        out_dbg_y_be[i] = y_be[i];
-                    }
-                }
-                if (out_dbg_h_be) {
-#pragma unroll
-                    for (int i = 0; i < 64; ++i) {
-                        out_dbg_h_be[i] = digest_be[i]; // device SHA3 bytes as big-endian numeric
-                    }
+                for (int i = 0; i < 64; ++i) {
+                    out_distance_be[i] = dist_be[i];
                 }
             }
-            return; // early-exit after claiming
+            if (out_dbg_y_be) {
+#pragma unroll
+                for (int i = 0; i < 64; ++i) {
+                    out_dbg_y_be[i] = y_be[i];
+                }
+            }
+            if (out_dbg_h_be) {
+#pragma unroll
+                for (int i = 0; i < 64; ++i) {
+                    out_dbg_h_be[i] = digest_be[i];
+                }
+            }
         }
+        return; // early-exit after claiming (or if already claimed)
     }
 }
- 
+}
+
 } // extern "C"
