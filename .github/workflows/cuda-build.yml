@@ -49,9 +49,6 @@ jobs:
                   restore-keys: |
                       ${{ runner.os }}-buildx-${{ matrix.cuda_tag }}-sm${{ matrix.sm }}-
 
-            - name: Use repo Containerfile (no inline Dockerfile)
-              run: echo "Building with Containerfile at repo root"
-
             - name: Build miner image and export dist filesystem
               env:
                   CUDA_TAG: ${{ matrix.cuda_tag }}

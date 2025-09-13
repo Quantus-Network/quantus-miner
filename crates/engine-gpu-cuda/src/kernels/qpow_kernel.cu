@@ -630,8 +630,18 @@ extern "C" __global__ void qpow_montgomery_g2_kernel(
             dist_limb[i] = target_loc[i] ^ h_limb[i];
         }
 
-        // Compare distance <= threshold (limb-wise, big-endian)
-        if (be_u64x8_leq(dist_limb, thresh_loc)) {
+        // Compare distance <= threshold (limb-wise, big-endian) and optionally record a sampler
+                bool decision = be_u64x8_leq(dist_limb, thresh_loc);
+                if (C_SAMPLER_ENABLE && tid == 0 && j == 0) {
+        #pragma unroll
+                    for (int i = 0; i < 64; ++i) {
+                        C_SAMPLER_Y_BE[i] = y_be[i];
+                        C_SAMPLER_H_BE[i] = h_be[i];
+                    }
+                    C_SAMPLER_INDEX = tid * iters + j;
+                    C_SAMPLER_DECISION = decision ? 1u : 0u;
+                }
+                if (decision) {
             // Try to claim the flag
             if (atomicCAS(found_flag, 0, 1) == 0) {
                 // Write linear index for host to reconstruct nonce
