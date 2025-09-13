@@ -649,7 +649,7 @@ for (uint32_t j = 0; j < iters; ++j) {
     uint8_t dist_be[64];
 #pragma unroll
     for (int i = 0; i < 64; ++i) {
-        dist_be[i] = target_be_bytes[i] ^ digest_be[i];
+        dist_be[i] = target_be_bytes[i] ^ h_le[i];
     }
 
     // Compare distance <= threshold (lexicographic on big-endian bytes)
@@ -660,7 +660,7 @@ for (uint32_t j = 0; j < iters; ++j) {
 #pragma unroll
         for (int i = 0; i < 64; ++i) {
             C_SAMPLER_Y_BE[i]       = y_be[i];
-            C_SAMPLER_H_BE[i]       = digest_be[i];
+            C_SAMPLER_H_BE[i]       = h_le[i];
             C_SAMPLER_TARGET_BE[i]  = target_be_bytes[i];
             C_SAMPLER_THRESH_BE[i]  = thresh_be_bytes[i];
         }
@@ -691,7 +691,7 @@ for (uint32_t j = 0; j < iters; ++j) {
             if (out_dbg_h_be) {
 #pragma unroll
                 for (int i = 0; i < 64; ++i) {
-                    out_dbg_h_be[i] = digest_be[i];
+                    out_dbg_h_be[i] = h_le[i];
                 }
             }
         }
