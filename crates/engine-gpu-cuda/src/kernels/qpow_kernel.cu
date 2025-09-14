@@ -662,7 +662,7 @@ for (uint32_t j = 0; j < iters; ++j) {
     uint8_t dist_be[64];
 #pragma unroll
     for (int i = 0; i < 64; ++i) {
-        dist_be[i] = target_be_bytes[i] ^ h_le[i];
+        dist_be[i] = target_be_bytes[i] ^ digest_be[i];
     }
 
     // Compare distance <= threshold (lexicographic on big-endian bytes)
@@ -673,11 +673,11 @@ for (uint32_t j = 0; j < iters; ++j) {
 #pragma unroll
         for (int i = 0; i < 64; ++i) {
             C_SAMPLER_Y_BE[i]       = y_be[i];
-            C_SAMPLER_H_BE[i]       = h_le[i];
+            C_SAMPLER_H_BE[i]       = digest_be[i];
             C_SAMPLER_TARGET_BE[i]  = target_be_bytes[i];
             C_SAMPLER_THRESH_BE[i]  = thresh_be_bytes[i];
         }
-        C_SAMPLER_INDEX = tid * iters + j;
+        C_SAMPLER_INDEX = tid * iters_per_thread + j;
         C_SAMPLER_DECISION = decision ? 1u : 0u;
     }
 
@@ -686,7 +686,7 @@ for (uint32_t j = 0; j < iters; ++j) {
         if (atomicCAS(found_flag, 0, 1) == 0) {
             // Write linear index for host to reconstruct nonce
             if (out_index) {
-                *out_index = tid * iters + j;
+                *out_index = tid * iters_per_thread + j;
             }
             // Record winner thread and iteration for host-side nonce reconstruction
             if (out_win_tid) {
@@ -711,7 +711,7 @@ for (uint32_t j = 0; j < iters; ++j) {
             if (out_dbg_h_be) {
 #pragma unroll
                 for (int i = 0; i < 64; ++i) {
-                    out_dbg_h_be[i] = h_le[i];
+                    out_dbg_h_be[i] = digest_be[i];
                 }
             }
         }
