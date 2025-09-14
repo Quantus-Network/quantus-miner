@@ -555,7 +555,7 @@ impl CudaEngine {
                             d_dbg_y.as_device_ptr(),
                             d_dbg_h.as_device_ptr(),
                             num_threads as u32,
-                            iters_per_thread as u32,
+                            effective_iters as u32,
                             covered as u64
                         ))
                     };
@@ -565,6 +565,68 @@ impl CudaEngine {
                         .with_context(|| "stream synchronize (G2)")?;
                     let kernel_ms = t_kernel_start.elapsed().as_millis();
                     log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
+                    // Check early-exit for this batch using per-batch base_nonces/effective_iters
+                    let mut h_found = [0i32; 1];
+                    d_found
+                        .copy_to(&mut h_found)
+                        .with_context(|| "copy found flag (batch)")?;
+                    if h_found[0] != 0 {
+                        let mut h_idx = [0u32; 1];
+                        d_index
+                            .copy_to(&mut h_idx)
+                            .with_context(|| "copy index (batch)")?;
+                        let k = h_idx[0] as u64;
+                        hash_count = hash_count.saturating_add(k + 1);
+                        // Decode (t,j) for this batch
+                        let mut t_idx = (k as usize) / (effective_iters as usize);
+                        let mut j_idx = (k as usize) % (effective_iters as usize);
+                        let mut h_win_tid = [u32::MAX; 1];
+                        let mut h_win_j = [u32::MAX; 1];
+                        let _ = d_win_tid.copy_to(&mut h_win_tid);
+                        let _ = d_win_j.copy_to(&mut h_win_j);
+                        if h_win_tid[0] != u32::MAX
+                            && h_win_j[0] != u32::MAX
+                            && (h_win_tid[0] as usize) < (num_threads as usize)
+                            && (h_win_j[0] as usize) < (effective_iters as usize)
+                        {
+                            t_idx = h_win_tid[0] as usize;
+                            j_idx = h_win_j[0] as usize;
+                        } else {
+                            log::debug!(target: "miner", "CUDA G2: winner (tid,j) readback unavailable/invalid for batch; using k-derived indices");
+                        }
+                        // Reconstruct nonce from this batch's base nonce
+                        let base_nonce = base_nonces[t_idx];
+                        let nonce = base_nonce.saturating_add(U512::from(1u64 + (j_idx as u64)));
+                        let work = nonce.to_big_endian();
+                        let host_distance = pow_core::distance_for_nonce(ctx, nonce);
+                        if pow_core::is_valid_distance(ctx, host_distance) {
+                            log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
+                            return Ok(EngineStatus::Found {
+                                candidate: engine_cpu::EngineCandidate {
+                                    nonce,
+                                    work,
+                                    distance: host_distance,
+                                },
+                                hash_count,
+                            });
+                        } else {
+                            // FP within batch — log minimal info and fall through to advance/continue
+                            let mut h_dist = [0u8; 64];
+                            let _ = d_distance.copy_to(&mut h_dist);
+                            let mut dbg_y = [0u8; 64];
+                            let mut dbg_h = [0u8; 64];
+                            let _ = d_dbg_y.copy_to(&mut dbg_y);
+                            let _ = d_dbg_h.copy_to(&mut dbg_h);
+                            let y_hex = hex::encode(&dbg_y[..16]);
+                            let h_hex = hex::encode(&dbg_h[..16]);
+                            let host_dist_hex = hex::encode(&host_distance.to_big_endian()[..16]);
+                            let dev_dist_hex = hex::encode(&h_dist[..16]);
+                            log::warn!(target: "miner",
+                                "CUDA G2(batch): false positive: idx={}, y[0..16]={}, dev_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}",
+                                k, y_hex, h_hex, dev_dist_hex, host_dist_hex
+                            );
+                        }
+                    }
                     // Estimated device attempt rate for this batch (nonces/sec)
                     #[cfg(feature = "metrics")]
                     {
@@ -852,6 +914,21 @@ impl CudaEngine {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
                 log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
 
+                // Rebuild per-batch base nonces and y0 for current window (stride = effective iters)
+                let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
+                let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
+                for t in 0..(num_threads as usize) {
+                    let stride = effective_iters as u64;
+                    let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
+                    base_nonces[t] = base_nonce;
+                    let y0_u512 = pow_core::init_worker_y0(ctx, base_nonce);
+                    let y0_le = u512_to_le_limbs(y0_u512);
+                    let off = t * 8;
+                    y0_host[off..off + 8].copy_from_slice(&y0_le);
+                }
+                // Per-batch device buffer for G1 input
+                let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
+                    .with_context(|| "alloc/copy d_y0 (batch)")?;
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -965,7 +1042,7 @@ impl CudaEngine {
                         let info = found_info.clone();
                         let start_k = (total_to_hash * tidx) / hash_threads.max(1);
                         let end_k = (total_to_hash * (tidx + 1)) / hash_threads.max(1);
-                        let iters_usize = iters_per_thread as usize;
+                        let iters_usize = effective_iters as usize;
 
                         scope.spawn(move || {
                             for k in start_k..end_k {
