@@ -40,6 +40,11 @@ use {
 #[cfg(not(feature = "http-exporter"))]
 use anyhow::Result;
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
+
 // -------------------------------------------------------------------------------------
 // Global Registry and Default Metrics
 // -------------------------------------------------------------------------------------
@@ -189,9 +194,9 @@ static JOB_ESTIMATED_RATE: Lazy<GaugeVec> = Lazy::new(|| {
     let g = GaugeVec::new(
         opts!(
             "miner_job_estimated_rate",
-            "Estimated work rate (nonces per second) per job and engine"
+            "Estimated work rate (nonces per second) per engine and backend"
         ),
-        &["engine", "job_id"],
+        &["engine", "backend"],
     )
     .expect("create miner_job_estimated_rate");
     REGISTRY
@@ -332,22 +337,26 @@ pub fn inc_mine_requests(result: &str) {
 }
 
 pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
+    touch_job(engine, job_id);
     JOB_HASHES_TOTAL
         .with_label_values(&[engine, job_id])
         .inc_by(n);
 }
 
 pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
+    touch_job(engine, job_id);
     JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
 }
 
 pub fn set_job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+    // Compatibility shim: map per-job series to backend="unknown" to avoid cardinality growth
     JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, job_id])
+        .with_label_values(&[engine, "unknown"])
         .set(rate);
 }
 
 pub fn inc_candidates_found(engine: &str, job_id: &str) {
+    touch_job(engine, job_id);
     CANDIDATES_FOUND_TOTAL
         .with_label_values(&[engine, job_id])
         .inc();
@@ -364,8 +373,9 @@ pub fn inc_sample_mismatch(engine: &str) {
 }
 
 pub fn job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+    // Compatibility shim: prefer new API using backend; fallback to backend="unknown"
     JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, job_id])
+        .with_label_values(&[engine, "unknown"])
         .set(rate);
 }
 
@@ -376,6 +386,7 @@ pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
 }
 
 pub fn set_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str, rate: f64) {
+    touch_thread(engine, job_id, thread_id);
     THREAD_HASH_RATE
         .with_label_values(&[engine, job_id, thread_id])
         .set(rate);
@@ -388,6 +399,7 @@ pub fn inc_jobs_by_engine(engine: &str, status: &str) {
 }
 
 pub fn set_job_status_gauge(engine: &str, job_id: &str, status: &str, value: i64) {
+    touch_job(engine, job_id);
     JOB_STATUS_GAUGE
         .with_label_values(&[engine, job_id, status])
         .set(value);
@@ -417,6 +429,134 @@ pub fn inc_http_request(endpoint: &str, code: u16) {
 // -------------------------------------------------------------------------------------
 // Removal helpers for end-of-life series
 // -------------------------------------------------------------------------------------
+
+const METRICS_TTL_SECS: u64 = 300;
+const JANITOR_INTERVAL_SECS: u64 = 60;
+
+type JobKey = (String, String); // (engine, job_id)
+type ThreadKey = (String, String, String); // (engine, job_id, thread_id)
+
+static JOB_KEYS: Lazy<Mutex<HashSet<JobKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static JOB_LAST: Lazy<Mutex<HashMap<JobKey, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static THREAD_KEYS: Lazy<Mutex<HashSet<ThreadKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static THREAD_LAST: Lazy<Mutex<HashMap<ThreadKey, Instant>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+static JANITOR_INIT: Lazy<()> = Lazy::new(|| {
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_secs(JANITOR_INTERVAL_SECS));
+        prune_stale();
+    });
+});
+
+fn prune_stale() {
+    let now = Instant::now();
+    // Jobs
+    let mut to_remove_jobs: Vec<JobKey> = Vec::new();
+    {
+        let last = JOB_LAST.lock().unwrap();
+        for (k, ts) in last.iter() {
+            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
+                to_remove_jobs.push(k.clone());
+            }
+        }
+    }
+    for (engine, job_id) in to_remove_jobs {
+        let _ = JOB_HASHES_TOTAL.remove_label_values(&[&engine, &job_id]);
+        let _ = JOB_HASH_RATE.remove_label_values(&[&engine, &job_id]);
+        let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[&engine, &job_id]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "completed"]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "failed"]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "cancelled"]);
+        JOB_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(engine.clone(), job_id.clone()));
+        JOB_LAST.lock().unwrap().remove(&(engine, job_id));
+    }
+    // Threads
+    let mut to_remove_threads: Vec<ThreadKey> = Vec::new();
+    {
+        let last = THREAD_LAST.lock().unwrap();
+        for (k, ts) in last.iter() {
+            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
+                to_remove_threads.push(k.clone());
+            }
+        }
+    }
+    for (engine, job_id, thread_id) in to_remove_threads {
+        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&engine, &job_id, &thread_id]);
+        let _ = THREAD_HASH_RATE.remove_label_values(&[&engine, &job_id, &thread_id]);
+        THREAD_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(engine.clone(), job_id.clone(), thread_id.clone()));
+        THREAD_LAST
+            .lock()
+            .unwrap()
+            .remove(&(engine, job_id, thread_id));
+    }
+}
+
+fn touch_job(engine: &str, job_id: &str) {
+    let _ = *JANITOR_INIT; // ensure janitor starts
+    let key = (engine.to_string(), job_id.to_string());
+    JOB_KEYS.lock().unwrap().insert(key.clone());
+    JOB_LAST.lock().unwrap().insert(key, Instant::now());
+}
+
+fn touch_thread(engine: &str, job_id: &str, thread_id: &str) {
+    let _ = *JANITOR_INIT; // ensure janitor starts
+    let key = (
+        engine.to_string(),
+        job_id.to_string(),
+        thread_id.to_string(),
+    );
+    THREAD_KEYS.lock().unwrap().insert(key.clone());
+    THREAD_LAST.lock().unwrap().insert(key, Instant::now());
+}
+
+/// Explicitly remove all job-scoped metrics for a job (call on job completion)
+pub fn remove_job_metrics(engine: &str, job_id: &str) {
+    let _ = JOB_HASHES_TOTAL.remove_label_values(&[engine, job_id]);
+    let _ = JOB_HASH_RATE.remove_label_values(&[engine, job_id]);
+    let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[engine, job_id]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "completed"]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "failed"]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "cancelled"]);
+    JOB_KEYS
+        .lock()
+        .unwrap()
+        .remove(&(engine.to_string(), job_id.to_string()));
+    JOB_LAST
+        .lock()
+        .unwrap()
+        .remove(&(engine.to_string(), job_id.to_string()));
+}
+
+/// Explicitly remove all thread-scoped metrics for a job
+pub fn remove_thread_metrics_for_job(engine: &str, job_id: &str) {
+    // Collect matching thread keys
+    let keys: Vec<ThreadKey> = {
+        let set = THREAD_KEYS.lock().unwrap();
+        set.iter()
+            .filter(|(e, j, _)| e == engine && j == job_id)
+            .cloned()
+            .collect()
+    };
+    for (e, j, t) in keys {
+        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&e, &j, &t]);
+        let _ = THREAD_HASH_RATE.remove_label_values(&[&e, &j, &t]);
+        THREAD_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(e.clone(), j.clone(), t.clone()));
+        THREAD_LAST
+            .lock()
+            .unwrap()
+            .remove(&(e.clone(), j.clone(), t.clone()));
+    }
+}
 
 /// Remove the per-job hash rate series for a finished job.
 pub fn remove_job_hash_rate(engine: &str, job_id: &str) {
