@@ -330,7 +330,7 @@ __device__ __constant__ uint64_t C_TARGET[8];
 __device__ __constant__ uint64_t C_THRESH[8];
 // Optional sampler controls/output (host may read these symbols when enabled)
 __device__ __constant__ int      C_SAMPLER_ENABLE;
-__device__ __constant__ uint32_t C_ABI_VERSION = 2u;
+__device__ __constant__ uint32_t C_ABI_VERSION = 3u;
 __device__ uint8_t               C_SAMPLER_Y_BE[64];
 __device__ uint8_t               C_SAMPLER_H_BE[64];
 __device__ uint8_t               C_SAMPLER_TARGET_BE[64];
@@ -556,7 +556,8 @@ uint8_t*        __restrict__ out_dbg_h_be,    // 64 bytes (optional)
 
 // Threading parameters
 const uint32_t num_threads,
-const uint32_t iters_per_thread
+const uint32_t iters_per_thread,
+const uint64_t covered_elems
 ) {
 const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 if (tid >= num_threads) {
@@ -612,8 +613,17 @@ if (C_CONSTS_READY) {
     }
 }
 
+// Bound per-thread work to the assigned coverage to avoid hashing beyond the range
+uint64_t thread_base = (uint64_t)tid * (uint64_t)iters_per_thread;
+if (thread_base >= covered_elems) {
+    return;
+}
+uint64_t remain_for_thread = covered_elems - thread_base;
+uint32_t iters = iters_per_thread;
+if ((uint64_t)iters > remain_for_thread) {
+    iters = (uint32_t)remain_for_thread;
+}
 // Iterate and check threshold
-const uint32_t iters = iters_per_thread;
 for (uint32_t j = 0; j < iters; ++j) {
     // Respect early-exit
     if (atomicAdd(found_flag, 0) != 0) {
