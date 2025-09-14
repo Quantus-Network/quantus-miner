@@ -785,21 +785,15 @@ impl CudaEngine {
                             metrics::inc_sample_mismatch("gpu-cuda");
                         }
                         hash_count = hash_count.saturating_add(covered);
-                        if covered < total_elems_u64 {
-                            return Ok(EngineStatus::Exhausted { hash_count });
-                        }
-                        current = current.saturating_add(U512::from(1u64 + total_elems_u64));
+                        current = current.saturating_add(U512::from(1u64 + covered));
                         continue;
                     }
                 }
 
                 // Not found in this window
                 hash_count = hash_count.saturating_add(covered);
-                if covered < total_elems_u64 {
-                    return Ok(EngineStatus::Exhausted { hash_count });
-                }
                 // Advance and continue loop (no G1 copy-back in G2 mode)
-                current = current.saturating_add(U512::from(1u64 + total_elems_u64));
+                current = current.saturating_add(U512::from(1u64 + covered));
                 continue;
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
@@ -978,15 +972,11 @@ impl CudaEngine {
                     });
                 }
 
-                // No candidate found; update hash_count and either exhaust or advance
+                // No candidate found; update hash_count and advance
                 hash_count = hash_count.saturating_add(gpu_coverage);
 
-                if gpu_coverage < total_elems_u64 {
-                    return Ok(EngineStatus::Exhausted { hash_count });
-                }
-
-                // Advance: we covered 1 (CPU step) + num_threads * iters_per_thread nonces in this iteration
-                current = current.saturating_add(U512::from(1u64 + total_elems_u64));
+                // Advance: we covered 1 (CPU step) + total_to_hash nonces in this iteration
+                current = current.saturating_add(U512::from(1u64 + gpu_coverage));
             }
         }
 
