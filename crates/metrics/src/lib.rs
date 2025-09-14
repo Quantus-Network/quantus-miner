@@ -348,6 +348,12 @@ pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
     JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
 }
 
+pub fn set_job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, backend])
+        .set(rate);
+}
+
 pub fn set_job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
     // Compatibility shim: map per-job series to backend="unknown" to avoid cardinality growth
     JOB_ESTIMATED_RATE
@@ -370,6 +376,12 @@ pub fn inc_candidates_false_positive(engine: &str) {
 
 pub fn inc_sample_mismatch(engine: &str) {
     SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
+}
+
+pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, backend])
+        .set(rate);
 }
 
 pub fn job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
