@@ -527,14 +527,14 @@ fn prune_stale() {
 }
 
 fn touch_job(engine: &str, job_id: &str) {
-    let _ = *JANITOR_INIT; // ensure janitor starts
+    *JANITOR_INIT; // ensure janitor starts
     let key = (engine.to_string(), job_id.to_string());
     JOB_KEYS.lock().unwrap().insert(key.clone());
     JOB_LAST.lock().unwrap().insert(key, Instant::now());
 }
 
 fn touch_thread(engine: &str, job_id: &str, thread_id: &str) {
-    let _ = *JANITOR_INIT; // ensure janitor starts
+    *JANITOR_INIT; // ensure janitor starts
     let key = (
         engine.to_string(),
         job_id.to_string(),

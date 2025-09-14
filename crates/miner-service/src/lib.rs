@@ -153,7 +153,7 @@ impl MiningService {
         if let Some(job) = jobs.get_mut(job_id) {
             if !job.result_served {
                 job.result_served = true;
-                log::info!(target: "miner", "Result served and marked for job: {}", job_id);
+                log::info!(target: "miner", "Result served and marked for job: {job_id}");
                 #[cfg(feature = "metrics")]
                 {
                     // reuse existing counter to trace served events
@@ -393,7 +393,7 @@ impl MiningJob {
     }
 
     pub fn cancel(&mut self) {
-        log::debug!(target: "miner", "Cancelling mining job");
+        log::debug!(target: "miner", "Cancelling mining job: {}", self.job_id.as_ref().unwrap());
         self.cancel_flag.store(true, Ordering::Relaxed);
         self.status = JobStatus::Cancelled;
         #[cfg(feature = "metrics")]
@@ -589,6 +589,7 @@ impl MiningJob {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Reason: worker runner needs job_id, engine, context, range, cancel flag, sender, and chunking config
 fn mine_range_with_engine(
     thread_id: usize,
     job_id: String,
@@ -664,7 +665,7 @@ fn mine_range_with_engine(
                     completed: true,
                 };
                 if sender.send(final_result).is_err() {
-                    log::warn!(target: "miner", "Job {} thread {} failed to send final result", job_id, thread_id);
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send final result");
                 }
                 done = true;
                 break;
@@ -678,7 +679,7 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!(target: "miner", "Job {} thread {} failed to send progress update", job_id, thread_id);
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send progress update");
                     break;
                 } else {
                     log::debug!(
@@ -701,7 +702,7 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!(target: "miner", "Job {} thread {} failed to send cancel update", job_id, thread_id);
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
                 }
                 done = true;
                 break;
@@ -726,11 +727,11 @@ fn mine_range_with_engine(
             completed: true,
         };
         if sender.send(final_result).is_err() {
-            log::warn!(target: "miner", "Job {} thread {} failed to send completion status after chunked search", job_id, thread_id);
+            log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send completion status after chunked search");
         }
     }
 
-    log::debug!(target: "miner", "Job {} thread {} completed.", job_id, thread_id);
+    log::debug!(target: "miner", "Job {job_id} thread {thread_id} completed.");
 }
 
 /// Validates incoming mining requests for structural correctness.
