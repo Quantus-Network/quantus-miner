@@ -643,8 +643,7 @@ impl CudaEngine {
                         if kernel_ms > 0 {
                             let attempts = active_threads * (effective_iters as u64);
                             let rate = (attempts as f64) / ((kernel_ms as f64) / 1000.0);
-                            let job_key = hex::encode(ctx.header);
-                            metrics::job_estimated_rate("gpu-cuda", &job_key, rate);
+                            metrics::job_estimated_rate_backend("gpu-cuda", "g2", rate);
                         }
                     }
                     // Advance by covered window and continue to next batch, honoring cancel between batches

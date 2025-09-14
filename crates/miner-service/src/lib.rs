@@ -130,8 +130,6 @@ impl MiningService {
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "completed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "failed", 0);
             metrics::set_job_status_gauge(self.engine.name(), &job_id, "cancelled", 0);
-            // initialize estimated rate gauge so it appears immediately
-            metrics::set_job_estimated_rate(self.engine.name(), &job_id, 0.0);
             // increment active jobs
             {
                 let mut g = self.active_jobs_gauge.lock().await;
@@ -210,11 +208,6 @@ impl MiningService {
                             running_jobs += 1;
                             total_rate += job.last_hash_rate;
                             metrics::set_job_hash_rate(job.engine_name, job_id, job.last_hash_rate);
-                            metrics::set_job_estimated_rate(
-                                job.engine_name,
-                                job_id,
-                                job.last_hash_rate,
-                            );
                         }
                     }
                     metrics::set_hash_rate(total_rate);
@@ -393,6 +386,8 @@ impl MiningJob {
                 // Remove job hash rate series on cancellation (avoid scrape-timing artifacts)
                 self.last_hash_rate = 0.0;
                 metrics::remove_job_hash_rate(self.engine_name, job_id);
+                metrics::remove_job_metrics(self.engine_name, job_id);
+                metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                 // Remove all per-thread hash rate series on cancellation and clear tracking
                 for (tid, _) in self.thread_rate_ema.iter() {
                     metrics::remove_thread_hash_rate(self.engine_name, job_id, &tid.to_string());
@@ -460,7 +455,6 @@ impl MiningJob {
                     let job_rate: f64 = self.thread_rate_ema.values().copied().sum();
                     self.last_hash_rate = job_rate;
                     metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
-                    metrics::set_job_estimated_rate(self.engine_name, job_id, job_rate);
                 }
             }
 
@@ -518,6 +512,8 @@ impl MiningJob {
                         // Remove job hash rate on completion and clear per-thread series
                         self.last_hash_rate = 0.0;
                         metrics::remove_job_hash_rate(self.engine_name, job_id);
+                        metrics::remove_job_metrics(self.engine_name, job_id);
+                        metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                         for (tid, _) in self.thread_rate_ema.iter() {
                             metrics::remove_thread_hash_rate(
                                 self.engine_name,
