@@ -719,8 +719,9 @@ impl CudaEngine {
                     }
                     // Advance by covered window and continue to next batch, honoring cancel between batches
                     let attempts = active_threads * (effective_iters as u64);
+                    // Advance by attempted nonces this batch; CPU handled +1 before the G2 loop
                     hash_count = hash_count.saturating_add(attempts);
-                    current = current.saturating_add(U512::from(1u64 + attempts));
+                    current = current.saturating_add(U512::from(attempts));
                     if cancel.load(AtomicOrdering::Relaxed) {
                         break;
                     }
@@ -807,7 +808,9 @@ impl CudaEngine {
                     }
                 }
 
-                // Not found in this window (no additional advance; already advanced per batch)
+                // Not found in this window
+                // Advance by the single CPU step consumed at the beginning of this outer loop iteration
+                current = current.saturating_add(U512::from(1u64));
                 continue;
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
