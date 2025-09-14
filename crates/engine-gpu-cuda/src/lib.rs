@@ -537,16 +537,17 @@ impl CudaEngine {
                         .ok()
                         .map(|v| v != "0" && !v.is_empty() && !v.eq_ignore_ascii_case("false"))
                         .unwrap_or(false);
-                    let attempts: u64 = active_threads * (effective_iters as u64);
+                    let attempts_nominal: u64 = active_threads * (effective_iters as u64);
+                    let attempts_used: u64 = std::cmp::min(attempts_nominal, covered);
                     let utilization: f64 = if covered > 0 {
-                        (attempts as f64) / (covered as f64)
+                        (attempts_used as f64) / (covered as f64)
                     } else {
                         0.0
                     };
                     log::info!(
                         target: "miner",
-                        "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, attempts={}, covered={}, util={:.3}, batches={batches}, force_win={}",
-                        active_threads, attempts, covered, utilization, force_enabled
+                        "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, attempts_nominal={}, attempts_used={}, covered={}, util={:.3}, batches={batches}, force_win={}",
+                        active_threads, attempts_nominal, attempts_used, covered, utilization, force_enabled
                     );
                     let current_be = current.to_big_endian();
                     let end_be = end.to_big_endian();
@@ -743,10 +744,11 @@ impl CudaEngine {
                         }
                     }
                     // Advance by covered window and continue to next batch, honoring cancel between batches
-                    let attempts = active_threads * (effective_iters as u64);
-                    // Advance by attempted nonces this batch; CPU handled +1 before the G2 loop
-                    hash_count = hash_count.saturating_add(attempts);
-                    current = current.saturating_add(U512::from(attempts));
+                    let attempts_nominal = active_threads * (effective_iters as u64);
+                    // Advance by attempted nonces this batch (clamped to coverage); CPU handled +1 before the G2 loop
+                    let attempts_used = std::cmp::min(attempts_nominal, covered);
+                    hash_count = hash_count.saturating_add(attempts_used);
+                    current = current.saturating_add(U512::from(attempts_used));
                     if cancel.load(AtomicOrdering::Relaxed) {
                         break;
                     }
