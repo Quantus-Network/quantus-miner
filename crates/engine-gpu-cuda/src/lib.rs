@@ -488,7 +488,20 @@ impl CudaEngine {
                     }
                 }
                 log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
-                log::debug!(target: "miner", "CUDA G2 coverage: covered={covered}");
+                let current_be = current.to_big_endian();
+                let end_be = end.to_big_endian();
+                let cur_prefix = hex::encode(&current_be[..16]);
+                let end_prefix = hex::encode(&end_be[..16]);
+                let rem_prefix = hex::encode(&rem_be[..16]);
+                log::debug!(
+                    target: "miner",
+                    "CUDA G2 coverage: cur[0..16]={}, end[0..16]={}, rem[0..16]={}, over_u64={}, total_elems={}, covered={covered}",
+                    cur_prefix,
+                    end_prefix,
+                    rem_prefix,
+                    over_u64,
+                    total_elems_u64
+                );
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -840,6 +853,21 @@ impl CudaEngine {
                     let remaining_inclusive: u64 = u64::from_be_bytes(last8);
                     std::cmp::min(total_elems as u64, remaining_inclusive) as usize
                 };
+                let current_be = current.to_big_endian();
+                let end_be = end.to_big_endian();
+                let cur_prefix = hex::encode(&current_be[..16]);
+                let end_prefix = hex::encode(&end_be[..16]);
+                let rem_prefix = hex::encode(&rem_be[..16]);
+                log::debug!(
+                    target: "miner",
+                    "CUDA G1 coverage: cur[0..16]={}, end[0..16]={}, rem[0..16]={}, over_u64={}, total_elems={}, total_to_hash={}",
+                    cur_prefix,
+                    end_prefix,
+                    rem_prefix,
+                    over_u64,
+                    total_elems,
+                    total_to_hash
+                );
 
                 let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
                     .ok()
