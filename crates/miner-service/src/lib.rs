@@ -190,7 +190,10 @@ impl MiningService {
         log::debug!(target: "miner", "Starting mining loop...");
 
         tokio::spawn(async move {
+            let mut last_watchdog = std::time::Instant::now();
+            let mut iter: u64 = 0;
             loop {
+                iter += 1;
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
@@ -231,6 +234,27 @@ impl MiningService {
                     metrics::set_active_jobs(running_jobs);
                 }
                 drop(jobs_guard);
+                if last_watchdog.elapsed().as_secs() >= 30 {
+                    let mut running = 0usize;
+                    let mut completed = 0usize;
+                    let mut cancelled = 0usize;
+                    let mut failed = 0usize;
+                    let total = jobs_guard.len();
+                    for (_id, job) in jobs_guard.iter() {
+                        match job.status {
+                            JobStatus::Running => running += 1,
+                            JobStatus::Completed => completed += 1,
+                            JobStatus::Cancelled => cancelled += 1,
+                            JobStatus::Failed => failed += 1,
+                        }
+                    }
+                    log::info!(
+                        target: "miner",
+                        "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, loop_iter={}",
+                        total, running, completed, failed, cancelled, iter
+                    );
+                    last_watchdog = std::time::Instant::now();
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -350,7 +374,11 @@ impl MiningJob {
         workers: usize,
         progress_chunk_ms: u64,
     ) {
-        let (sender, receiver) = bounded(workers * 2);
+        let chan_capacity = std::env::var("MINER_RESULT_CHANNEL_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| workers.saturating_mul(64).max(256));
+        let (sender, receiver) = bounded(chan_capacity);
         self.result_receiver = Some(receiver);
         self.engine_name = engine.name();
 
@@ -664,7 +692,7 @@ fn mine_range_with_engine(
                     hash_count,
                     completed: true,
                 };
-                if sender.send(final_result).is_err() {
+                if sender.try_send(final_result).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send final result");
                 }
                 done = true;
@@ -678,7 +706,7 @@ fn mine_range_with_engine(
                     hash_count,
                     completed: false,
                 };
-                if sender.send(update).is_err() {
+                if sender.try_send(update).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send progress update");
                     break;
                 } else {
@@ -701,7 +729,7 @@ fn mine_range_with_engine(
                     hash_count,
                     completed: false,
                 };
-                if sender.send(update).is_err() {
+                if sender.try_send(update).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
                 }
                 done = true;
@@ -726,7 +754,7 @@ fn mine_range_with_engine(
             hash_count: 0,
             completed: true,
         };
-        if sender.send(final_result).is_err() {
+        if sender.try_send(final_result).is_err() {
             log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send completion status after chunked search");
         }
     }
@@ -866,6 +894,14 @@ pub async fn handle_result_request(
         }
     };
 
+    log::debug!(
+        target: "miner",
+        "Result polling watchdog: job_id={}, status={:?}, result_served={}, elapsed_s={:.3}",
+        job_id,
+        job.status,
+        job.result_served,
+        job.start_time.elapsed().as_secs_f64()
+    );
     let status = match job.status {
         JobStatus::Running => ApiResponseStatus::Running,
         JobStatus::Completed => ApiResponseStatus::Completed,
