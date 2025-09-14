@@ -350,11 +350,16 @@ impl CudaEngine {
             if is_g2 {
                 // Compute full-precision bounds for accounting
                 let rem_be = end.saturating_sub(current).to_big_endian();
-                let mut last8 = [0u8; 8];
-                last8.copy_from_slice(&rem_be[56..64]);
-                let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+                let over_u64 = rem_be[..56].iter().any(|&b| b != 0);
                 let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
-                let covered = std::cmp::min(total_elems_u64, remaining_inclusive);
+                let covered: u64 = if over_u64 {
+                    total_elems_u64
+                } else {
+                    let mut last8 = [0u8; 8];
+                    last8.copy_from_slice(&rem_be[56..64]);
+                    let rem_low = u64::from_be_bytes(last8);
+                    std::cmp::min(total_elems_u64, rem_low)
+                };
 
                 // Prepare target/threshold (64-byte big-endian) for device
                 let target_be = ctx.target.to_big_endian();
@@ -483,7 +488,7 @@ impl CudaEngine {
                     }
                 }
                 log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
-                log::debug!(target: "miner", "CUDA G2 coverage: remaining_inclusive={}, covered={covered}", remaining_inclusive);
+                log::debug!(target: "miner", "CUDA G2 coverage: covered={covered}");
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -822,14 +827,19 @@ impl CudaEngine {
                 // Parallel SHA3 over GPU results; compute earliest valid index (if any)
                 let t_sha_start = std::time::Instant::now();
 
-                // Bound hashing work to remaining range in this chunk
+                // Bound hashing work to remaining range in this chunk (full-precision)
                 let rem_be = end.saturating_sub(current).to_big_endian();
-                let mut last8 = [0u8; 8];
-                last8.copy_from_slice(&rem_be[56..64]);
-                let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+                let over_u64 = rem_be[..56].iter().any(|&b| b != 0);
 
                 let total_elems = (num_threads as usize) * (iters_per_thread as usize);
-                let total_to_hash = std::cmp::min(total_elems as u64, remaining_inclusive) as usize;
+                let total_to_hash = if over_u64 {
+                    total_elems
+                } else {
+                    let mut last8 = [0u8; 8];
+                    last8.copy_from_slice(&rem_be[56..64]);
+                    let remaining_inclusive: u64 = u64::from_be_bytes(last8);
+                    std::cmp::min(total_elems as u64, remaining_inclusive) as usize
+                };
 
                 let hash_threads = std::env::var("MINER_CUDA_HASH_THREADS")
                     .ok()
