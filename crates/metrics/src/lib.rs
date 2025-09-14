@@ -363,6 +363,12 @@ pub fn inc_sample_mismatch(engine: &str) {
     SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
 }
 
+pub fn job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, job_id])
+        .set(rate);
+}
+
 pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
     THREAD_HASHES_TOTAL
         .with_label_values(&[engine, job_id, thread_id])

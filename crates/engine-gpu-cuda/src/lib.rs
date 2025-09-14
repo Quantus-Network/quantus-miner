@@ -346,6 +346,7 @@ impl CudaEngine {
                 let max_cover = (num_threads as u64) * effective_iters;
                 if covered_u64 > max_cover {
                     covered_u64 = max_cover;
+                    let _initial_covered = covered_u64;
                 }
             }
 
@@ -511,50 +512,110 @@ impl CudaEngine {
                         }
                     }
                 }
-                log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={effective_iters}");
-                let current_be = current.to_big_endian();
-                let end_be = end.to_big_endian();
-                let cur_prefix = hex::encode(&current_be[..16]);
-                let end_prefix = hex::encode(&end_be[..16]);
-                let rem_prefix = hex::encode(&rem_be[..16]);
-                log::debug!(
-                    target: "miner",
-                    "CUDA G2 coverage: cur[0..16]={}, end[0..16]={}, rem[0..16]={}, over_u64={}, total_elems={}, covered={covered}",
-                    cur_prefix,
-                    end_prefix,
-                    rem_prefix,
-                    over_u64,
-                    total_elems_u64
-                );
-                let t_kernel_start = std::time::Instant::now();
-                let launch_result = unsafe {
-                    launch!(func<<<grid_dim, block_dim, 0, stream>>>(
-                        d_m.as_device_ptr(),
-                        d_n.as_device_ptr(),
-                        n0_inv as u64,
-                        d_r2.as_device_ptr(),
-                        d_mhat.as_device_ptr(),
-                        d_y0.as_device_ptr(),
-                        d_target.as_device_ptr(),
-                        d_threshold.as_device_ptr(),
-                        d_found.as_device_ptr(),
-                        d_index.as_device_ptr(),
-                        d_win_tid.as_device_ptr(),
-                        d_win_j.as_device_ptr(),
-                        d_distance.as_device_ptr(),
-                        d_dbg_y.as_device_ptr(),
-                        d_dbg_h.as_device_ptr(),
-                        num_threads as u32,
-                        iters_per_thread as u32,
-                        covered as u64
-                    ))
-                };
-                launch_result.with_context(|| "launch G2 kernel")?;
-                stream
-                    .synchronize()
-                    .with_context(|| "stream synchronize (G2)")?;
-                let kernel_ms = t_kernel_start.elapsed().as_millis();
-                log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
+                let batches: u32 = std::env::var("MINER_CUDA_BATCHES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+                for _batch in 0..batches {
+                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={effective_iters}, batches={batches}");
+                    let current_be = current.to_big_endian();
+                    let end_be = end.to_big_endian();
+                    let cur_prefix = hex::encode(&current_be[..16]);
+                    let end_prefix = hex::encode(&end_be[..16]);
+                    let rem_prefix = hex::encode(&rem_be[..16]);
+                    let mut cur_low8 = [0u8; 8];
+                    cur_low8.copy_from_slice(&current_be[56..64]);
+                    let cur_low64 = u64::from_be_bytes(cur_low8);
+                    let mut end_low8 = [0u8; 8];
+                    end_low8.copy_from_slice(&end_be[56..64]);
+                    let end_low64 = u64::from_be_bytes(end_low8);
+                    let mut rem_low8 = [0u8; 8];
+                    rem_low8.copy_from_slice(&rem_be[56..64]);
+                    let rem_low64 = u64::from_be_bytes(rem_low8);
+                    log::debug!(
+                        target: "miner",
+                        "CUDA G2 coverage: cur[0..16]={}, end[0..16]={}, rem[0..16]={}, cur_low64={}, end_low64={}, rem_low64={}, over_u64={}, total_elems={}, covered={covered}",
+                        cur_prefix,
+                        end_prefix,
+                        rem_prefix,
+                        cur_low64,
+                        end_low64,
+                        rem_low64,
+                        over_u64,
+                        total_elems_u64
+                    );
+                    let t_kernel_start = std::time::Instant::now();
+                    let launch_result = unsafe {
+                        launch!(func<<<grid_dim, block_dim, 0, stream>>>(
+                            d_m.as_device_ptr(),
+                            d_n.as_device_ptr(),
+                            n0_inv as u64,
+                            d_r2.as_device_ptr(),
+                            d_mhat.as_device_ptr(),
+                            d_y0.as_device_ptr(),
+                            d_target.as_device_ptr(),
+                            d_threshold.as_device_ptr(),
+                            d_found.as_device_ptr(),
+                            d_index.as_device_ptr(),
+                            d_win_tid.as_device_ptr(),
+                            d_win_j.as_device_ptr(),
+                            d_distance.as_device_ptr(),
+                            d_dbg_y.as_device_ptr(),
+                            d_dbg_h.as_device_ptr(),
+                            num_threads as u32,
+                            iters_per_thread as u32,
+                            covered as u64
+                        ))
+                    };
+                    launch_result.with_context(|| "launch G2 kernel")?;
+                    stream
+                        .synchronize()
+                        .with_context(|| "stream synchronize (G2)")?;
+                    let kernel_ms = t_kernel_start.elapsed().as_millis();
+                    log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
+                    // Estimated device attempt rate for this batch (nonces/sec)
+                    #[cfg(feature = "metrics")]
+                    {
+                        if kernel_ms > 0 {
+                            let attempts = (num_threads as u64) * (effective_iters as u64);
+                            let rate = (attempts as f64) / ((kernel_ms as f64) / 1000.0);
+                            let job_key = hex::encode(ctx.header);
+                            metrics::job_estimated_rate("gpu-cuda", &job_key, rate);
+                        }
+                    }
+                    // Advance by covered window and continue to next batch, honoring cancel between batches
+                    hash_count = hash_count.saturating_add(covered);
+                    current = current.saturating_add(U512::from(1u64 + covered));
+                    if cancel.load(AtomicOrdering::Relaxed) {
+                        break;
+                    }
+                    // Recompute remaining and adapt effective iters for the next batch
+                    let rem_be = end.saturating_sub(current).to_big_endian();
+                    let over_u64 = rem_be[..56].iter().any(|&b| b != 0);
+                    let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
+                    let mut covered: u64 = if over_u64 {
+                        total_elems_u64
+                    } else {
+                        let mut last8 = [0u8; 8];
+                        last8.copy_from_slice(&rem_be[56..64]);
+                        let rem_low = u64::from_be_bytes(last8);
+                        std::cmp::min(total_elems_u64, rem_low)
+                    };
+                    let mut effective_iters: u64 = iters_per_thread as u64;
+                    if covered < total_elems_u64 {
+                        let per_thread =
+                            (covered + (num_threads as u64) - 1) / (num_threads as u64);
+                        effective_iters = std::cmp::min(effective_iters, per_thread.max(1));
+                        let max_cover = (num_threads as u64) * effective_iters;
+                        if covered > max_cover {
+                            covered = max_cover;
+                        }
+                    }
+                    // If range exhausted, break batching loop
+                    if covered == 0 {
+                        break;
+                    }
+                }
                 // Optional sampler readback and host parity check
                 if std::env::var("MINER_CUDA_SAMPLER")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
