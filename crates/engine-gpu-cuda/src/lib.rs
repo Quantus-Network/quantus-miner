@@ -460,6 +460,34 @@ impl CudaEngine {
                                 c_samp_h.copy_from(&zero64)?;
                             }
                         }
+                        // Optional debug: force device winner when MINER_CUDA_FORCE_WIN is set
+                        if let Ok(force_env) = std::env::var("MINER_CUDA_FORCE_WIN") {
+                            let force: i32 = if force_env == "0"
+                                || force_env.eq_ignore_ascii_case("false")
+                                || force_env.is_empty()
+                            {
+                                0
+                            } else {
+                                1
+                            };
+                            if let Ok(mut c_force) = module
+                                .get_global::<i32>(CString::new("C_DEBUG_FORCE_WIN")?.as_c_str())
+                            {
+                                c_force.copy_from(&force)?;
+                                if force != 0 {
+                                    log::warn!(target: "miner", "CUDA G2: MINER_CUDA_FORCE_WIN enabled (device will force early-exit at tid=0,j=0)");
+                                } else {
+                                    log::debug!(target: "miner", "CUDA G2: MINER_CUDA_FORCE_WIN disabled");
+                                }
+                            } else {
+                                log::warn!(target: "miner", "CUDA G2: MINER_CUDA_FORCE_WIN set but device symbol C_DEBUG_FORCE_WIN unavailable");
+                            }
+                        } else if let Ok(mut c_force) =
+                            module.get_global::<i32>(CString::new("C_DEBUG_FORCE_WIN")?.as_c_str())
+                        {
+                            let zero: i32 = 0;
+                            let _ = c_force.copy_from(&zero);
+                        }
                         // Flag ready = 1
                         let one: i32 = 1;
                         c_ready.copy_from(&one)?;
@@ -490,7 +518,11 @@ impl CudaEngine {
                     }
                     let active_threads_usize = active_threads as usize;
                     let grid_dim = (((active_threads as u32) + block_dim - 1) / block_dim).max(1);
-                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, batches={batches}", active_threads);
+                    let force_enabled = std::env::var("MINER_CUDA_FORCE_WIN")
+                        .ok()
+                        .map(|v| v != "0" && !v.is_empty() && !v.eq_ignore_ascii_case("false"))
+                        .unwrap_or(false);
+                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, batches={batches}, force_win={}", active_threads, force_enabled);
                     let current_be = current.to_big_endian();
                     let end_be = end.to_big_endian();
                     let cur_prefix = hex::encode(&current_be[..16]);
@@ -686,8 +718,9 @@ impl CudaEngine {
                         }
                     }
                     // Advance by covered window and continue to next batch, honoring cancel between batches
-                    hash_count = hash_count.saturating_add(covered);
-                    current = current.saturating_add(U512::from(1u64 + covered));
+                    let attempts = active_threads * (effective_iters as u64);
+                    hash_count = hash_count.saturating_add(attempts);
+                    current = current.saturating_add(U512::from(1u64 + attempts));
                     if cancel.load(AtomicOrdering::Relaxed) {
                         break;
                     }
@@ -774,10 +807,7 @@ impl CudaEngine {
                     }
                 }
 
-                // Not found in this window
-                hash_count = hash_count.saturating_add(covered);
-                // Advance and continue loop (no G1 copy-back in G2 mode)
-                current = current.saturating_add(U512::from(1u64 + covered));
+                // Not found in this window (no additional advance; already advanced per batch)
                 continue;
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)

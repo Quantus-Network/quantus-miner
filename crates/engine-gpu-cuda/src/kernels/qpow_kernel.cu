@@ -337,6 +337,7 @@ __device__ uint8_t               C_SAMPLER_TARGET_BE[64];
 __device__ uint8_t               C_SAMPLER_THRESH_BE[64];
 __device__ uint32_t              C_SAMPLER_INDEX;
 __device__ uint32_t              C_SAMPLER_DECISION;
+__device__ __constant__ int      C_DEBUG_FORCE_WIN;
 
 // Load/store helpers (little- and big-endian)
 __device__ __forceinline__ uint64_t load64_le(const uint8_t* p) {
@@ -627,6 +628,43 @@ if ((uint64_t)iters > remain_for_thread) {
 for (uint32_t j = 0; j < iters; ++j) {
     // Respect early-exit
     if (atomicAdd(found_flag, 0) != 0) {
+        return;
+    }
+    // Debug: force a winner to exercise GPU->CPU signaling
+    if (C_DEBUG_FORCE_WIN != 0 && tid == 0 && j == 0) {
+        if (atomicCAS(found_flag, 0, 1) == 0) {
+            if (out_index) {
+                *out_index = tid * iters_per_thread + j;
+            }
+            if (out_win_tid) {
+                *out_win_tid = tid;
+            }
+            if (out_win_j) {
+                *out_win_j = j;
+            }
+            if (out_distance_be) {
+#pragma unroll
+                for (int i = 0; i < 64; ++i) {
+                    out_distance_be[i] = 0;
+                }
+            }
+            if (out_dbg_y_be) {
+#pragma unroll
+                for (int i = 0; i < 64; ++i) {
+                    out_dbg_y_be[i] = 0;
+                }
+            }
+            if (out_dbg_h_be) {
+#pragma unroll
+                for (int i = 0; i < 64; ++i) {
+                    out_dbg_h_be[i] = 0;
+                }
+            }
+            if (C_SAMPLER_ENABLE && tid == 0) {
+                C_SAMPLER_INDEX = tid * iters_per_thread + j;
+                C_SAMPLER_DECISION = 1u;
+            }
+        }
         return;
     }
 
