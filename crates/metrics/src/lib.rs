@@ -354,7 +354,7 @@ pub fn set_job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
         .set(rate);
 }
 
-pub fn set_job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+pub fn set_job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
     // Compatibility shim: map per-job series to backend="unknown" to avoid cardinality growth
     JOB_ESTIMATED_RATE
         .with_label_values(&[engine, "unknown"])
@@ -384,7 +384,7 @@ pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
         .set(rate);
 }
 
-pub fn job_estimated_rate(engine: &str, job_id: &str, rate: f64) {
+pub fn job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
     // Compatibility shim: prefer new API using backend; fallback to backend="unknown"
     JOB_ESTIMATED_RATE
         .with_label_values(&[engine, "unknown"])

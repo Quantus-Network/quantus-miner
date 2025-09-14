@@ -3,6 +3,7 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
+use pow_core::compat;
 use primitive_types::U512;
 use resonance_miner_api::*;
 use std::collections::HashMap;
@@ -147,6 +148,21 @@ impl MiningService {
         jobs.get(job_id).cloned()
     }
 
+    pub async fn mark_job_result_served(&self, job_id: &str) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            if !job.result_served {
+                job.result_served = true;
+                log::info!(target: "miner", "Result served and marked for job: {}", job_id);
+                #[cfg(feature = "metrics")]
+                {
+                    // reuse existing counter to trace served events
+                    metrics::inc_mine_requests("result_served");
+                }
+            }
+        }
+    }
+
     pub async fn remove_job(&self, job_id: &str) -> Option<MiningJob> {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(job_id) {
@@ -188,8 +204,9 @@ impl MiningService {
                         );
                     }
 
-                    // Retain jobs that are running or recently finished (e.g., within 5 minutes)
+                    // Retain running jobs, completed-but-not-yet-served jobs, or anything recent (<5m)
                     let retain = job.status == JobStatus::Running
+                        || (job.status == JobStatus::Completed && !job.result_served)
                         || job.start_time.elapsed().as_secs() < 300;
                     if !retain {
                         log::debug!(target: "miner", "Cleaning up old job {job_id}");
@@ -259,6 +276,7 @@ pub struct MiningJob {
     pub thread_last_update: std::collections::HashMap<usize, std::time::Instant>,
     pub thread_rate_ema: std::collections::HashMap<usize, f64>,
     completed_threads: usize,
+    pub result_served: bool,
 }
 
 impl Clone for MiningJob {
@@ -284,6 +302,7 @@ impl Clone for MiningJob {
             thread_last_update: self.thread_last_update.clone(),
             thread_rate_ema: self.thread_rate_ema.clone(),
             completed_threads: self.completed_threads,
+            result_served: self.result_served,
         }
     }
 }
@@ -321,6 +340,7 @@ impl MiningJob {
             thread_last_update: std::collections::HashMap::new(),
             thread_rate_ema: std::collections::HashMap::new(),
             completed_threads: 0,
+            result_served: false,
         }
     }
 
@@ -489,8 +509,16 @@ impl MiningJob {
                         result.distance,
                         result.nonce
                     );
-                    self.best_result = Some(result);
+                    self.best_result = Some(result.clone());
                     self.cancel_flag.store(true, Ordering::Relaxed);
+                    // Result is now ready to be fetched via /result
+                    log::info!(target: "miner", "Result ready: engine={}, nonce={}, distance={}",
+                        self.engine_name, result.nonce, result.distance);
+                    #[cfg(feature = "metrics")]
+                    {
+                        // reuse existing http metric bucket for visibility until dedicated counters exist
+                        metrics::inc_mine_requests("result_ready");
+                    }
                 }
             }
         }
@@ -821,7 +849,7 @@ pub async fn handle_result_request(
         JobStatus::Cancelled => ApiResponseStatus::Cancelled,
     };
 
-    let (nonce, work) = match &job.best_result {
+    let (nonce_hex, work_hex) = match &job.best_result {
         Some(result) => (
             Some(format!("{:x}", result.nonce)),
             Some(hex::encode(result.work)),
@@ -829,14 +857,36 @@ pub async fn handle_result_request(
         None => (None, None),
     };
 
+    // Inline re-verify using the exact nonce bytes we will return
+    if let Some(result) = &job.best_result {
+        let nonce_be = result.nonce.to_big_endian();
+        let d2 = compat::get_nonce_distance(job.header_hash, nonce_be);
+        let ok = d2 <= job.distance_threshold;
+        log::info!(
+            target: "miner",
+            "Serving result: job_id={}, engine={}, ok={}, host_distance={}, threshold={}",
+            job_id,
+            job.engine_name,
+            ok,
+            d2,
+            job.distance_threshold
+        );
+        #[cfg(feature = "metrics")]
+        {
+            metrics::inc_mine_requests("result_served");
+        }
+        // Mark served to keep job until at least one fetch succeeds
+        state.mark_job_result_served(&job_id).await;
+    }
+
     let elapsed_time = job.start_time.elapsed().as_secs_f64();
 
     Ok(warp::reply::with_status(
         warp::reply::json(&resonance_miner_api::MiningResult {
             status,
             job_id,
-            nonce,
-            work,
+            nonce: nonce_hex,
+            work: work_hex,
             hash_count: job.total_hash_count,
             elapsed_time,
         }),
