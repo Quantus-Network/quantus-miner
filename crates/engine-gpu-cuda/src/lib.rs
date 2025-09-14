@@ -346,7 +346,6 @@ impl CudaEngine {
                 let max_cover = (num_threads as u64) * effective_iters;
                 if covered_u64 > max_cover {
                     covered_u64 = max_cover;
-                    let _initial_covered = covered_u64;
                 }
             }
 
@@ -373,18 +372,11 @@ impl CudaEngine {
 
             // Branch kernel launch by mode: G2 (device SHA3 + early-exit) vs G1 (return y values)
             if is_g2 {
-                // Compute full-precision bounds for accounting
-                let rem_be = end.saturating_sub(current).to_big_endian();
-                let over_u64 = rem_be[..56].iter().any(|&b| b != 0);
-                let total_elems_u64 = (num_threads as u64) * (iters_per_thread as u64);
-                let covered: u64 = if over_u64 {
-                    total_elems_u64
-                } else {
-                    let mut last8 = [0u8; 8];
-                    last8.copy_from_slice(&rem_be[56..64]);
-                    let rem_low = u64::from_be_bytes(last8);
-                    std::cmp::min(total_elems_u64, rem_low)
-                };
+                // Compute full-precision bounds for accounting (use precomputed)
+                let rem_be = rem_be_all;
+                let over_u64 = over_u64_all;
+                let total_elems_u64 = total_elems_u64_cfg;
+                let covered: u64 = covered_u64;
 
                 // Prepare target/threshold (64-byte big-endian) for device
                 let target_be = ctx.target.to_big_endian();
