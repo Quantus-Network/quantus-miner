@@ -250,6 +250,18 @@ static SAMPLE_MISMATCH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     c
 });
 
+static MISSED_WINNER_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new(
+        "miner_gpu_g2_missed_winner_total",
+        "Host detected a winner in G2 batch sample but device did not flag early-exit",
+    )
+    .expect("create miner_gpu_g2_missed_winner_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_gpu_g2_missed_winner_total");
+    c
+});
+
 static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -376,6 +388,10 @@ pub fn inc_candidates_false_positive(engine: &str) {
 
 pub fn inc_sample_mismatch(engine: &str) {
     SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
+}
+
+pub fn inc_gpu_g2_missed_winner() {
+    MISSED_WINNER_TOTAL.inc();
 }
 
 pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {

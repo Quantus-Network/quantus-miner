@@ -586,6 +586,7 @@ impl CudaEngine {
                             .copy_to(&mut h_idx)
                             .with_context(|| "copy index (batch)")?;
                         let k = h_idx[0] as u64;
+                        log::info!(target: "miner", "CUDA G2(batch): found flag set k={}", k);
                         hash_count = hash_count.saturating_add(k + 1);
                         // Decode (t,j) for this batch
                         let mut t_idx = (k as usize) / (effective_iters as usize);
@@ -635,6 +636,44 @@ impl CudaEngine {
                                 "CUDA G2(batch): false positive: idx={}, y[0..16]={}, dev_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}",
                                 k, y_hex, h_hex, dev_dist_hex, host_dist_hex
                             );
+                        }
+                    }
+                    // Optional host-side verify of first W candidates when MINER_CUDA_VERIFY is set
+                    if std::env::var("MINER_CUDA_VERIFY")
+                        .ok()
+                        .map(|v| v != "0" && !v.is_empty())
+                        .unwrap_or(false)
+                    {
+                        let sample: usize = std::env::var("MINER_CUDA_VERIFY")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1024usize);
+                        let eff_usize = effective_iters as usize;
+                        let max_k = std::cmp::min(sample, covered as usize);
+                        let mut missed_logged = false;
+                        for k in 0..max_k {
+                            let t = k / eff_usize;
+                            let j = k % eff_usize;
+                            if t >= base_nonces.len() {
+                                break;
+                            }
+                            let nonce =
+                                base_nonces[t].saturating_add(U512::from(1u64 + (j as u64)));
+                            let d = pow_core::distance_for_nonce(ctx, nonce);
+                            if pow_core::is_valid_distance(ctx, d) && h_found[0] == 0 {
+                                log::warn!(target: "miner",
+                                    "CUDA G2(batch): host-only winner missed: k={}, nonce={}, distance={}",
+                                    k, nonce, d);
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics::inc_gpu_g2_missed_winner();
+                                }
+                                missed_logged = true;
+                                break;
+                            }
+                        }
+                        if !missed_logged {
+                            log::debug!(target: "miner", "CUDA G2(batch): verify sample={} no host-only winners", max_k);
                         }
                     }
                     // Estimated device attempt rate for this batch (nonces/sec)
