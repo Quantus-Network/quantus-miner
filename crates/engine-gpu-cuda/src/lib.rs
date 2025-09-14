@@ -325,11 +325,35 @@ impl CudaEngine {
             // Use many iterations per thread to reduce host exponentiations per launch
             let grid_dim = ((num_threads + block_dim - 1) / block_dim).max(1);
 
-            // Prepare per-thread y0 for base nonces: current + t
+            // Compute effective iterations per thread based on remaining coverage for this launch
+            let rem_be_all = end.saturating_sub(current).to_big_endian();
+            let over_u64_all = rem_be_all[..56].iter().any(|&b| b != 0);
+            let total_elems_u64_cfg = (num_threads as u64) * (iters_per_thread as u64);
+            let mut covered_u64 = if over_u64_all {
+                total_elems_u64_cfg
+            } else {
+                let mut last8 = [0u8; 8];
+                last8.copy_from_slice(&rem_be_all[56..64]);
+                let rem_low = u64::from_be_bytes(last8);
+                std::cmp::min(total_elems_u64_cfg, rem_low)
+            };
+            let mut effective_iters: u64 = iters_per_thread as u64;
+            if covered_u64 < total_elems_u64_cfg {
+                // Distribute coverage across threads (ceil-div), but cap to configured iters
+                let per_thread = (covered_u64 + (num_threads as u64) - 1) / (num_threads as u64);
+                effective_iters = std::cmp::min(effective_iters, per_thread.max(1));
+                // Cap covered to the actual total elements we will attempt
+                let max_cover = (num_threads as u64) * effective_iters;
+                if covered_u64 > max_cover {
+                    covered_u64 = max_cover;
+                }
+            }
+
+            // Prepare per-thread y0 for base nonces: current + t (stride = effective iters)
             let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
             let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
             for t in 0..(num_threads as usize) {
-                let stride = iters_per_thread as u64;
+                let stride = effective_iters as u64;
                 let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
                 base_nonces[t] = base_nonce;
                 let y0_u512 = pow_core::init_worker_y0(ctx, base_nonce);
@@ -487,7 +511,7 @@ impl CudaEngine {
                         }
                     }
                 }
-                log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}");
+                log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={effective_iters}");
                 let current_be = current.to_big_endian();
                 let end_be = end.to_big_endian();
                 let cur_prefix = hex::encode(&current_be[..16]);
@@ -600,8 +624,8 @@ impl CudaEngine {
                     hash_count = hash_count.saturating_add(k + 1);
 
                     // Compute nonce from linear index (t, j)
-                    let mut t_idx = (k as usize) / (iters_per_thread as usize);
-                    let mut j_idx = (k as usize) % (iters_per_thread as usize);
+                    let mut t_idx = (k as usize) / (effective_iters as usize);
+                    let mut j_idx = (k as usize) % (effective_iters as usize);
                     // Prefer winner coordinates returned via device buffers when available
                     let mut h_win_tid = [u32::MAX; 1];
                     let mut h_win_j = [u32::MAX; 1];
@@ -611,7 +635,7 @@ impl CudaEngine {
                     if h_win_tid[0] != u32::MAX
                         && h_win_j[0] != u32::MAX
                         && (h_win_tid[0] as usize) < (num_threads as usize)
-                        && (h_win_j[0] as usize) < (iters_per_thread as usize)
+                        && (h_win_j[0] as usize) < (effective_iters as usize)
                     {
                         t_idx = h_win_tid[0] as usize;
                         j_idx = h_win_j[0] as usize;
@@ -792,7 +816,7 @@ impl CudaEngine {
                         d_y0.as_device_ptr(),
                         d_y_out.as_device_ptr(),
                         num_threads as u32,
-                        iters_per_thread as u32
+                        effective_iters as u32
                     ))
                 };
                 launch_result.with_context(|| "launch kernel")?;
