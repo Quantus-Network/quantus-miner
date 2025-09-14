@@ -233,8 +233,8 @@ impl MiningService {
                     metrics::set_hash_rate(total_rate);
                     metrics::set_active_jobs(running_jobs);
                 }
-                drop(jobs_guard);
-                if last_watchdog.elapsed().as_secs() >= 30 {
+                let do_watchdog = last_watchdog.elapsed().as_secs() >= 30;
+                let (total, running, completed, failed, cancelled) = if do_watchdog {
                     let mut running = 0usize;
                     let mut completed = 0usize;
                     let mut cancelled = 0usize;
@@ -248,6 +248,12 @@ impl MiningService {
                             JobStatus::Failed => failed += 1,
                         }
                     }
+                    (total, running, completed, failed, cancelled)
+                } else {
+                    (0, 0, 0, 0, 0)
+                };
+                drop(jobs_guard);
+                if do_watchdog {
                     log::info!(
                         target: "miner",
                         "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, loop_iter={}",

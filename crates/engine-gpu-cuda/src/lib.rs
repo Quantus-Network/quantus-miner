@@ -57,12 +57,31 @@ include!(concat!(env!("OUT_DIR"), "/ptx_bindings.rs"));
 
 /// CUDA engine with host-side G1 launcher and CPU fallback.
 #[derive(Default, Debug)]
-pub struct CudaEngine;
+pub struct CudaEngine {
+    #[cfg(feature = "cuda")]
+    cache: std::sync::Mutex<Option<CudaCache>>,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+struct CudaCache {
+    context: cuda::context::Context,
+    module: cuda::module::Module,
+}
 
 impl CudaEngine {
     /// Construct a new CUDA engine.
     pub fn new() -> Self {
-        Self
+        #[cfg(feature = "cuda")]
+        {
+            Self {
+                cache: std::sync::Mutex::new(None),
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Self
+        }
     }
 
     /// Human-readable name for logs/metrics.
@@ -124,65 +143,22 @@ impl CudaEngine {
             return Ok(EngineStatus::Exhausted { hash_count: 0 });
         }
 
-        // Initialize CUDA context and keep it current for the entire GPU work scope
-        let (_context, _ctx_guard) = match cuda::quick_init() {
-            Ok(ctx) => {
-                // Ensure the context stays current while this function runs
-                let guard = ContextStack::push(&ctx)?;
-                (ctx, guard)
-            }
-            Err(e) => {
-                log::warn!(target: "miner", "CUDA quick_init failed: {e:?}; attempting manual device/context init");
-                let dev = Device::get_device(0)?;
-                let ctx = Context::new(dev)?;
-                let guard = ContextStack::push(&ctx)?;
-                (ctx, guard)
-            }
-        };
+        // Initialize/reuse CUDA context and module from engine cache; create a fresh stream per call.
+        let mut cache_guard = self.cache.lock().expect("CudaEngine cache mutex poisoned");
 
-        // Prefer embedded CUBIN (native SASS) by default; allow env override; fall back to embedded/env PTX if unavailable.
-        let image_override = std::env::var("MINER_CUDA_IMAGE")
-            .ok()
-            .map(|s| s.to_ascii_lowercase());
-        let module = match image_override.as_deref() {
-            Some("ptx") => {
-                // Force PTX
-                let (ptx_text, ptx_origin) = if let Some(s) = ptx_embedded::get("qpow_kernel") {
-                    (s.to_string(), String::from("embedded"))
-                } else {
-                    let ptx_dir = std::env::var("ENGINE_GPU_CUDA_PTX_DIR").map_err(|_| {
-                        anyhow::anyhow!("ENGINE_GPU_CUDA_PTX_DIR not set and no embedded PTX")
-                    })?;
-                    let ptx_path = std::path::Path::new(&ptx_dir).join("qpow_kernel.ptx");
-                    let txt = std::fs::read_to_string(&ptx_path).map_err(|e| {
-                        anyhow::anyhow!("failed to read PTX at {}: {e}", ptx_path.display())
-                    })?;
-                    (txt, format!("env:{}", ptx_path.display()))
-                };
-                log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin} (forced by MINER_CUDA_IMAGE=ptx)");
-                let ptx_cstr = CString::new(ptx_text)?;
-                cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
-                    .with_context(|| "load PTX module")?
-            }
-            Some("cubin") => {
-                // Force CUBIN
-                if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
-                    log::info!(target: "miner", "CUDA: using CUBIN (embedded) (forced by MINER_CUDA_IMAGE=cubin)");
-                    cuda::module::Module::from_cubin(cubin, &[])
-                        .with_context(|| "load CUBIN module")?
-                } else {
-                    anyhow::bail!(
-                        "MINER_CUDA_IMAGE=cubin requested but no embedded CUBIN image was found"
-                    );
-                }
-            }
-            _ => {
-                if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
-                    log::info!(target: "miner", "CUDA: using CUBIN (embedded)");
-                    cuda::module::Module::from_cubin(cubin, &[])
-                        .with_context(|| "load CUBIN module")?
-                } else {
-                    // Load PTX module: prefer embedded PTX; fall back to env-dir PTX
+        if cache_guard.is_none() {
+            // Create device/context once and load the module based on env selection.
+            let dev = Device::get_device(0)?;
+            let ctx = Context::new(dev)?;
+            let _push = ContextStack::push(&ctx)?;
+
+            // Prefer embedded CUBIN (native SASS) by default; allow env override; fall back to embedded/env PTX if unavailable.
+            let image_override = std::env::var("MINER_CUDA_IMAGE")
+                .ok()
+                .map(|s| s.to_ascii_lowercase());
+            let loaded_module = match image_override.as_deref() {
+                Some("ptx") => {
+                    // Force PTX
                     let (ptx_text, ptx_origin) = if let Some(s) = ptx_embedded::get("qpow_kernel") {
                         (s.to_string(), String::from("embedded"))
                     } else {
@@ -195,13 +171,66 @@ impl CudaEngine {
                         })?;
                         (txt, format!("env:{}", ptx_path.display()))
                     };
-                    log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin}");
+                    log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin} (forced by MINER_CUDA_IMAGE=ptx)");
                     let ptx_cstr = CString::new(ptx_text)?;
                     cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
                         .with_context(|| "load PTX module")?
                 }
-            }
-        };
+                Some("cubin") => {
+                    // Force CUBIN
+                    if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
+                        log::info!(target: "miner", "CUDA: using CUBIN (embedded) (forced by MINER_CUDA_IMAGE=cubin)");
+                        cuda::module::Module::from_cubin(cubin, &[])
+                            .with_context(|| "load CUBIN module")?
+                    } else {
+                        anyhow::bail!(
+                                    "MINER_CUDA_IMAGE=cubin requested but no embedded CUBIN image was found"
+                                );
+                    }
+                }
+                _ => {
+                    if let Some(cubin) = cubin_embedded::get_cubin("qpow_kernel") {
+                        log::info!(target: "miner", "CUDA: using CUBIN (embedded)");
+                        cuda::module::Module::from_cubin(cubin, &[])
+                            .with_context(|| "load CUBIN module")?
+                    } else {
+                        // Load PTX module: prefer embedded PTX; fall back to env-dir PTX
+                        let (ptx_text, ptx_origin) = if let Some(s) =
+                            ptx_embedded::get("qpow_kernel")
+                        {
+                            (s.to_string(), String::from("embedded"))
+                        } else {
+                            let ptx_dir =
+                                std::env::var("ENGINE_GPU_CUDA_PTX_DIR").map_err(|_| {
+                                    anyhow::anyhow!(
+                                        "ENGINE_GPU_CUDA_PTX_DIR not set and no embedded PTX"
+                                    )
+                                })?;
+                            let ptx_path = std::path::Path::new(&ptx_dir).join("qpow_kernel.ptx");
+                            let txt = std::fs::read_to_string(&ptx_path).map_err(|e| {
+                                anyhow::anyhow!("failed to read PTX at {}: {e}", ptx_path.display())
+                            })?;
+                            (txt, format!("env:{}", ptx_path.display()))
+                        };
+                        log::info!(target: "miner", "CUDA: using PTX source = {ptx_origin}");
+                        let ptx_cstr = CString::new(ptx_text)?;
+                        cuda::module::Module::from_ptx_cstr(&ptx_cstr, &[])
+                            .with_context(|| "load PTX module")?
+                    }
+                }
+            };
+
+            *cache_guard = Some(CudaCache {
+                context: ctx,
+                module: loaded_module,
+            });
+        }
+
+        // Make cached context current for this thread and keep guard alive for module ref lifetime.
+        let cache_ref = cache_guard.as_ref().expect("cache initialized");
+        let _ctx_guard = ContextStack::push(&cache_ref.context)?;
+        let module_ref = &cache_ref.module;
+
         let stream = cuda::stream::Stream::new(cuda::stream::StreamFlags::DEFAULT, None)
             .with_context(|| "create stream")?;
         // Select kernel by mode; try G2 when requested, otherwise use G1. If G2 unavailable, fall back to G1.
@@ -213,7 +242,7 @@ impl CudaEngine {
             _ => "qpow_montgomery_g1_kernel",
         };
         let is_g2;
-        let func = match module.get_function(func_name) {
+        let func = match module_ref.get_function(func_name) {
             Ok(f) => {
                 is_g2 = func_name == "qpow_montgomery_g2_kernel";
                 f
@@ -222,7 +251,7 @@ impl CudaEngine {
                 if func_name == "qpow_montgomery_g2_kernel" {
                     log::warn!(target: "miner", "CUDA: G2 kernel unavailable ({e:?}); falling back to G1");
                     is_g2 = false;
-                    module
+                    module_ref
                         .get_function("qpow_montgomery_g1_kernel")
                         .with_context(|| "get kernel function 'qpow_montgomery_g1_kernel'")?
                 } else {
@@ -239,7 +268,7 @@ impl CudaEngine {
         // Probe device kernel ABI version if symbol is present (best-effort)
         if is_g2 {
             if let Ok(sym) =
-                module.get_global::<u32>(std::ffi::CString::new("C_ABI_VERSION")?.as_c_str())
+                module_ref.get_global::<u32>(std::ffi::CString::new("C_ABI_VERSION")?.as_c_str())
             {
                 let mut abi: u32 = 0;
                 if sym.copy_to(&mut abi).is_ok() {
@@ -323,7 +352,15 @@ impl CudaEngine {
 
             let num_threads = threads;
             // Use many iterations per thread to reduce host exponentiations per launch
-            let grid_dim = ((num_threads + block_dim - 1) / block_dim).max(1);
+            let sm_count = cust::device::Device::get_device(0)
+                .ok()
+                .and_then(|dev| {
+                    dev.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)
+                        .ok()
+                })
+                .unwrap_or(1) as u32;
+            let grid_dim =
+                std::cmp::max(((num_threads + block_dim - 1) / block_dim).max(1), sm_count);
 
             // Compute effective iterations per thread based on remaining coverage for this launch
             let rem_be_all = end.saturating_sub(current).to_big_endian();
@@ -398,13 +435,13 @@ impl CudaEngine {
                         Ok(mut c_thresh),
                         Ok(mut c_ready),
                     ) = (
-                        module.get_global::<[u64; 8]>(CString::new("C_N")?.as_c_str()),
-                        module.get_global::<[u64; 8]>(CString::new("C_R2")?.as_c_str()),
-                        module.get_global::<[u64; 8]>(CString::new("C_MHAT")?.as_c_str()),
-                        module.get_global::<u64>(CString::new("C_N0_INV")?.as_c_str()),
-                        module.get_global::<[u64; 8]>(CString::new("C_TARGET")?.as_c_str()),
-                        module.get_global::<[u64; 8]>(CString::new("C_THRESH")?.as_c_str()),
-                        module.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str()),
+                        module_ref.get_global::<[u64; 8]>(CString::new("C_N")?.as_c_str()),
+                        module_ref.get_global::<[u64; 8]>(CString::new("C_R2")?.as_c_str()),
+                        module_ref.get_global::<[u64; 8]>(CString::new("C_MHAT")?.as_c_str()),
+                        module_ref.get_global::<u64>(CString::new("C_N0_INV")?.as_c_str()),
+                        module_ref.get_global::<[u64; 8]>(CString::new("C_TARGET")?.as_c_str()),
+                        module_ref.get_global::<[u64; 8]>(CString::new("C_THRESH")?.as_c_str()),
+                        module_ref.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str()),
                     ) {
                         // Copy constants into constant memory
                         c_n.copy_from(&n_le)?;
@@ -427,24 +464,24 @@ impl CudaEngine {
                                 Ok(mut c_samp_index),
                                 Ok(mut c_samp_dec),
                             ) = (
-                                module.get_global::<i32>(
+                                module_ref.get_global::<i32>(
                                     CString::new("C_SAMPLER_ENABLE")?.as_c_str(),
                                 ),
-                                module.get_global::<[u8; 64]>(
+                                module_ref.get_global::<[u8; 64]>(
                                     CString::new("C_SAMPLER_Y_BE")?.as_c_str(),
                                 ),
-                                module.get_global::<[u8; 64]>(
+                                module_ref.get_global::<[u8; 64]>(
                                     CString::new("C_SAMPLER_H_BE")?.as_c_str(),
                                 ),
-                                module.get_global::<[u8; 64]>(
+                                module_ref.get_global::<[u8; 64]>(
                                     CString::new("C_SAMPLER_TARGET_BE")?.as_c_str(),
                                 ),
-                                module.get_global::<[u8; 64]>(
+                                module_ref.get_global::<[u8; 64]>(
                                     CString::new("C_SAMPLER_THRESH_BE")?.as_c_str(),
                                 ),
-                                module
+                                module_ref
                                     .get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
-                                module.get_global::<u32>(
+                                module_ref.get_global::<u32>(
                                     CString::new("C_SAMPLER_DECISION")?.as_c_str(),
                                 ),
                             ) {
@@ -470,7 +507,7 @@ impl CudaEngine {
                             } else {
                                 1
                             };
-                            if let Ok(mut c_force) = module
+                            if let Ok(mut c_force) = module_ref
                                 .get_global::<i32>(CString::new("C_DEBUG_FORCE_WIN")?.as_c_str())
                             {
                                 c_force.copy_from(&force)?;
@@ -482,8 +519,8 @@ impl CudaEngine {
                             } else {
                                 log::warn!(target: "miner", "CUDA G2: MINER_CUDA_FORCE_WIN set but device symbol C_DEBUG_FORCE_WIN unavailable");
                             }
-                        } else if let Ok(mut c_force) =
-                            module.get_global::<i32>(CString::new("C_DEBUG_FORCE_WIN")?.as_c_str())
+                        } else if let Ok(mut c_force) = module_ref
+                            .get_global::<i32>(CString::new("C_DEBUG_FORCE_WIN")?.as_c_str())
                         {
                             let zero: i32 = 0;
                             let _ = c_force.copy_from(&zero);
@@ -495,7 +532,7 @@ impl CudaEngine {
                     }
                     if !consts_ready_set {
                         if let Ok(mut c_ready) =
-                            module.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str())
+                            module_ref.get_global::<i32>(CString::new("C_CONSTS_READY")?.as_c_str())
                         {
                             let zero: i32 = 0;
                             c_ready.copy_from(&zero)?;
@@ -532,7 +569,17 @@ impl CudaEngine {
                         active_threads = num_threads as u64;
                     }
                     let active_threads_usize = active_threads as usize;
-                    let grid_dim = (((active_threads as u32) + block_dim - 1) / block_dim).max(1);
+                    let sm_count = cust::device::Device::get_device(0)
+                        .ok()
+                        .and_then(|dev| {
+                            dev.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)
+                                .ok()
+                        })
+                        .unwrap_or(1) as u32;
+                    let grid_dim = std::cmp::max(
+                        (((active_threads as u32) + block_dim - 1) / block_dim).max(1),
+                        sm_count,
+                    );
                     let force_enabled = std::env::var("MINER_CUDA_FORCE_WIN")
                         .ok()
                         .map(|v| v != "0" && !v.is_empty() && !v.eq_ignore_ascii_case("false"))
@@ -785,15 +832,18 @@ impl CudaEngine {
                     .unwrap_or(false)
                 {
                     if let (Ok(c_en), Ok(c_idx), Ok(c_dec), Ok(c_y), Ok(c_h), Ok(c_t), Ok(c_th)) = (
-                        module.get_global::<i32>(CString::new("C_SAMPLER_ENABLE")?.as_c_str()),
-                        module.get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
-                        module.get_global::<u32>(CString::new("C_SAMPLER_DECISION")?.as_c_str()),
-                        module.get_global::<[u8; 64]>(CString::new("C_SAMPLER_Y_BE")?.as_c_str()),
-                        module.get_global::<[u8; 64]>(CString::new("C_SAMPLER_H_BE")?.as_c_str()),
-                        module.get_global::<[u8; 64]>(
+                        module_ref.get_global::<i32>(CString::new("C_SAMPLER_ENABLE")?.as_c_str()),
+                        module_ref.get_global::<u32>(CString::new("C_SAMPLER_INDEX")?.as_c_str()),
+                        module_ref
+                            .get_global::<u32>(CString::new("C_SAMPLER_DECISION")?.as_c_str()),
+                        module_ref
+                            .get_global::<[u8; 64]>(CString::new("C_SAMPLER_Y_BE")?.as_c_str()),
+                        module_ref
+                            .get_global::<[u8; 64]>(CString::new("C_SAMPLER_H_BE")?.as_c_str()),
+                        module_ref.get_global::<[u8; 64]>(
                             CString::new("C_SAMPLER_TARGET_BE")?.as_c_str(),
                         ),
-                        module.get_global::<[u8; 64]>(
+                        module_ref.get_global::<[u8; 64]>(
                             CString::new("C_SAMPLER_THRESH_BE")?.as_c_str(),
                         ),
                     ) {
