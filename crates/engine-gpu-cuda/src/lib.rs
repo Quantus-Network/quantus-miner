@@ -600,6 +600,7 @@ impl CudaEngine {
                     }
                     // Reconstruct nonce using the exact per-thread base nonce used for y0:
                     // nonce = base_nonces[t_idx] + (j_idx + 1)
+                    log::debug!(target: "miner", "CUDA G2: winner coords used: k={}, dev_tid={}, dev_j={}, used_tid={}, used_j={}", k, h_win_tid[0], h_win_j[0], t_idx, j_idx);
                     let base_nonce = base_nonces[t_idx];
                     let nonce = base_nonce.saturating_add(U512::from(1u64 + (j_idx as u64)));
 
@@ -719,6 +720,20 @@ impl CudaEngine {
                             dist_col_p0_hex,
                             target_hex,
                             thresh_hex
+                        );
+                        // Winner coordinates diagnostic for FP analysis
+                        log::warn!(
+                            target: "miner",
+                            "CUDA G2: fp details: idx={}, win_tid={}, win_j={}, used_tid={}, used_j={}, used_dev={}",
+                            k,
+                            h_win_tid[0],
+                            h_win_j[0],
+                            t_idx,
+                            j_idx,
+                            (h_win_tid[0] != u32::MAX
+                                && h_win_j[0] != u32::MAX
+                                && (h_win_tid[0] as usize) < (num_threads as usize)
+                                && (h_win_j[0] as usize) < (iters_per_thread as usize))
                         );
                         #[cfg(feature = "metrics")]
                         {
