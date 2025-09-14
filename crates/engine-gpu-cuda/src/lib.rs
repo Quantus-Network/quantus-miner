@@ -507,10 +507,25 @@ impl CudaEngine {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1);
                 for _batch in 0..batches {
-                    let desired_iters: u64 = std::env::var("MINER_CUDA_DESIRED_ITERS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1024);
+                    let desired_iters: u64 = {
+                        if let Some(v) = std::env::var("MINER_CUDA_DESIRED_ITERS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                        {
+                            v
+                        } else {
+                            // Auto-tune: try to cover the window in one batch (bounded by iters_per_thread)
+                            let auto = ((covered + (num_threads as u64) - 1)
+                                / (num_threads as u64))
+                                .max(1);
+                            std::cmp::min(auto, iters_per_thread as u64)
+                        }
+                    };
+                    log::debug!(
+                        target: "miner",
+                        "CUDA G2 autotune: desired_iters={}, covered={}, num_threads={}, iters_per_thread={}",
+                        desired_iters, covered, num_threads, iters_per_thread
+                    );
                     let mut active_threads: u64 =
                         ((covered + desired_iters - 1) / desired_iters).max(1);
                     if active_threads > num_threads as u64 {
@@ -522,7 +537,17 @@ impl CudaEngine {
                         .ok()
                         .map(|v| v != "0" && !v.is_empty() && !v.eq_ignore_ascii_case("false"))
                         .unwrap_or(false);
-                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, batches={batches}, force_win={}", active_threads, force_enabled);
+                    let attempts: u64 = active_threads * (effective_iters as u64);
+                    let utilization: f64 = if covered > 0 {
+                        (attempts as f64) / (covered as f64)
+                    } else {
+                        0.0
+                    };
+                    log::info!(
+                        target: "miner",
+                        "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, attempts={}, covered={}, util={:.3}, batches={batches}, force_win={}",
+                        active_threads, attempts, covered, utilization, force_enabled
+                    );
                     let current_be = current.to_big_endian();
                     let end_be = end.to_big_endian();
                     let cur_prefix = hex::encode(&current_be[..16]);
