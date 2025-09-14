@@ -349,22 +349,7 @@ impl CudaEngine {
                 }
             }
 
-            // Prepare per-thread y0 for base nonces: current + t (stride = effective iters)
-            let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
-            let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
-            for t in 0..(num_threads as usize) {
-                let stride = effective_iters as u64;
-                let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
-                base_nonces[t] = base_nonce;
-                let y0_u512 = pow_core::init_worker_y0(ctx, base_nonce);
-                let y0_le = u512_to_le_limbs(y0_u512);
-                let off = t * 8;
-                y0_host[off..off + 8].copy_from_slice(&y0_le);
-            }
-
-            // Prepare/update per-chunk inputs
-            let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
-                .with_context(|| "alloc/copy d_y0")?;
+            // Prepare/update per-chunk inputs (y0/base_nonces are prepared per-batch in G2 and G1 paths)
             let d_y_out = cuda::memory::DeviceBuffer::<u64>::zeroed(
                 (num_threads as usize) * (iters_per_thread as usize) * 8,
             )
@@ -386,22 +371,7 @@ impl CudaEngine {
                 let d_threshold = cuda::memory::DeviceBuffer::<u8>::from_slice(&threshold_be)
                     .with_context(|| "alloc/copy d_threshold")?;
 
-                // Early-exit outputs
-                let d_found = cuda::memory::DeviceBuffer::<i32>::from_slice(&[0i32])
-                    .with_context(|| "alloc/copy d_found")?;
-                let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
-                    .with_context(|| "alloc/copy d_index")?;
-                // Winner coordinates (thread id and iteration)
-                let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
-                    .with_context(|| "alloc/copy d_win_tid")?;
-                let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
-                    .with_context(|| "alloc/copy d_win_j")?;
-                let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
-                    .with_context(|| "alloc d_distance")?;
-                let d_dbg_y = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
-                    .with_context(|| "alloc d_dbg_y")?;
-                let d_dbg_h = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
-                    .with_context(|| "alloc d_dbg_h")?;
+                // Early-exit outputs are allocated per-batch in the G2 batching path
 
                 // Launch G2 kernel
                 // Attempt to populate __constant__ symbols for per-job constants (G2 fast path).
@@ -536,6 +506,35 @@ impl CudaEngine {
                         over_u64,
                         total_elems_u64
                     );
+                    // Rebuild per-batch base nonces and y0 (stride = effective iters)
+                    let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
+                    let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
+                    for t in 0..(num_threads as usize) {
+                        let stride = effective_iters as u64;
+                        let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
+                        base_nonces[t] = base_nonce;
+                        let y0_u512 = pow_core::init_worker_y0(ctx, base_nonce);
+                        let y0_le = u512_to_le_limbs(y0_u512);
+                        let off = t * 8;
+                        y0_host[off..off + 8].copy_from_slice(&y0_le);
+                    }
+                    let d_y0_b = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
+                        .with_context(|| "alloc/copy d_y0 (batch)")?;
+                    // Per-batch early-exit outputs
+                    let d_found = cuda::memory::DeviceBuffer::<i32>::from_slice(&[0i32])
+                        .with_context(|| "alloc/copy d_found (batch)")?;
+                    let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
+                        .with_context(|| "alloc/copy d_index (batch)")?;
+                    let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
+                        .with_context(|| "alloc/copy d_win_tid (batch)")?;
+                    let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
+                        .with_context(|| "alloc/copy d_win_j (batch)")?;
+                    let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                        .with_context(|| "alloc d_distance (batch)")?;
+                    let d_dbg_y = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                        .with_context(|| "alloc d_dbg_y (batch)")?;
+                    let d_dbg_h = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
+                        .with_context(|| "alloc d_dbg_h (batch)")?;
                     let t_kernel_start = std::time::Instant::now();
                     let launch_result = unsafe {
                         launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -544,7 +543,7 @@ impl CudaEngine {
                             n0_inv as u64,
                             d_r2.as_device_ptr(),
                             d_mhat.as_device_ptr(),
-                            d_y0.as_device_ptr(),
+                            d_y0_b.as_device_ptr(),
                             d_target.as_device_ptr(),
                             d_threshold.as_device_ptr(),
                             d_found.as_device_ptr(),
@@ -723,185 +722,6 @@ impl CudaEngine {
                                 }
                             }
                         }
-                    }
-                }
-
-                // Copy back early-exit flag (and details if found)
-                let mut h_found = [0i32; 1];
-                d_found
-                    .copy_to(&mut h_found)
-                    .with_context(|| "copy found flag")?;
-                if h_found[0] != 0 {
-                    let mut h_idx = [0u32; 1];
-                    d_index.copy_to(&mut h_idx).with_context(|| "copy index")?;
-                    let k = h_idx[0] as u64;
-                    // Account: include the winning step
-                    hash_count = hash_count.saturating_add(k + 1);
-
-                    // Compute nonce from linear index (t, j)
-                    let mut t_idx = (k as usize) / (effective_iters as usize);
-                    let mut j_idx = (k as usize) % (effective_iters as usize);
-                    // Prefer winner coordinates returned via device buffers when available
-                    let mut h_win_tid = [u32::MAX; 1];
-                    let mut h_win_j = [u32::MAX; 1];
-                    // Prefer device-returned winner coordinates; fall back to k-derived indices only if unavailable/invalid
-                    let _ = d_win_tid.copy_to(&mut h_win_tid);
-                    let _ = d_win_j.copy_to(&mut h_win_j);
-                    if h_win_tid[0] != u32::MAX
-                        && h_win_j[0] != u32::MAX
-                        && (h_win_tid[0] as usize) < (num_threads as usize)
-                        && (h_win_j[0] as usize) < (effective_iters as usize)
-                    {
-                        t_idx = h_win_tid[0] as usize;
-                        j_idx = h_win_j[0] as usize;
-                    } else {
-                        log::debug!(target: "miner", "CUDA G2: winner (tid,j) readback unavailable/invalid; falling back to k-derived indices");
-                    }
-                    // Reconstruct nonce using the exact per-thread base nonce used for y0:
-                    // nonce = base_nonces[t_idx] + (j_idx + 1)
-                    log::debug!(target: "miner", "CUDA G2: winner coords used: k={}, dev_tid={}, dev_j={}, used_tid={}, used_j={}", k, h_win_tid[0], h_win_j[0], t_idx, j_idx);
-                    let base_nonce = base_nonces[t_idx];
-                    let nonce = base_nonce.saturating_add(U512::from(1u64 + (j_idx as u64)));
-
-                    // Copy back distance (optional for completeness; threshold was already satisfied)
-                    let mut h_dist = [0u8; 64];
-                    d_distance
-                        .copy_to(&mut h_dist)
-                        .with_context(|| "copy distance")?;
-
-                    let work = nonce.to_big_endian();
-                    // Host re-verification to ensure device result matches chain semantics
-                    let host_distance = pow_core::distance_for_nonce(ctx, nonce);
-                    if pow_core::is_valid_distance(ctx, host_distance) {
-                        log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
-                        return Ok(EngineStatus::Found {
-                            candidate: engine_cpu::EngineCandidate {
-                                nonce,
-                                work,
-                                distance: host_distance,
-                            },
-                            hash_count,
-                        });
-                    } else {
-                        // Treat as not found: account coverage and advance like the "not found" path
-                        // Copy debug y/h bytes from device and log first 16 bytes (hex) for diagnosis
-                        let mut dbg_y = [0u8; 64];
-                        let mut dbg_h = [0u8; 64];
-                        // Ignore copy errors in logging path; continue accounting regardless
-                        let _ = d_dbg_y.copy_to(&mut dbg_y);
-                        let _ = d_dbg_h.copy_to(&mut dbg_h);
-                        let y_hex = hex::encode(&dbg_y[..16]);
-                        let h_hex = hex::encode(&dbg_h[..16]);
-                        // Compute richer diagnostics (host hash, host/device distances, target/threshold prefixes)
-                        let y_u512 = U512::from_big_endian(&dbg_y);
-                        let host_hash_u512 = pow_core::compat::sha3_512(y_u512);
-                        let host_hash_be = host_hash_u512.to_big_endian();
-                        let host_hash_hex = hex::encode(&host_hash_be[..16]);
-
-                        // Device distance bytes (already written by kernel) and host distance bytes
-                        let dev_dist_hex = hex::encode(&h_dist[..16]);
-                        let host_dist_be = host_distance.to_big_endian();
-                        let host_dist_hex = hex::encode(&host_dist_be[..16]);
-
-                        // Additionally compute expected host distance directly from dbg_y to diagnose nonce/target mismatches
-                        let host_dist_from_y = pow_core::distance_from_y(ctx, y_u512);
-                        let host_dist_y_be = host_dist_from_y.to_big_endian();
-                        let host_dist_y_hex = hex::encode(&host_dist_y_be[..16]);
-
-                        // Target/threshold prefixes
-                        let target_be = ctx.target.to_big_endian();
-                        let thresh_be = ctx.threshold.to_big_endian();
-                        let target_hex = hex::encode(&target_be[..16]);
-                        let thresh_hex = hex::encode(&thresh_be[..16]);
-
-                        // Device decided "found" (dev_ok=true) but host rejected (host_ok=false)
-                        // Additional diagnostics: compute alternative nonce mappings to detect index reconstruction mismatches.
-                        let iters_usize = iters_per_thread as usize;
-                        let threads_usize = num_threads as usize;
-                        let k_usize = k as usize;
-
-                        // Row-major (+1): t = k / iters, j = k % iters
-                        let t_row = k_usize / iters_usize;
-                        let j_row = k_usize % iters_usize;
-                        let nonce_row_p1 = current.saturating_add(U512::from(
-                            1u64 + (t_row as u64) * (iters_per_thread as u64) + (j_row as u64),
-                        ));
-                        let dist_row_p1 = pow_core::distance_for_nonce(ctx, nonce_row_p1);
-                        let dist_row_p1_hex = {
-                            let be = dist_row_p1.to_big_endian();
-                            hex::encode(&be[..16])
-                        };
-
-                        // Column-major (+1): t = k % threads, j = k / threads
-                        let t_col = k_usize % threads_usize;
-                        let j_col = k_usize / threads_usize;
-                        let nonce_col_p1 = current.saturating_add(U512::from(
-                            1u64 + (t_col as u64) * (iters_per_thread as u64) + (j_col as u64),
-                        ));
-                        let dist_col_p1 = pow_core::distance_for_nonce(ctx, nonce_col_p1);
-                        let dist_col_p1_hex = {
-                            let be = dist_col_p1.to_big_endian();
-                            hex::encode(&be[..16])
-                        };
-
-                        // Row-major (+0)
-                        let nonce_row_p0 = current.saturating_add(U512::from(
-                            (t_row as u64) * (iters_per_thread as u64) + (j_row as u64),
-                        ));
-                        let dist_row_p0 = pow_core::distance_for_nonce(ctx, nonce_row_p0);
-                        let dist_row_p0_hex = {
-                            let be = dist_row_p0.to_big_endian();
-                            hex::encode(&be[..16])
-                        };
-
-                        // Column-major (+0)
-                        let nonce_col_p0 = current.saturating_add(U512::from(
-                            (t_col as u64) * (iters_per_thread as u64) + (j_col as u64),
-                        ));
-                        let dist_col_p0 = pow_core::distance_for_nonce(ctx, nonce_col_p0);
-                        let dist_col_p0_hex = {
-                            let be = dist_col_p0.to_big_endian();
-                            hex::encode(&be[..16])
-                        };
-
-                        log::warn!(
-                            target: "miner",
-                            "CUDA G2: false positive: idx={k}, dev_ok=true host_ok=false; y[0..16]={}, dev_h[0..16]={}, host_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}, host_y_dist[0..16]={}, map_r+1[0..16]={}, map_c+1[0..16]={}, map_r+0[0..16]={}, map_c+0[0..16]={}, target[0..16]={}, thresh[0..16]={}",
-                            y_hex,
-                            h_hex,
-                            host_hash_hex,
-                            dev_dist_hex,
-                            host_dist_hex,
-                            host_dist_y_hex,
-                            dist_row_p1_hex,
-                            dist_col_p1_hex,
-                            dist_row_p0_hex,
-                            dist_col_p0_hex,
-                            target_hex,
-                            thresh_hex
-                        );
-                        // Winner coordinates diagnostic for FP analysis
-                        log::warn!(
-                            target: "miner",
-                            "CUDA G2: fp details: idx={}, win_tid={}, win_j={}, used_tid={}, used_j={}, used_dev={}",
-                            k,
-                            h_win_tid[0],
-                            h_win_j[0],
-                            t_idx,
-                            j_idx,
-                            (h_win_tid[0] != u32::MAX
-                                && h_win_j[0] != u32::MAX
-                                && (h_win_tid[0] as usize) < (num_threads as usize)
-                                && (h_win_j[0] as usize) < (iters_per_thread as usize))
-                        );
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics::inc_candidates_false_positive("gpu-cuda");
-                            metrics::inc_sample_mismatch("gpu-cuda");
-                        }
-                        hash_count = hash_count.saturating_add(covered);
-                        current = current.saturating_add(U512::from(1u64 + covered));
-                        continue;
                     }
                 }
 
