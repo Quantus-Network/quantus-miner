@@ -374,9 +374,11 @@ impl MiningJob {
             let ctx = ctx.clone();
             let engine = engine.clone();
 
+            let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
             let handle = thread::spawn(move || {
                 mine_range_with_engine(
                     thread_id,
+                    job_id,
                     engine.as_ref(),
                     ctx,
                     EngineRange { start, end },
@@ -589,6 +591,7 @@ impl MiningJob {
 
 fn mine_range_with_engine(
     thread_id: usize,
+    job_id: String,
     engine: &dyn MinerEngine,
     ctx: pow_core::JobContext,
     range: EngineRange,
@@ -597,7 +600,9 @@ fn mine_range_with_engine(
     progress_chunk_ms: u64,
 ) {
     log::debug!(
-        "Thread {} mining range {} to {} (inclusive)",
+        target: "miner",
+        "Job {} thread {} mining range {} to {} (inclusive)",
+        job_id,
         thread_id,
         range.start,
         range.end
@@ -627,6 +632,14 @@ fn mine_range_with_engine(
             end: current_end,
         };
 
+        log::debug!(
+            target: "miner",
+            "Job {} thread {} processing subrange {}..{} (inclusive)",
+            job_id,
+            thread_id,
+            sub_range.start,
+            sub_range.end
+        );
         let status = engine.search_range(&ctx, sub_range.clone(), &cancel_flag);
 
         match status {
@@ -651,7 +664,7 @@ fn mine_range_with_engine(
                     completed: true,
                 };
                 if sender.send(final_result).is_err() {
-                    log::warn!("Thread {thread_id} failed to send final result");
+                    log::warn!(target: "miner", "Job {} thread {} failed to send final result", job_id, thread_id);
                 }
                 done = true;
                 break;
@@ -665,8 +678,18 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!("Thread {thread_id} failed to send progress update");
+                    log::warn!(target: "miner", "Job {} thread {} failed to send progress update", job_id, thread_id);
                     break;
+                } else {
+                    log::debug!(
+                        target: "miner",
+                        "Job {} thread {} progress: hashed={} in subrange {}..{}",
+                        job_id,
+                        thread_id,
+                        hash_count,
+                        sub_range.start,
+                        sub_range.end
+                    );
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
@@ -678,7 +701,7 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.send(update).is_err() {
-                    log::warn!("Thread {thread_id} failed to send cancel update");
+                    log::warn!(target: "miner", "Job {} thread {} failed to send cancel update", job_id, thread_id);
                 }
                 done = true;
                 break;
@@ -703,11 +726,11 @@ fn mine_range_with_engine(
             completed: true,
         };
         if sender.send(final_result).is_err() {
-            log::warn!("Thread {thread_id} failed to send completion status after chunked search");
+            log::warn!(target: "miner", "Job {} thread {} failed to send completion status after chunked search", job_id, thread_id);
         }
     }
 
-    log::debug!("Thread {thread_id} completed.");
+    log::debug!(target: "miner", "Job {} thread {} completed.", job_id, thread_id);
 }
 
 /// Validates incoming mining requests for structural correctness.
