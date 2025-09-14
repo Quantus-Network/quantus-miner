@@ -479,7 +479,18 @@ impl CudaEngine {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1);
                 for _batch in 0..batches {
-                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={effective_iters}, batches={batches}");
+                    let desired_iters: u64 = std::env::var("MINER_CUDA_DESIRED_ITERS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1024);
+                    let mut active_threads: u64 =
+                        ((covered + desired_iters - 1) / desired_iters).max(1);
+                    if active_threads > num_threads as u64 {
+                        active_threads = num_threads as u64;
+                    }
+                    let active_threads_usize = active_threads as usize;
+                    let grid_dim = (((active_threads as u32) + block_dim - 1) / block_dim).max(1);
+                    log::info!(target: "miner", "CUDA G2 launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={}, iters={effective_iters}, batches={batches}", active_threads);
                     let current_be = current.to_big_endian();
                     let end_be = end.to_big_endian();
                     let cur_prefix = hex::encode(&current_be[..16]);
@@ -507,9 +518,9 @@ impl CudaEngine {
                         total_elems_u64
                     );
                     // Rebuild per-batch base nonces and y0 (stride = effective iters)
-                    let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
-                    let mut y0_host: Vec<u64> = vec![0u64; (num_threads as usize) * 8];
-                    for t in 0..(num_threads as usize) {
+                    let mut base_nonces: Vec<U512> = vec![U512::zero(); active_threads_usize];
+                    let mut y0_host: Vec<u64> = vec![0u64; active_threads_usize * 8];
+                    for t in 0..active_threads_usize {
                         let stride = effective_iters as u64;
                         let base_nonce = current.saturating_add(U512::from((t as u64) * stride));
                         base_nonces[t] = base_nonce;
@@ -553,7 +564,7 @@ impl CudaEngine {
                             d_distance.as_device_ptr(),
                             d_dbg_y.as_device_ptr(),
                             d_dbg_h.as_device_ptr(),
-                            num_threads as u32,
+                            active_threads as u32,
                             effective_iters as u32,
                             covered as u64
                         ))
@@ -585,7 +596,7 @@ impl CudaEngine {
                         let _ = d_win_j.copy_to(&mut h_win_j);
                         if h_win_tid[0] != u32::MAX
                             && h_win_j[0] != u32::MAX
-                            && (h_win_tid[0] as usize) < (num_threads as usize)
+                            && (h_win_tid[0] as usize) < active_threads_usize
                             && (h_win_j[0] as usize) < (effective_iters as usize)
                         {
                             t_idx = h_win_tid[0] as usize;
@@ -630,7 +641,7 @@ impl CudaEngine {
                     #[cfg(feature = "metrics")]
                     {
                         if kernel_ms > 0 {
-                            let attempts = (num_threads as u64) * (effective_iters as u64);
+                            let attempts = active_threads * (effective_iters as u64);
                             let rate = (attempts as f64) / ((kernel_ms as f64) / 1000.0);
                             let job_key = hex::encode(ctx.header);
                             metrics::job_estimated_rate("gpu-cuda", &job_key, rate);
