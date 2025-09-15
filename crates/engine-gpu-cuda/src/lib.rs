@@ -741,6 +741,30 @@ impl CudaEngine {
                                 "CUDA G2(batch): false positive: idx={}, y[0..16]={}, dev_h[0..16]={}, dev_dist[0..16]={}, host_dist[0..16]={}",
                                 k, y_hex, h_hex, dev_dist_hex, host_dist_hex
                             );
+
+                            // Optional: if sampler is enabled, log its last parity decision to aid debugging
+                            if std::env::var("MINER_CUDA_SAMPLER")
+                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false)
+                            {
+                                let cidx = std::ffi::CString::new("C_SAMPLER_INDEX").unwrap();
+                                let cdec = std::ffi::CString::new("C_SAMPLER_DECISION").unwrap();
+                                if let (Ok(sym_idx), Ok(sym_dec)) = (
+                                    module_ref.get_global::<u32>(cidx.as_c_str()),
+                                    module_ref.get_global::<u32>(cdec.as_c_str()),
+                                ) {
+                                    let mut s_idx: u32 = 0;
+                                    let mut s_dec: u32 = 0;
+                                    let _ = sym_idx.copy_to(&mut s_idx);
+                                    let _ = sym_dec.copy_to(&mut s_dec);
+                                    log::warn!(
+                                        target: "miner",
+                                        "CUDA G2 sampler parity (device): idx={}, dev_ok={}, host_ok=false",
+                                        s_idx,
+                                        s_dec != 0
+                                    );
+                                }
+                            }
                         }
                     }
                     // Optional host-side verify of first W candidates when MINER_CUDA_VERIFY is set
