@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "CLI binary to run the Quantus External Miner service"
-build = "build.rs"
-
 
 [features]
 default = []
