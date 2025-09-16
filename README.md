@@ -85,7 +85,7 @@ EOF
 # Install CUDA toolkit and versioned nvcc; drivers remain from RPM Fusion due to excludepkgs above
 # Discover nvcc package version and install alongside toolkit (example uses 13-0):
 sudo dnf5 search cuda-nvcc
-sudo dnf5 install -y cuda-toolkit cuda-nvcc-13-0
+sudo dnf5 install -y cuda-toolkit cuda-nvcc-13-0 gcc14
 
 # Verify nvcc
 nvcc --version

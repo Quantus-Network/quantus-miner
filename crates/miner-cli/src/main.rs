@@ -3,7 +3,7 @@ use miner_service::{run, EngineSelection, ServiceConfig};
 
 /// Quantus External Miner CLI
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = option_env!("MINER_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about, long_about = None)]
 struct Args {
     /// Port number to listen on for the miner HTTP API
     #[arg(short, long, env = "MINER_PORT", default_value_t = 9833)]

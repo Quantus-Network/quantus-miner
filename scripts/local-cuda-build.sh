@@ -2,7 +2,7 @@
 set -euo pipefail
 
 declare -A ARCHES=([86]="Ampere (RTX 3060)" [89]="Ada (RTX 4090)" [120]="CC 12.0 (RTX 5090)")
-CUDA_VERSIONS=(12.9)  # build only the version matching your driver
+CUDA_VERSIONS=(13.0)  # build only the version matching your driver
 
 build_one() {
   local cuda_ver="$1" sm="$2"
@@ -42,7 +42,7 @@ build_one() {
 #done
 
 # Build only the driver-matching toolkit and the 3060 arch
-build_one "12.9" "86"
+build_one "13.0" "120"
 
 # Install the built binary
 #sudo install -o root -g root -m 0755 target/release/quantus-miner-cuda-12.9-sm-86 /usr/local/bin/
