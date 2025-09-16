@@ -12,10 +12,10 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/packed-refs");
 
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
-    let short_sha = env::var("GITHUB_SHA")
-        .ok()
-        .and_then(|s| s.get(0..8).map(|t| t.to_string()))
-        .or_else(|| discover_short_git_sha().ok());
+    let short_sha = match env::var("GITHUB_SHA") {
+        Ok(s) => s.get(0..8).map(|t| t.to_string()),
+        Err(_) => discover_short_git_sha().ok(),
+    };
 
     let version = match short_sha {
         Some(sha) if !sha.is_empty() => format!("{pkg_version}+{sha}"),
