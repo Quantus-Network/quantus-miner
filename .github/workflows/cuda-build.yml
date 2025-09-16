@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - cuda
+      - main
     paths-ignore:
       - "docs/**"
       - "*.md"
       - "LICENSE"
   pull_request:
     branches:
-      - cuda
+      - main
     paths-ignore:
       - ".github/workflows/**"
       - ".github/actions/**"
