@@ -107,7 +107,7 @@ impl CudaEngine {
                     // Fall back to manual driver/device/context init so service gating can pass.
                     log::warn!(target: "miner", "CUDA quick_init failed: {e:?}; attempting manual init");
                     let manual_ok = (|| -> Result<(), cust::error::CudaError> {
-                        log::debug!(target: "miner", "CUDA manual init: acquiring device(0)...");
+                        log::trace!(target: "miner", "CUDA manual init: acquiring device(0)...");
                         let dev = Device::get_device(0)?;
                         if let Ok(name) = dev.name() {
                             let cc_maj = dev
@@ -125,9 +125,9 @@ impl CudaEngine {
                                 .unwrap_or_default();
                             log::info!(target: "miner", "CUDA device(0): name={:?}, cc={}.{}, sms={}", name, cc_maj, cc_min, sms);
                         }
-                        log::debug!(target: "miner", "CUDA manual init: creating context...");
+                        log::trace!(target: "miner", "CUDA manual init: creating context...");
                         let ctx = Context::new(dev)?;
-                        log::debug!(target: "miner", "CUDA manual init: pushing context...");
+                        log::trace!(target: "miner", "CUDA manual init: pushing context...");
                         let _guard = ContextStack::push(&ctx)?;
                         Ok(())
                     })();
@@ -170,7 +170,7 @@ impl CudaEngine {
 
         if cache_guard.is_none() {
             // Create device/context once and load the module based on env selection.
-            log::debug!(target: "miner", "CUDA: cache empty; acquiring device(0) and creating context");
+            log::trace!(target: "miner", "CUDA: cache empty; acquiring device(0) and creating context");
             let dev = Device::get_device(0)?;
             if let Ok(name) = dev.name() {
                 let cc_major = dev
@@ -182,10 +182,10 @@ impl CudaEngine {
                 let sms = dev
                     .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)
                     .unwrap_or_default();
-                log::info!(target: "miner", "CUDA device(0): name={:?}, cc={}.{}, sms={}", name, cc_major, cc_minor, sms);
+                log::debug!(target: "miner", "CUDA device(0): name={:?}, cc={}.{}, sms={}", name, cc_major, cc_minor, sms);
             }
             let ctx = Context::new(dev)?;
-            log::debug!(target: "miner", "CUDA: context created; pushing context");
+            log::trace!(target: "miner", "CUDA: context created; pushing context");
             let _push = ContextStack::push(&ctx)?;
 
             // Prefer embedded CUBIN (native SASS) by default; allow env override; fall back to embedded/env PTX if unavailable.
@@ -277,7 +277,7 @@ impl CudaEngine {
             }
             _ => "qpow_montgomery_g1_kernel",
         };
-        log::debug!(target: "miner", "CUDA: resolving kernel function '{}'", func_name);
+        log::trace!(target: "miner", "CUDA: resolving kernel function '{}'", func_name);
         let is_g2;
         let func = match module_ref.get_function(func_name) {
             Ok(f) => {
@@ -329,16 +329,16 @@ impl CudaEngine {
         // Allocate device constant buffers once (persist across launches)
         let d_m = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_le)
             .with_context(|| "alloc/copy d_m")?;
-        log::debug!(target: "miner", "CUDA alloc OK: d_m (8 u64, 64 bytes)");
+        log::trace!(target: "miner", "CUDA alloc OK: d_m (8 u64, 64 bytes)");
         let d_n = cuda::memory::DeviceBuffer::<u64>::from_slice(&n_le)
             .with_context(|| "alloc/copy d_n")?;
-        log::debug!(target: "miner", "CUDA alloc OK: d_n (8 u64, 64 bytes)");
+        log::trace!(target: "miner", "CUDA alloc OK: d_n (8 u64, 64 bytes)");
         let d_r2 = cuda::memory::DeviceBuffer::<u64>::from_slice(&r2_le)
             .with_context(|| "alloc/copy d_r2")?;
-        log::debug!(target: "miner", "CUDA alloc OK: d_r2 (8 u64, 64 bytes)");
+        log::trace!(target: "miner", "CUDA alloc OK: d_r2 (8 u64, 64 bytes)");
         let d_mhat = cuda::memory::DeviceBuffer::<u64>::from_slice(&m_hat_le)
             .with_context(|| "alloc/copy d_mhat")?;
-        log::debug!(target: "miner", "CUDA alloc OK: d_mhat (8 u64, 64 bytes)");
+        log::trace!(target: "miner", "CUDA alloc OK: d_mhat (8 u64, 64 bytes)");
 
         // Chunked loop: process the inclusive range [current ..= end]
         // Launcher tuning knobs (env overrides)
@@ -405,7 +405,7 @@ impl CudaEngine {
                 .unwrap_or(1) as u32;
             let grid_dim =
                 std::cmp::max(((num_threads + block_dim - 1) / block_dim).max(1), sm_count);
-            log::debug!(target: "miner", "CUDA grid config: grid_dim={}, sm_count={}, block_dim={}, num_threads={}", grid_dim, sm_count, block_dim, num_threads);
+            log::trace!(target: "miner", "CUDA grid config: grid_dim={}, sm_count={}, block_dim={}, num_threads={}", grid_dim, sm_count, block_dim, num_threads);
 
             // Compute effective iterations per thread based on remaining coverage for this launch
             let rem_be_all = end.saturating_sub(current).to_big_endian();
@@ -436,10 +436,10 @@ impl CudaEngine {
                 (num_threads as usize) * (iters_per_thread as usize) * 8,
             )
             .with_context(|| "alloc d_y_out")?;
-            log::debug!(target: "miner", "CUDA alloc OK: d_y_out");
+            log::trace!(target: "miner", "CUDA alloc OK: d_y_out");
             let total_words = (num_threads as usize) * (iters_per_thread as usize) * 8;
             let total_bytes = (total_words as u64) * 8;
-            log::debug!(target: "miner", "CUDA coverage: remaining_low64={}, total_elems_cfg={}, covered={}, effective_iters={}, words={}, bytes={}",
+            log::trace!(target: "miner", "CUDA coverage: remaining_low64={}, total_elems_cfg={}, covered={}, effective_iters={}, words={}, bytes={}",
                 {
                     let rem = end.saturating_sub(current).to_big_endian();
                     let mut last8 = [0u8; 8];
@@ -697,29 +697,29 @@ impl CudaEngine {
                     }
                     let d_y0_b = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                         .with_context(|| "alloc/copy d_y0 (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_y0 (batch, {} threads)", active_threads_usize);
+                    log::trace!(target: "miner", "CUDA alloc OK: d_y0 (batch, {} threads)", active_threads_usize);
                     // Per-batch early-exit outputs
                     let d_found = cuda::memory::DeviceBuffer::<i32>::from_slice(&[0i32])
                         .with_context(|| "alloc/copy d_found (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_found (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_found (batch)");
                     let d_index = cuda::memory::DeviceBuffer::<u32>::from_slice(&[0u32])
                         .with_context(|| "alloc/copy d_index (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_index (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_index (batch)");
                     let d_win_tid = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
                         .with_context(|| "alloc/copy d_win_tid (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_win_tid (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_win_tid (batch)");
                     let d_win_j = cuda::memory::DeviceBuffer::<u32>::from_slice(&[u32::MAX])
                         .with_context(|| "alloc/copy d_win_j (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_win_j (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_win_j (batch)");
                     let d_distance = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                         .with_context(|| "alloc d_distance (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_distance (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_distance (batch)");
                     let d_dbg_y = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                         .with_context(|| "alloc d_dbg_y (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_dbg_y (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_dbg_y (batch)");
                     let d_dbg_h = cuda::memory::DeviceBuffer::<u8>::zeroed(64)
                         .with_context(|| "alloc d_dbg_h (batch)")?;
-                    log::debug!(target: "miner", "CUDA alloc OK: d_dbg_h (batch)");
+                    log::trace!(target: "miner", "CUDA alloc OK: d_dbg_h (batch)");
                     let t_kernel_start = std::time::Instant::now();
                     let launch_result = unsafe {
                         launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -751,18 +751,18 @@ impl CudaEngine {
                     log::info!(target: "miner", "CUDA G2 kernel and sync OK (kernel_ms={kernel_ms})");
                     // Check early-exit for this batch using per-batch base_nonces/effective_iters
                     let mut h_found = [0i32; 1];
-                    log::debug!(target: "miner", "CUDA copy D2H: d_found (batch) starting");
+                    log::trace!(target: "miner", "CUDA copy D2H: d_found (batch) starting");
                     d_found
                         .copy_to(&mut h_found)
                         .with_context(|| "copy found flag (batch)")?;
-                    log::debug!(target: "miner", "CUDA copy D2H: d_found (batch) done (found={})", h_found[0]);
+                    log::trace!(target: "miner", "CUDA copy D2H: d_found (batch) done (found={})", h_found[0]);
                     if h_found[0] != 0 {
                         let mut h_idx = [0u32; 1];
-                        log::debug!(target: "miner", "CUDA copy D2H: d_index (batch) starting");
+                        log::trace!(target: "miner", "CUDA copy D2H: d_index (batch) starting");
                         d_index
                             .copy_to(&mut h_idx)
                             .with_context(|| "copy index (batch)")?;
-                        log::debug!(target: "miner", "CUDA copy D2H: d_index (batch) done (k={})", h_idx[0]);
+                        log::trace!(target: "miner", "CUDA copy D2H: d_index (batch) done (k={})", h_idx[0]);
                         let k = h_idx[0] as u64;
                         log::info!(target: "miner", "CUDA G2(batch): found flag set k={}", k);
                         hash_count = hash_count.saturating_add(k + 1);
@@ -801,17 +801,17 @@ impl CudaEngine {
                         } else {
                             // FP within batch — log minimal info and fall through to advance/continue
                             let mut h_dist = [0u8; 64];
-                            log::debug!(target: "miner", "CUDA copy D2H: d_distance (batch) starting");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_distance (batch) starting");
                             let _ = d_distance.copy_to(&mut h_dist);
-                            log::debug!(target: "miner", "CUDA copy D2H: d_distance (batch) done");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_distance (batch) done");
                             let mut dbg_y = [0u8; 64];
                             let mut dbg_h = [0u8; 64];
-                            log::debug!(target: "miner", "CUDA copy D2H: d_dbg_y (batch) starting");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_dbg_y (batch) starting");
                             let _ = d_dbg_y.copy_to(&mut dbg_y);
-                            log::debug!(target: "miner", "CUDA copy D2H: d_dbg_y (batch) done");
-                            log::debug!(target: "miner", "CUDA copy D2H: d_dbg_h (batch) starting");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_dbg_y (batch) done");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_dbg_h (batch) starting");
                             let _ = d_dbg_h.copy_to(&mut dbg_h);
-                            log::debug!(target: "miner", "CUDA copy D2H: d_dbg_h (batch) done");
+                            log::trace!(target: "miner", "CUDA copy D2H: d_dbg_h (batch) done");
                             let y_hex = hex::encode(&dbg_y[..16]);
                             let h_hex = hex::encode(&dbg_h[..16]);
                             let host_dist_hex = hex::encode(&host_distance.to_big_endian()[..16]);
@@ -994,7 +994,7 @@ impl CudaEngine {
                 continue;
             } else {
                 // G1 launch: computes y for (current + t + 1) for each thread t in [0, num_threads)
-                log::info!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}, effective_iters={effective_iters}, covered={covered_u64}");
+                log::debug!(target: "miner", "CUDA launch: grid_dim={grid_dim}, block_dim={block_dim}, threads={num_threads}, iters={iters_per_thread}, effective_iters={effective_iters}, covered={covered_u64}");
 
                 // Rebuild per-batch base nonces and y0 for current window (stride = effective iters)
                 let mut base_nonces: Vec<U512> = vec![U512::zero(); num_threads as usize];
@@ -1011,7 +1011,7 @@ impl CudaEngine {
                 // Per-batch device buffer for G1 input
                 let d_y0 = cuda::memory::DeviceBuffer::<u64>::from_slice(&y0_host)
                     .with_context(|| "alloc/copy d_y0 (batch)")?;
-                log::debug!(target: "miner", "CUDA alloc OK: d_y0 (batch, {} threads)", num_threads);
+                log::trace!(target: "miner", "CUDA alloc OK: d_y0 (batch, {} threads)", num_threads);
                 let t_kernel_start = std::time::Instant::now();
                 let launch_result = unsafe {
                     launch!(func<<<grid_dim, block_dim, 0, stream>>>(
@@ -1046,14 +1046,14 @@ impl CudaEngine {
                         unsafe { cust::memory::LockedBuffer::<u64>::uninitialized(total_words) }
                             .with_context(|| "alloc pinned host buffer")?;
                     unsafe {
-                        log::debug!(target: "miner", "CUDA async D2H: d_y_out -> pinned starting (elems={})", total_words);
+                        log::trace!(target: "miner", "CUDA async D2H: d_y_out -> pinned starting (elems={})", total_words);
                         cust::memory::AsyncCopyDestination::async_copy_to(
                             &*d_y_out,
                             pinned.as_mut_slice(),
                             &stream,
                         )
                         .with_context(|| "async copy d_y_out -> pinned")?;
-                        log::debug!(target: "miner", "CUDA async D2H: d_y_out -> pinned enqueued");
+                        log::trace!(target: "miner", "CUDA async D2H: d_y_out -> pinned enqueued");
                     }
                     stream
                         .synchronize()
