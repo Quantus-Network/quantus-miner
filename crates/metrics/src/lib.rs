@@ -40,6 +40,11 @@ use {
 #[cfg(not(feature = "http-exporter"))]
 use anyhow::Result;
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
+
 // -------------------------------------------------------------------------------------
 // Global Registry and Default Metrics
 // -------------------------------------------------------------------------------------
@@ -185,6 +190,93 @@ static JOB_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
     g
 });
 
+static JOB_ESTIMATED_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_job_estimated_rate",
+            "Estimated work rate (nonces per second) per engine and backend"
+        ),
+        &["engine", "backend"],
+    )
+    .expect("create miner_job_estimated_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_estimated_rate");
+    g
+});
+
+static CANDIDATES_FOUND_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_candidates_found_total",
+            "Total candidates found per job and engine"
+        ),
+        &["engine", "job_id"],
+    )
+    .expect("create miner_candidates_found_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_candidates_found_total");
+    c
+});
+
+static CANDIDATES_FALSE_POSITIVE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_candidates_false_positive_total",
+            "Total false-positive candidates rejected by host re-verification per engine"
+        ),
+        &["engine"],
+    )
+    .expect("create miner_candidates_false_positive_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_candidates_false_positive_total");
+    c
+});
+
+static SAMPLE_MISMATCH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_sample_mismatch_total",
+            "Total decision parity mismatches between engine and host per engine"
+        ),
+        &["engine"],
+    )
+    .expect("create miner_sample_mismatch_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_sample_mismatch_total");
+    c
+});
+
+static MISSED_WINNER_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new(
+        "miner_gpu_g2_missed_winner_total",
+        "Host detected a winner in G2 batch sample but device did not flag early-exit",
+    )
+    .expect("create miner_gpu_g2_missed_winner_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_gpu_g2_missed_winner_total");
+    c
+});
+
+static FOUND_BY_ORIGIN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_found_by_origin_total",
+            "Count of candidates found by origin per engine"
+        ),
+        &["engine", "origin"],
+    )
+    .expect("create miner_found_by_origin_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_found_by_origin_total");
+    c
+});
+
 static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -245,6 +337,21 @@ static JOB_STATUS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     g
 });
 
+static JOB_FOUND_ORIGIN: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_job_found_origin",
+            "Job found origin gauge (set to 1 for the origin that found the candidate)"
+        ),
+        &["engine", "job_id", "origin"],
+    )
+    .expect("create miner_job_found_origin");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_found_origin");
+    g
+});
+
 pub fn default_registry() -> &'static Registry {
     &REGISTRY
 }
@@ -272,13 +379,75 @@ pub fn inc_mine_requests(result: &str) {
 }
 
 pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
+    touch_job(engine, job_id);
     JOB_HASHES_TOTAL
         .with_label_values(&[engine, job_id])
         .inc_by(n);
 }
 
 pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
+    touch_job(engine, job_id);
     JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
+}
+
+pub fn set_job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, backend])
+        .set(rate);
+}
+
+pub fn set_job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
+    // Compatibility shim: map per-job series to backend="unknown" to avoid cardinality growth
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, "unknown"])
+        .set(rate);
+}
+
+pub fn inc_candidates_found(engine: &str, job_id: &str) {
+    touch_job(engine, job_id);
+    CANDIDATES_FOUND_TOTAL
+        .with_label_values(&[engine, job_id])
+        .inc();
+}
+
+pub fn inc_candidates_false_positive(engine: &str) {
+    CANDIDATES_FALSE_POSITIVE_TOTAL
+        .with_label_values(&[engine])
+        .inc();
+}
+
+pub fn inc_sample_mismatch(engine: &str) {
+    SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
+}
+
+pub fn inc_found_by_origin(engine: &str, origin: &str) {
+    FOUND_BY_ORIGIN_TOTAL
+        .with_label_values(&[engine, origin])
+        .inc();
+}
+
+pub fn inc_gpu_g2_missed_winner() {
+    MISSED_WINNER_TOTAL.inc();
+}
+
+pub fn set_job_found_origin(engine: &str, job_id: &str, origin: &str) {
+    touch_job(engine, job_id);
+    JOB_FOUND_ORIGIN
+        .with_label_values(&[engine, job_id, origin])
+        .set(1.0);
+}
+
+pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, backend])
+        .set(rate);
+}
+
+pub fn job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
+    // Compatibility shim: prefer new API using backend; fallback to backend="unknown"
+    JOB_ESTIMATED_RATE
+        .with_label_values(&[engine, "unknown"])
+        .set(rate);
 }
 
 pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
@@ -288,6 +457,7 @@ pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
 }
 
 pub fn set_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str, rate: f64) {
+    touch_thread(engine, job_id, thread_id);
     THREAD_HASH_RATE
         .with_label_values(&[engine, job_id, thread_id])
         .set(rate);
@@ -300,6 +470,7 @@ pub fn inc_jobs_by_engine(engine: &str, status: &str) {
 }
 
 pub fn set_job_status_gauge(engine: &str, job_id: &str, status: &str, value: i64) {
+    touch_job(engine, job_id);
     JOB_STATUS_GAUGE
         .with_label_values(&[engine, job_id, status])
         .set(value);
@@ -329,6 +500,142 @@ pub fn inc_http_request(endpoint: &str, code: u16) {
 // -------------------------------------------------------------------------------------
 // Removal helpers for end-of-life series
 // -------------------------------------------------------------------------------------
+
+const METRICS_TTL_SECS: u64 = 300;
+const JANITOR_INTERVAL_SECS: u64 = 60;
+
+type JobKey = (String, String); // (engine, job_id)
+type ThreadKey = (String, String, String); // (engine, job_id, thread_id)
+
+static JOB_KEYS: Lazy<Mutex<HashSet<JobKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static JOB_LAST: Lazy<Mutex<HashMap<JobKey, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static THREAD_KEYS: Lazy<Mutex<HashSet<ThreadKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static THREAD_LAST: Lazy<Mutex<HashMap<ThreadKey, Instant>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+static JANITOR_INIT: Lazy<()> = Lazy::new(|| {
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_secs(JANITOR_INTERVAL_SECS));
+        prune_stale();
+    });
+});
+
+fn prune_stale() {
+    let now = Instant::now();
+    // Jobs
+    let mut to_remove_jobs: Vec<JobKey> = Vec::new();
+    {
+        let last = JOB_LAST.lock().unwrap();
+        for (k, ts) in last.iter() {
+            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
+                to_remove_jobs.push(k.clone());
+            }
+        }
+    }
+    for (engine, job_id) in to_remove_jobs {
+        let _ = JOB_HASHES_TOTAL.remove_label_values(&[&engine, &job_id]);
+        let _ = JOB_HASH_RATE.remove_label_values(&[&engine, &job_id]);
+        let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[&engine, &job_id]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "completed"]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "failed"]);
+        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "cancelled"]);
+        // Remove per-job origin gauge variants (known origins)
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "cpu"]);
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g1"]);
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g2"]);
+        JOB_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(engine.clone(), job_id.clone()));
+        JOB_LAST.lock().unwrap().remove(&(engine, job_id));
+    }
+    // Threads
+    let mut to_remove_threads: Vec<ThreadKey> = Vec::new();
+    {
+        let last = THREAD_LAST.lock().unwrap();
+        for (k, ts) in last.iter() {
+            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
+                to_remove_threads.push(k.clone());
+            }
+        }
+    }
+    for (engine, job_id, thread_id) in to_remove_threads {
+        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&engine, &job_id, &thread_id]);
+        let _ = THREAD_HASH_RATE.remove_label_values(&[&engine, &job_id, &thread_id]);
+        THREAD_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(engine.clone(), job_id.clone(), thread_id.clone()));
+        THREAD_LAST
+            .lock()
+            .unwrap()
+            .remove(&(engine, job_id, thread_id));
+    }
+}
+
+fn touch_job(engine: &str, job_id: &str) {
+    *JANITOR_INIT; // ensure janitor starts
+    let key = (engine.to_string(), job_id.to_string());
+    JOB_KEYS.lock().unwrap().insert(key.clone());
+    JOB_LAST.lock().unwrap().insert(key, Instant::now());
+}
+
+fn touch_thread(engine: &str, job_id: &str, thread_id: &str) {
+    *JANITOR_INIT; // ensure janitor starts
+    let key = (
+        engine.to_string(),
+        job_id.to_string(),
+        thread_id.to_string(),
+    );
+    THREAD_KEYS.lock().unwrap().insert(key.clone());
+    THREAD_LAST.lock().unwrap().insert(key, Instant::now());
+}
+
+/// Explicitly remove all job-scoped metrics for a job (call on job completion)
+pub fn remove_job_metrics(engine: &str, job_id: &str) {
+    let _ = JOB_HASHES_TOTAL.remove_label_values(&[engine, job_id]);
+    let _ = JOB_HASH_RATE.remove_label_values(&[engine, job_id]);
+    let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[engine, job_id]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "completed"]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "failed"]);
+    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "cancelled"]);
+    // Remove per-job origin gauge variants (known origins)
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "cpu"]);
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g1"]);
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g2"]);
+    JOB_KEYS
+        .lock()
+        .unwrap()
+        .remove(&(engine.to_string(), job_id.to_string()));
+    JOB_LAST
+        .lock()
+        .unwrap()
+        .remove(&(engine.to_string(), job_id.to_string()));
+}
+
+/// Explicitly remove all thread-scoped metrics for a job
+pub fn remove_thread_metrics_for_job(engine: &str, job_id: &str) {
+    // Collect matching thread keys
+    let keys: Vec<ThreadKey> = {
+        let set = THREAD_KEYS.lock().unwrap();
+        set.iter()
+            .filter(|(e, j, _)| e == engine && j == job_id)
+            .cloned()
+            .collect()
+    };
+    for (e, j, t) in keys {
+        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&e, &j, &t]);
+        let _ = THREAD_HASH_RATE.remove_label_values(&[&e, &j, &t]);
+        THREAD_KEYS
+            .lock()
+            .unwrap()
+            .remove(&(e.clone(), j.clone(), t.clone()));
+        THREAD_LAST
+            .lock()
+            .unwrap()
+            .remove(&(e.clone(), j.clone(), t.clone()));
+    }
+}
 
 /// Remove the per-job hash rate series for a finished job.
 pub fn remove_job_hash_rate(engine: &str, job_id: &str) {

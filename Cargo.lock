@@ -471,10 +471,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cust",
+ "engine-cpu",
+ "hex",
  "log",
+ "metrics",
+ "num-bigint",
+ "num-traits 0.2.19",
  "pow-core",
  "primitive-types",
  "rustacuda",
+ "sha3",
  "thiserror",
 ]
 

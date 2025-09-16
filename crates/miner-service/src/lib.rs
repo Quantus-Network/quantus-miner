@@ -3,6 +3,7 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
+use pow_core::compat;
 use primitive_types::U512;
 use resonance_miner_api::*;
 use std::collections::HashMap;
@@ -147,6 +148,21 @@ impl MiningService {
         jobs.get(job_id).cloned()
     }
 
+    pub async fn mark_job_result_served(&self, job_id: &str) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            if !job.result_served {
+                job.result_served = true;
+                log::info!(target: "miner", "Result served and marked for job: {job_id}");
+                #[cfg(feature = "metrics")]
+                {
+                    // reuse existing counter to trace served events
+                    metrics::inc_mine_requests("result_served");
+                }
+            }
+        }
+    }
+
     pub async fn remove_job(&self, job_id: &str) -> Option<MiningJob> {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(job_id) {
@@ -174,7 +190,10 @@ impl MiningService {
         log::debug!(target: "miner", "Starting mining loop...");
 
         tokio::spawn(async move {
+            let mut last_watchdog = std::time::Instant::now();
+            let mut iter: u64 = 0;
             loop {
+                iter += 1;
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
@@ -188,8 +207,9 @@ impl MiningService {
                         );
                     }
 
-                    // Retain jobs that are running or recently finished (e.g., within 5 minutes)
+                    // Retain running jobs, completed-but-not-yet-served jobs, or anything recent (<5m)
                     let retain = job.status == JobStatus::Running
+                        || (job.status == JobStatus::Completed && !job.result_served)
                         || job.start_time.elapsed().as_secs() < 300;
                     if !retain {
                         log::debug!(target: "miner", "Cleaning up old job {job_id}");
@@ -213,7 +233,34 @@ impl MiningService {
                     metrics::set_hash_rate(total_rate);
                     metrics::set_active_jobs(running_jobs);
                 }
+                let do_watchdog = last_watchdog.elapsed().as_secs() >= 30;
+                let (total, running, completed, failed, cancelled) = if do_watchdog {
+                    let mut running = 0usize;
+                    let mut completed = 0usize;
+                    let mut cancelled = 0usize;
+                    let mut failed = 0usize;
+                    let total = jobs_guard.len();
+                    for (_id, job) in jobs_guard.iter() {
+                        match job.status {
+                            JobStatus::Running => running += 1,
+                            JobStatus::Completed => completed += 1,
+                            JobStatus::Cancelled => cancelled += 1,
+                            JobStatus::Failed => failed += 1,
+                        }
+                    }
+                    (total, running, completed, failed, cancelled)
+                } else {
+                    (0, 0, 0, 0, 0)
+                };
                 drop(jobs_guard);
+                if do_watchdog {
+                    log::info!(
+                        target: "miner",
+                        "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, loop_iter={}",
+                        total, running, completed, failed, cancelled, iter
+                    );
+                    last_watchdog = std::time::Instant::now();
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -259,6 +306,7 @@ pub struct MiningJob {
     pub thread_last_update: std::collections::HashMap<usize, std::time::Instant>,
     pub thread_rate_ema: std::collections::HashMap<usize, f64>,
     completed_threads: usize,
+    pub result_served: bool,
 }
 
 impl Clone for MiningJob {
@@ -284,6 +332,7 @@ impl Clone for MiningJob {
             thread_last_update: self.thread_last_update.clone(),
             thread_rate_ema: self.thread_rate_ema.clone(),
             completed_threads: self.completed_threads,
+            result_served: self.result_served,
         }
     }
 }
@@ -293,6 +342,7 @@ pub struct ThreadResult {
     thread_id: usize,
     result: Option<MiningJobResult>,
     hash_count: u64,
+    origin: Option<engine_cpu::FoundOrigin>,
     completed: bool,
 }
 
@@ -321,6 +371,7 @@ impl MiningJob {
             thread_last_update: std::collections::HashMap::new(),
             thread_rate_ema: std::collections::HashMap::new(),
             completed_threads: 0,
+            result_served: false,
         }
     }
 
@@ -330,7 +381,11 @@ impl MiningJob {
         workers: usize,
         progress_chunk_ms: u64,
     ) {
-        let (sender, receiver) = bounded(workers * 2);
+        let chan_capacity = std::env::var("MINER_RESULT_CHANNEL_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| workers.saturating_mul(64).max(256));
+        let (sender, receiver) = bounded(chan_capacity);
         self.result_receiver = Some(receiver);
         self.engine_name = engine.name();
 
@@ -354,9 +409,11 @@ impl MiningJob {
             let ctx = ctx.clone();
             let engine = engine.clone();
 
+            let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
             let handle = thread::spawn(move || {
                 mine_range_with_engine(
                     thread_id,
+                    job_id,
                     engine.as_ref(),
                     ctx,
                     EngineRange { start, end },
@@ -371,7 +428,7 @@ impl MiningJob {
     }
 
     pub fn cancel(&mut self) {
-        log::debug!(target: "miner", "Cancelling mining job");
+        log::debug!(target: "miner", "Cancelling mining job: {}", self.job_id.as_ref().unwrap());
         self.cancel_flag.store(true, Ordering::Relaxed);
         self.status = JobStatus::Cancelled;
         #[cfg(feature = "metrics")]
@@ -386,6 +443,8 @@ impl MiningJob {
                 // Remove job hash rate series on cancellation (avoid scrape-timing artifacts)
                 self.last_hash_rate = 0.0;
                 metrics::remove_job_hash_rate(self.engine_name, job_id);
+                metrics::remove_job_metrics(self.engine_name, job_id);
+                metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                 // Remove all per-thread hash rate series on cancellation and clear tracking
                 for (tid, _) in self.thread_rate_ema.iter() {
                     metrics::remove_thread_hash_rate(self.engine_name, job_id, &tid.to_string());
@@ -487,8 +546,25 @@ impl MiningJob {
                         result.distance,
                         result.nonce
                     );
-                    self.best_result = Some(result);
+                    self.best_result = Some(result.clone());
                     self.cancel_flag.store(true, Ordering::Relaxed);
+                    // Result is now ready to be fetched via /result
+                    log::info!(target: "miner", "Result ready: engine={}, nonce={}, distance={}",
+                        self.engine_name, result.nonce, result.distance);
+                    #[cfg(feature = "metrics")]
+                    {
+                        // reuse existing http metric bucket for visibility until dedicated counters exist
+                        metrics::inc_mine_requests("result_ready");
+                        if let Some(job_id) = &self.job_id {
+                            let origin_label = match thread_result.origin {
+                                Some(engine_cpu::FoundOrigin::Cpu) => "cpu",
+                                Some(engine_cpu::FoundOrigin::GpuG1) => "gpu-g1",
+                                Some(engine_cpu::FoundOrigin::GpuG2) => "gpu-g2",
+                                _ => "unknown",
+                            };
+                            metrics::set_job_found_origin(self.engine_name, job_id, origin_label);
+                        }
+                    }
                 }
             }
         }
@@ -501,6 +577,8 @@ impl MiningJob {
                     metrics::inc_job_status("completed");
                     if let Some(job_id) = &self.job_id {
                         metrics::inc_jobs_by_engine(self.engine_name, "completed");
+                        metrics::inc_candidates_found(self.engine_name, job_id);
+                        // TODO(metrics): engine-level false-positive metric is emitted in engine implementations (e.g., gpu-cuda G2 host re-verification)
                         metrics::set_job_status_gauge(self.engine_name, job_id, "running", 0);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 1);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
@@ -508,6 +586,8 @@ impl MiningJob {
                         // Remove job hash rate on completion and clear per-thread series
                         self.last_hash_rate = 0.0;
                         metrics::remove_job_hash_rate(self.engine_name, job_id);
+                        metrics::remove_job_metrics(self.engine_name, job_id);
+                        metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                         for (tid, _) in self.thread_rate_ema.iter() {
                             metrics::remove_thread_hash_rate(
                                 self.engine_name,
@@ -553,8 +633,10 @@ impl MiningJob {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Reason: worker runner needs job_id, engine, context, range, cancel flag, sender, and chunking config
 fn mine_range_with_engine(
     thread_id: usize,
+    job_id: String,
     engine: &dyn MinerEngine,
     ctx: pow_core::JobContext,
     range: EngineRange,
@@ -563,7 +645,9 @@ fn mine_range_with_engine(
     progress_chunk_ms: u64,
 ) {
     log::debug!(
-        "Thread {} mining range {} to {} (inclusive)",
+        target: "miner",
+        "Job {} thread {} mining range {} to {} (inclusive)",
+        job_id,
         thread_id,
         range.start,
         range.end
@@ -593,6 +677,14 @@ fn mine_range_with_engine(
             end: current_end,
         };
 
+        log::debug!(
+            target: "miner",
+            "Job {} thread {} processing subrange {}..{} (inclusive)",
+            job_id,
+            thread_id,
+            sub_range.start,
+            sub_range.end
+        );
         let status = engine.search_range(&ctx, sub_range.clone(), &cancel_flag);
 
         match status {
@@ -604,6 +696,7 @@ fn mine_range_with_engine(
                         distance,
                     },
                 hash_count,
+                origin,
             } => {
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
@@ -614,10 +707,11 @@ fn mine_range_with_engine(
                         distance,
                     }),
                     hash_count,
+                    origin: Some(origin),
                     completed: true,
                 };
-                if sender.send(final_result).is_err() {
-                    log::warn!("Thread {thread_id} failed to send final result");
+                if sender.try_send(final_result).is_err() {
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send final result");
                 }
                 done = true;
                 break;
@@ -628,11 +722,22 @@ fn mine_range_with_engine(
                     thread_id,
                     result: None,
                     hash_count,
+                    origin: None,
                     completed: false,
                 };
-                if sender.send(update).is_err() {
-                    log::warn!("Thread {thread_id} failed to send progress update");
+                if sender.try_send(update).is_err() {
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send progress update");
                     break;
+                } else {
+                    log::debug!(
+                        target: "miner",
+                        "Job {} thread {} progress: hashed={} in subrange {}..{}",
+                        job_id,
+                        thread_id,
+                        hash_count,
+                        sub_range.start,
+                        sub_range.end
+                    );
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
@@ -641,10 +746,11 @@ fn mine_range_with_engine(
                     thread_id,
                     result: None,
                     hash_count,
+                    origin: None,
                     completed: false,
                 };
-                if sender.send(update).is_err() {
-                    log::warn!("Thread {thread_id} failed to send cancel update");
+                if sender.try_send(update).is_err() {
+                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
                 }
                 done = true;
                 break;
@@ -666,14 +772,15 @@ fn mine_range_with_engine(
             thread_id,
             result: None,
             hash_count: 0,
+            origin: None,
             completed: true,
         };
-        if sender.send(final_result).is_err() {
-            log::warn!("Thread {thread_id} failed to send completion status after chunked search");
+        if sender.try_send(final_result).is_err() {
+            log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send completion status after chunked search");
         }
     }
 
-    log::debug!("Thread {thread_id} completed.");
+    log::debug!(target: "miner", "Job {job_id} thread {thread_id} completed.");
 }
 
 /// Validates incoming mining requests for structural correctness.
@@ -808,6 +915,14 @@ pub async fn handle_result_request(
         }
     };
 
+    log::debug!(
+        target: "miner",
+        "Result polling watchdog: job_id={}, status={:?}, result_served={}, elapsed_s={:.3}",
+        job_id,
+        job.status,
+        job.result_served,
+        job.start_time.elapsed().as_secs_f64()
+    );
     let status = match job.status {
         JobStatus::Running => ApiResponseStatus::Running,
         JobStatus::Completed => ApiResponseStatus::Completed,
@@ -815,7 +930,7 @@ pub async fn handle_result_request(
         JobStatus::Cancelled => ApiResponseStatus::Cancelled,
     };
 
-    let (nonce, work) = match &job.best_result {
+    let (nonce_hex, work_hex) = match &job.best_result {
         Some(result) => (
             Some(format!("{:x}", result.nonce)),
             Some(hex::encode(result.work)),
@@ -823,14 +938,36 @@ pub async fn handle_result_request(
         None => (None, None),
     };
 
+    // Inline re-verify using the exact nonce bytes we will return
+    if let Some(result) = &job.best_result {
+        let nonce_be = result.nonce.to_big_endian();
+        let d2 = compat::get_nonce_distance(job.header_hash, nonce_be);
+        let ok = d2 <= job.distance_threshold;
+        log::info!(
+            target: "miner",
+            "Serving result: job_id={}, engine={}, ok={}, host_distance={}, threshold={}",
+            job_id,
+            job.engine_name,
+            ok,
+            d2,
+            job.distance_threshold
+        );
+        #[cfg(feature = "metrics")]
+        {
+            metrics::inc_mine_requests("result_served");
+        }
+        // Mark served to keep job until at least one fetch succeeds
+        state.mark_job_result_served(&job_id).await;
+    }
+
     let elapsed_time = job.start_time.elapsed().as_secs_f64();
 
     Ok(warp::reply::with_status(
         warp::reply::json(&resonance_miner_api::MiningResult {
             status,
             job_id,
-            nonce,
-            work,
+            nonce: nonce_hex,
+            work: work_hex,
             hash_count: job.total_hash_count,
             elapsed_time,
         }),
@@ -1082,8 +1219,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             Arc::new(eng)
         }
         EngineSelection::GpuCuda => {
-            log::error!("Requested engine gpu-cuda is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
-            return Err(anyhow::anyhow!("engine 'gpu-cuda' is not implemented yet"));
+            #[cfg(feature = "cuda")]
+            {
+                let eng = engine_gpu_cuda::CudaEngine::new();
+                if !eng.cuda_available() {
+                    log::error!("Requested engine gpu-cuda but CUDA driver/device is not available or initialization failed. Build has 'cuda' feature but runtime support is missing.");
+                    return Err(anyhow::anyhow!(
+                        "engine 'gpu-cuda' unavailable at runtime (CUDA init failed)"
+                    ));
+                }
+                Arc::new(eng)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                log::error!("Requested engine gpu-cuda, but this binary was built without the 'cuda' feature. Rebuild miner-service with --features cuda.");
+                return Err(anyhow::anyhow!(
+                    "engine 'gpu-cuda' not built (missing 'cuda' feature)"
+                ));
+            }
         }
         EngineSelection::GpuOpenCl => {
             log::error!("Requested engine gpu-opencl is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
@@ -1453,7 +1606,13 @@ mod tests {
         let (tx, rx) = bounded::<super::ThreadResult>(8);
 
         super::mine_range_with_engine(
-            0, &engine, ctx, range, cancel, tx,
+            0,
+            "test-job".to_string(),
+            &engine,
+            ctx,
+            range,
+            cancel,
+            tx,
             10, // ms (min chunk size is 5k; fine for testing progress + completion)
         );
 

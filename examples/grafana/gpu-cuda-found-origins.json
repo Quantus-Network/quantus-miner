@@ -1,0 +1,261 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total Candidates Found (gpu-cuda)",
+      "description": "Total number of candidates found by the selected engine across all origins",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(miner_found_by_origin_total{engine=~\"$engine\"})"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Found by Origin (Total)",
+      "description": "Cumulative counts of found candidates by origin",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (origin) (miner_found_by_origin_total{engine=~\"$engine\", origin=~\"$origin\"})",
+          "legendFormat": "{{origin}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0 },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Found by Origin (1m increase over time)",
+      "description": "Per-origin increase in found counts (1-minute window), stacked",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (origin) (increase(miner_found_by_origin_total{engine=~\"$engine\", origin=~\"$origin\"}[1m]))",
+          "legendFormat": "{{origin}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "stacking": { "mode": "normal", "group": "A" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-Job Found Origin (recent state)",
+      "description": "Shows recent per-job origin state; a series is 1 when that origin found the job",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max_over_time(miner_job_found_origin{engine=~\"$engine\", job_id=~\"$job_id\"}[1m])",
+          "legendFormat": "{{job_id}}:{{origin}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Recent Jobs and Found Origin (last 6h)",
+      "description": "Lists jobs and the origin that found them (if any) within the selected time window",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (engine, job_id, origin) (max_over_time(miner_job_found_origin{engine=~\"$engine\"}[6h]))",
+          "legendFormat": "{{engine}}, {{job_id}}, {{origin}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false },
+        "frameIndex": 0
+      },
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": { "mode": "columns" }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU vs CPU Wins (1m increase over time)",
+      "description": "Compare GPU (G1/G2) vs CPU parity wins over time, stacked",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": "$DS_PROMETHEUS",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (label_replace(increase(miner_found_by_origin_total{engine=~\"$engine\", origin=~\"$origin\"}[1m]), \"class\", \"$1\", \"origin\", \"(gpu-g1|gpu-g2)\"))",
+          "legendFormat": "gpu"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (origin) (increase(miner_found_by_origin_total{engine=~\"$engine\", origin=\"cpu\"}[1m]))",
+          "legendFormat": "cpu"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "stacking": { "mode": "normal", "group": "B" }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["quantus", "miner", "prometheus", "gpu-cuda", "origins"],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "DS_PROMETHEUS",
+        "hide": 0,
+        "query": "prometheus",
+        "current": {},
+        "options": []
+      },
+      {
+        "type": "query",
+        "name": "engine",
+        "label": "Engine",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_found_by_origin_total, engine)",
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_found_by_origin_total, engine)",
+        "regex": "",
+        "current": {
+          "selected": true,
+          "text": "gpu-cuda",
+          "value": "gpu-cuda"
+        }
+      },
+      {
+        "type": "query",
+        "name": "origin",
+        "label": "Origin",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_found_by_origin_total{engine=~\"$engine\"}, origin)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_found_by_origin_total{engine=~\"$engine\"}, origin)",
+        "regex": "",
+        "current": {
+          "selected": false,
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "query",
+        "name": "job_id",
+        "label": "Job ID",
+        "hide": 0,
+        "datasource": "$DS_PROMETHEUS",
+        "definition": "label_values(miner_job_found_origin{engine=~\"$engine\"}, job_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "label_values(miner_job_found_origin{engine=~\"$engine\"}, job_id)",
+        "regex": "",
+        "current": {
+          "selected": false,
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Quantus Miner - GPU CUDA Found Origins",
+  "version": 1,
+  "uid": null
+}
