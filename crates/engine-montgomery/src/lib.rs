@@ -118,6 +118,7 @@ impl MinerEngine for MontgomeryCpuEngine {
                         distance,
                     },
                     hash_count,
+                    origin: engine_cpu::FoundOrigin::Cpu,
                 };
             }
 
@@ -818,10 +819,12 @@ mod mont_portable {
                     EngineStatus::Found {
                         candidate: cm,
                         hash_count: hm,
+                        origin: _,
                     },
                     EngineStatus::Found {
                         candidate: cf,
                         hash_count: hf,
+                        origin: _,
                     },
                 ) => {
                     assert_eq!(cm.nonce, cf.nonce, "nonce mismatch");
@@ -905,10 +908,12 @@ mod tests {
                 EngineStatus::Found {
                     candidate: m_cand,
                     hash_count: m_hashes,
+                    origin: _,
                 },
                 EngineStatus::Found {
                     candidate: f_cand,
                     hash_count: f_hashes,
+                    origin: _,
                 },
             ) => {
                 assert_eq!(

@@ -388,6 +388,7 @@ impl CudaEngine {
                             distance,
                         },
                         hash_count,
+                        origin: engine_cpu::FoundOrigin::Cpu,
                     });
                 }
             }
@@ -811,6 +812,7 @@ impl CudaEngine {
                                     distance: host_distance,
                                 },
                                 hash_count,
+                                origin: engine_cpu::FoundOrigin::GpuG2,
                             });
                         } else {
                             // FP within batch — log minimal info and fall through to advance/continue
@@ -1205,6 +1207,7 @@ impl CudaEngine {
                             distance,
                         },
                         hash_count,
+                        origin: engine_cpu::FoundOrigin::GpuG1,
                     });
                 }
 

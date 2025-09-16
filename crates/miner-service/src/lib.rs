@@ -342,6 +342,7 @@ pub struct ThreadResult {
     thread_id: usize,
     result: Option<MiningJobResult>,
     hash_count: u64,
+    origin: Option<engine_cpu::FoundOrigin>,
     completed: bool,
 }
 
@@ -554,9 +555,14 @@ impl MiningJob {
                     {
                         // reuse existing http metric bucket for visibility until dedicated counters exist
                         metrics::inc_mine_requests("result_ready");
-                        // Emit per-job origin gauge with real job_id; engine reports precise origin separately
                         if let Some(job_id) = &self.job_id {
-                            metrics::set_job_found_origin(self.engine_name, job_id, "unknown");
+                            let origin_label = match thread_result.origin {
+                                Some(engine_cpu::FoundOrigin::Cpu) => "cpu",
+                                Some(engine_cpu::FoundOrigin::GpuG1) => "gpu-g1",
+                                Some(engine_cpu::FoundOrigin::GpuG2) => "gpu-g2",
+                                _ => "unknown",
+                            };
+                            metrics::set_job_found_origin(self.engine_name, job_id, origin_label);
                         }
                     }
                 }
@@ -690,6 +696,7 @@ fn mine_range_with_engine(
                         distance,
                     },
                 hash_count,
+                origin,
             } => {
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
@@ -700,6 +707,7 @@ fn mine_range_with_engine(
                         distance,
                     }),
                     hash_count,
+                    origin: Some(origin),
                     completed: true,
                 };
                 if sender.try_send(final_result).is_err() {
@@ -714,6 +722,7 @@ fn mine_range_with_engine(
                     thread_id,
                     result: None,
                     hash_count,
+                    origin: None,
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
@@ -737,6 +746,7 @@ fn mine_range_with_engine(
                     thread_id,
                     result: None,
                     hash_count,
+                    origin: None,
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
@@ -762,6 +772,7 @@ fn mine_range_with_engine(
             thread_id,
             result: None,
             hash_count: 0,
+            origin: None,
             completed: true,
         };
         if sender.try_send(final_result).is_err() {

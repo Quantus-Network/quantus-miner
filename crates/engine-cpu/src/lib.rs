@@ -34,6 +34,15 @@ pub struct Candidate {
     pub distance: U512, // achieved distance for this nonce
 }
 
+/// Origin of a found candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FoundOrigin {
+    Cpu,
+    GpuG1,
+    GpuG2,
+    Unknown,
+}
+
 /// Status from an engine search.
 ///
 /// For synchronous `search_range` calls, the final outcome will be one of:
@@ -50,6 +59,7 @@ pub enum EngineStatus {
     Found {
         candidate: Candidate,
         hash_count: u64,
+        origin: FoundOrigin,
     },
     Exhausted {
         hash_count: u64,
@@ -133,6 +143,7 @@ impl MinerEngine for BaselineCpuEngine {
                 return EngineStatus::Found {
                     candidate,
                     hash_count,
+                    origin: FoundOrigin::Cpu,
                 };
             }
 
@@ -202,6 +213,7 @@ impl MinerEngine for FastCpuEngine {
                         distance,
                     },
                     hash_count,
+                    origin: FoundOrigin::Cpu,
                 };
             }
 
@@ -324,6 +336,7 @@ impl MinerEngine for ChainManipulatorEngine {
                         distance,
                     },
                     hash_count,
+                    origin: FoundOrigin::Cpu,
                 };
             }
 
@@ -384,10 +397,12 @@ mod tests {
                 EngineStatus::Found {
                     candidate: b_cand,
                     hash_count: b_hashes,
+                    origin: _,
                 },
                 EngineStatus::Found {
                     candidate: f_cand,
                     hash_count: f_hashes,
+                    origin: _,
                 },
             ) => {
                 assert_eq!(
