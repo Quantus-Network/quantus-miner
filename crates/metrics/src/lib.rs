@@ -262,6 +262,21 @@ static MISSED_WINNER_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     c
 });
 
+static FOUND_BY_ORIGIN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        opts!(
+            "miner_found_by_origin_total",
+            "Count of candidates found by origin per engine"
+        ),
+        &["engine", "origin"],
+    )
+    .expect("create miner_found_by_origin_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_found_by_origin_total");
+    c
+});
+
 static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         opts!(
@@ -319,6 +334,21 @@ static JOB_STATUS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     REGISTRY
         .register(Box::new(g.clone()))
         .expect("register miner_job_status");
+    g
+});
+
+static JOB_FOUND_ORIGIN: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_job_found_origin",
+            "Job found origin gauge (set to 1 for the origin that found the candidate)"
+        ),
+        &["engine", "job_id", "origin"],
+    )
+    .expect("create miner_job_found_origin");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_job_found_origin");
     g
 });
 
@@ -390,8 +420,21 @@ pub fn inc_sample_mismatch(engine: &str) {
     SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
 }
 
+pub fn inc_found_by_origin(engine: &str, origin: &str) {
+    FOUND_BY_ORIGIN_TOTAL
+        .with_label_values(&[engine, origin])
+        .inc();
+}
+
 pub fn inc_gpu_g2_missed_winner() {
     MISSED_WINNER_TOTAL.inc();
+}
+
+pub fn set_job_found_origin(engine: &str, job_id: &str, origin: &str) {
+    touch_job(engine, job_id);
+    JOB_FOUND_ORIGIN
+        .with_label_values(&[engine, job_id, origin])
+        .set(1.0);
 }
 
 pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
@@ -496,6 +539,10 @@ fn prune_stale() {
         let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "completed"]);
         let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "failed"]);
         let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "cancelled"]);
+        // Remove per-job origin gauge variants (known origins)
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "cpu"]);
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g1"]);
+        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g2"]);
         JOB_KEYS
             .lock()
             .unwrap()
@@ -552,6 +599,10 @@ pub fn remove_job_metrics(engine: &str, job_id: &str) {
     let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "completed"]);
     let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "failed"]);
     let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "cancelled"]);
+    // Remove per-job origin gauge variants (known origins)
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "cpu"]);
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g1"]);
+    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g2"]);
     JOB_KEYS
         .lock()
         .unwrap()

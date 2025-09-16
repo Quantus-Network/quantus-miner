@@ -373,6 +373,14 @@ impl CudaEngine {
                 hash_count = hash_count.saturating_add(1);
                 if pow_core::is_valid_distance(ctx, distance) {
                     let work = current.to_big_endian();
+                    log::info!(target: "miner", "CUDA: Found candidate by CPU parity check (origin=cpu): nonce={}, distance={}", current, distance);
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics::inc_found_by_origin("gpu-cuda", "cpu");
+                        // Per-job origin gauge: job_id is not available at the engine layer; emit under a placeholder to at least count occurrences.
+                        // The service layer will remove unknown-series via TTL janitor; a future change can plumb job_id through the trait.
+                        metrics::set_job_found_origin("gpu-cuda", "unknown", "cpu");
+                    }
                     return Ok(EngineStatus::Found {
                         candidate: engine_cpu::EngineCandidate {
                             nonce: current,
@@ -789,7 +797,13 @@ impl CudaEngine {
                         let work = nonce.to_big_endian();
                         let host_distance = pow_core::distance_for_nonce(ctx, nonce);
                         if pow_core::is_valid_distance(ctx, host_distance) {
-                            log::info!(target: "miner", "CUDA G2: early-exit found at idx={k}");
+                            log::info!(target: "miner", "CUDA G2: early-exit found (origin=gpu) at idx={k}, nonce={}, distance={}", nonce, host_distance);
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics::inc_found_by_origin("gpu-cuda", "gpu-g2");
+                                // Per-job origin gauge: job_id is not available at the engine layer; emit under a placeholder to at least count occurrences.
+                                metrics::set_job_found_origin("gpu-cuda", "unknown", "gpu-g2");
+                            }
                             return Ok(EngineStatus::Found {
                                 candidate: engine_cpu::EngineCandidate {
                                     nonce,
@@ -1177,6 +1191,13 @@ impl CudaEngine {
                     let k = found_min_idx.load(std::sync::atomic::Ordering::Relaxed) as u64;
                     hash_count = hash_count.saturating_add(k + 1);
                     let work = nonce.to_big_endian();
+                    log::info!(target: "miner", "CUDA G1: candidate found (origin=gpu-g1) at k={}, nonce={}, distance={}", k, nonce, distance);
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics::inc_found_by_origin("gpu-cuda", "gpu-g1");
+                        // Per-job origin gauge: job_id is not available at the engine layer; emit under a placeholder to at least count occurrences.
+                        metrics::set_job_found_origin("gpu-cuda", "unknown", "gpu-g1");
+                    }
                     return Ok(EngineStatus::Found {
                         candidate: engine_cpu::EngineCandidate {
                             nonce,

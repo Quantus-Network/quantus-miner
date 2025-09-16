@@ -554,6 +554,10 @@ impl MiningJob {
                     {
                         // reuse existing http metric bucket for visibility until dedicated counters exist
                         metrics::inc_mine_requests("result_ready");
+                        // Emit per-job origin gauge with real job_id; engine reports precise origin separately
+                        if let Some(job_id) = &self.job_id {
+                            metrics::set_job_found_origin(self.engine_name, job_id, "unknown");
+                        }
                     }
                 }
             }
@@ -1591,7 +1595,13 @@ mod tests {
         let (tx, rx) = bounded::<super::ThreadResult>(8);
 
         super::mine_range_with_engine(
-            0, &engine, ctx, range, cancel, tx,
+            0,
+            "test-job".to_string(),
+            &engine,
+            ctx,
+            range,
+            cancel,
+            tx,
             10, // ms (min chunk size is 5k; fine for testing progress + completion)
         );
 
