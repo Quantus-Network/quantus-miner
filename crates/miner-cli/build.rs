@@ -26,7 +26,7 @@ fn main() {
     println!("cargo:rustc-env=MINER_VERSION={version}");
 
     // Optional extra info for diagnostics
-    if let Some(sha) = env::var("GITHUB_SHA").ok() {
+    if let Ok(sha) = env::var("GITHUB_SHA") {
         println!("cargo:rustc-env=MINER_BUILD_SHA={}", sha);
     }
 
