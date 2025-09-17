@@ -1,0 +1,25 @@
+[package]
+name = "miner-telemetry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Telemetry client for Quantus External Miner (Polkadot SDK-compatible envelopes over WebSocket)"
+
+[lib]
+name = "miner_telemetry"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+# Dependencies (alphabetical)
+anyhow = { workspace = true }
+futures = "0.3"
+log = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+uuid = { version = "1", features = ["fast-rng", "v4"] }

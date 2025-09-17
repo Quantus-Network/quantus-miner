@@ -44,6 +44,49 @@ struct Args {
     /// Note: GPU engines are currently unimplemented and will return a clear error at runtime.
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
+
+    /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
+    #[arg(long = "telemetry-endpoint", env = "MINER_TELEMETRY_ENDPOINTS", value_delimiter = ',', num_args = 0.., value_name = "URL")]
+    telemetry_endpoints: Option<Vec<String>>,
+
+    /// Enable or disable telemetry explicitly
+    #[arg(long = "telemetry-enabled", env = "MINER_TELEMETRY_ENABLED")]
+    telemetry_enabled: Option<bool>,
+
+    /// Telemetry verbosity level (0..=4 typical)
+    #[arg(long = "telemetry-verbosity", env = "MINER_TELEMETRY_VERBOSITY")]
+    telemetry_verbosity: Option<u8>,
+
+    /// Interval seconds for system.interval messages
+    #[arg(
+        long = "telemetry-interval-secs",
+        env = "MINER_TELEMETRY_INTERVAL_SECS"
+    )]
+    telemetry_interval_secs: Option<u64>,
+
+    /// Default association: chain name
+    #[arg(long = "telemetry-chain", env = "MINER_TELEMETRY_CHAIN")]
+    telemetry_chain: Option<String>,
+
+    /// Default association: genesis hash (hex)
+    #[arg(long = "telemetry-genesis", env = "MINER_TELEMETRY_GENESIS")]
+    telemetry_genesis: Option<String>,
+
+    /// Default association: node telemetry id
+    #[arg(long = "telemetry-node-id", env = "MINER_TELEMETRY_NODE_ID")]
+    telemetry_node_id: Option<String>,
+
+    /// Default association: node libp2p peer id
+    #[arg(long = "telemetry-node-peer-id", env = "MINER_TELEMETRY_NODE_PEER_ID")]
+    telemetry_node_peer_id: Option<String>,
+
+    /// Default association: node name
+    #[arg(long = "telemetry-node-name", env = "MINER_TELEMETRY_NODE_NAME")]
+    telemetry_node_name: Option<String>,
+
+    /// Default association: node version
+    #[arg(long = "telemetry-node-version", env = "MINER_TELEMETRY_NODE_VERSION")]
+    telemetry_node_version: Option<String>,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -86,6 +129,40 @@ async fn main() {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
+
+    // Telemetry CLI passthrough to env for miner-service bootstrap
+    if let Some(eps) = args.telemetry_endpoints.as_ref() {
+        if !eps.is_empty() {
+            std::env::set_var("MINER_TELEMETRY_ENDPOINTS", eps.join(","));
+        }
+    }
+    if let Some(v) = args.telemetry_enabled {
+        std::env::set_var("MINER_TELEMETRY_ENABLED", if v { "1" } else { "0" });
+    }
+    if let Some(v) = args.telemetry_verbosity {
+        std::env::set_var("MINER_TELEMETRY_VERBOSITY", v.to_string());
+    }
+    if let Some(v) = args.telemetry_interval_secs {
+        std::env::set_var("MINER_TELEMETRY_INTERVAL_SECS", v.to_string());
+    }
+    if let Some(v) = args.telemetry_chain.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_CHAIN", v);
+    }
+    if let Some(v) = args.telemetry_genesis.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_GENESIS", v);
+    }
+    if let Some(v) = args.telemetry_node_id.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_NODE_ID", v);
+    }
+    if let Some(v) = args.telemetry_node_peer_id.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_NODE_PEER_ID", v);
+    }
+    if let Some(v) = args.telemetry_node_name.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_NODE_NAME", v);
+    }
+    if let Some(v) = args.telemetry_node_version.as_ref() {
+        std::env::set_var("MINER_TELEMETRY_NODE_VERSION", v);
+    }
 
     // Log effective configuration (concise; see ServiceConfig Display)
     log::info!("Starting external miner service...");

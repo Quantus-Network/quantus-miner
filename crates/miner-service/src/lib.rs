@@ -1254,6 +1254,126 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Start mining loop
     service.start_mining_loop().await;
 
+    // Telemetry bootstrap from environment variables (optional)
+    let telemetry_handle_opt = {
+        let endpoints: Vec<String> = std::env::var("MINER_TELEMETRY_ENDPOINTS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let enabled = std::env::var("MINER_TELEMETRY_ENABLED")
+            .ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(!endpoints.is_empty());
+
+        let verbosity = std::env::var("MINER_TELEMETRY_VERBOSITY")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(0);
+
+        if enabled && !endpoints.is_empty() {
+            let interval_secs = std::env::var("MINER_TELEMETRY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok());
+            let chain = std::env::var("MINER_TELEMETRY_CHAIN").ok();
+            let genesis = std::env::var("MINER_TELEMETRY_GENESIS").ok();
+
+            // Optional linked node info
+            let link = miner_telemetry::TelemetryNodeLink {
+                node_telemetry_id: std::env::var("MINER_TELEMETRY_NODE_ID").ok(),
+                node_peer_id: std::env::var("MINER_TELEMETRY_NODE_PEER_ID").ok(),
+                node_name: std::env::var("MINER_TELEMETRY_NODE_NAME").ok(),
+                node_version: std::env::var("MINER_TELEMETRY_NODE_VERSION").ok(),
+                chain: chain.clone(),
+                genesis_hash: genesis.clone(),
+            };
+            let default_link = if link.node_telemetry_id.is_some()
+                || link.node_peer_id.is_some()
+                || link.node_name.is_some()
+                || link.node_version.is_some()
+                || link.chain.is_some()
+                || link.genesis_hash.is_some()
+            {
+                Some(link)
+            } else {
+                None
+            };
+
+            let cfg = miner_telemetry::TelemetryConfig {
+                enabled,
+                endpoints,
+                verbosity,
+                name: Some("quantus-miner".to_string()),
+                implementation: Some("quantus-miner".to_string()),
+                version: Some(
+                    option_env!("MINER_VERSION")
+                        .unwrap_or(env!("CARGO_PKG_VERSION"))
+                        .to_string(),
+                ),
+                chain,
+                genesis_hash: genesis,
+                interval_secs,
+                default_link,
+            };
+            Some(miner_telemetry::start(cfg))
+        } else {
+            None
+        }
+    };
+
+    if let Some(telemetry) = telemetry_handle_opt {
+        log::info!("Telemetry enabled; session_id={}", telemetry.session_id());
+        telemetry.emit_system_connected(None).await;
+
+        let telemetry_handle = telemetry.clone();
+        let svc = service.clone();
+        let engine_name_str = engine.name().to_string();
+        let interval_secs = std::env::var("MINER_TELEMETRY_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(15);
+        let start_instant = std::time::Instant::now();
+
+        tokio::spawn(async move {
+            loop {
+                let (active_jobs, total_rate) = {
+                    let jobs = svc.jobs.lock().await;
+                    let mut running = 0i64;
+                    let mut rate = 0.0;
+                    for (_id, job) in jobs.iter() {
+                        if job.status == JobStatus::Running {
+                            running += 1;
+                            rate += job.last_hash_rate;
+                        }
+                    }
+                    (running, rate)
+                };
+
+                let uptime_ms = start_instant.elapsed().as_millis() as u64;
+
+                let interval = miner_telemetry::SystemInterval {
+                    uptime_ms,
+                    engine: Some(engine_name_str.clone()),
+                    workers: Some(svc.workers as u32),
+                    hash_rate: Some(total_rate),
+                    active_jobs: Some(active_jobs),
+                    linked_node_hint: None,
+                };
+
+                telemetry_handle.emit_system_interval(&interval, None).await;
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+            }
+        });
+    } else {
+        log::info!("Telemetry disabled (no endpoints configured)");
+    }
+
     // Optionally start metrics exporter if enabled via CLI and feature flag.
     if let Some(port) = config.metrics_port {
         #[cfg(feature = "metrics")]
