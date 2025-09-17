@@ -46,3 +46,4 @@ engine-montgomery = { path = "../engine-montgomery", optional = true }
 engine-gpu-cuda = { path = "../engine-gpu-cuda", optional = true, features = ["cuda"] }
 engine-gpu-opencl = { path = "../engine-gpu-opencl", optional = true }
 metrics = { path = "../metrics", optional = true }
+miner-telemetry = { path = "../miner-telemetry" }
