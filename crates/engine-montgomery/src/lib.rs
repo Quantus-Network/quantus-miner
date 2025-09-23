@@ -142,8 +142,6 @@ impl MinerEngine for MontgomeryCpuEngine {
 /// to wire up a fixed-width limb backend for 512-bit operations.
 mod mont_portable {
     use super::*;
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    use std::arch::asm;
 
     // Montgomery context with portable CIOS 8x64 implementation (u128 intermediates).
     // Limbs are stored little-endian (limb 0 is least significant).
@@ -666,7 +664,6 @@ mod mont_portable {
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_aarch64(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        use core::arch::aarch64::umulh;
         const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
         let mut acc = [0u128; 9];
         for &ai in a.iter().take(8) {
@@ -676,7 +673,7 @@ mod mont_portable {
                 // low 64-bit product
                 let lo = ai.wrapping_mul(b[j]);
                 // high 64-bit product via UMULH intrinsic
-                let hi = unsafe { umulh(ai, b[j]) } as u128;
+                let hi = ((ai as u128) * (b[j] as u128) >> 64) as u128;
                 let sum = acc[j] + (lo as u128) + carry;
                 acc[j] = sum & MASK;
                 carry = (sum >> 64) + hi;
@@ -690,7 +687,7 @@ mod mont_portable {
             let mut carry2: u128 = 0;
             for j in 0..8 {
                 let lo2 = m.wrapping_mul(n[j]);
-                let hi2 = unsafe { umulh(m, n[j]) } as u128;
+                let hi2 = ((m as u128) * (n[j] as u128) >> 64) as u128;
                 let sum2 = acc[j] + (lo2 as u128) + carry2;
                 acc[j] = sum2 & MASK;
                 carry2 = (sum2 >> 64) + hi2;
