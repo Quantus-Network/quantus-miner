@@ -53,58 +53,73 @@ jobs:
           echo "commit_sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "source_branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Get current version from Cargo.toml
-        id: current_version
+      - name: Get latest tag
+        id: latest_tag
         run: |
-          current=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          echo "current=$current" >> $GITHUB_OUTPUT
-          echo "Current version: $current"
+          # Get all version tags and sort them by version
+          latest_semver_tag=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
+          
+          # If no tags found, use default
+          if [ -z "$latest_semver_tag" ]; then
+            latest_semver_tag="v0.0.0"
+          fi
+          
+          echo "latest_tag_found=$latest_semver_tag" >> $GITHUB_OUTPUT
+          echo "Latest semantic version tag found: $latest_semver_tag"
 
       - name: Calculate new version
         id: versioner
         env:
-          CURRENT_VERSION: ${{ steps.current_version.outputs.current }}
+          LATEST_TAG: ${{ steps.latest_tag.outputs.latest_tag_found }}
           VERSION_TYPE: ${{ github.event.inputs.version_type }}
           CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
         run: |
+          # Remove 'v' prefix and any suffix for processing
+          current_version=${LATEST_TAG#v}
+          # Remove any suffix after the version number
+          current_version=$(echo "$current_version" | sed -E 's/-[^-]+$//')
+
           if [[ "$VERSION_TYPE" == "custom" ]]; then
             if [[ -z "$CUSTOM_VERSION" ]]; then
               echo "Error: Custom version is selected but no custom_version string provided."
               exit 1
             fi
+            if [[ ! "$CUSTOM_VERSION" =~ ^v ]]; then
+              echo "Error: Custom version string MUST start with 'v' (e.g., v1.2.3)."
+              exit 1
+            fi
             new_version="$CUSTOM_VERSION"
           else
-            # Parse current version
-            IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
-            major=${VERSION_PARTS[0]}
-            minor=${VERSION_PARTS[1]}
-            patch=${VERSION_PARTS[2]}
-            
-            # Calculate new version
-            case $VERSION_TYPE in
-              major)
+            # Split version and pre-release part
+            IFS='-' read -r version_core prerelease_part <<< "$current_version"
+            IFS='.' read -r major minor patch <<< "$version_core"
+
+            # Increment based on type
+            if [[ "$VERSION_TYPE" == "major" ]]; then
+              if [[ "$major" == "0" ]]; then # Handle 0.x.y -> 0.(x+1).0
+                major=$major
+                minor=$((minor + 1))
+                patch=0
+              else
                 major=$((major + 1))
                 minor=0
                 patch=0
-                ;;
-              minor)
-                minor=$((minor + 1))
-                patch=0
-                ;;
-              patch)
-                patch=$((patch + 1))
-                ;;
-            esac
-            
-            new_version="$major.$minor.$patch"
+              fi
+            elif [[ "$VERSION_TYPE" == "minor" ]]; then
+              minor=$((minor + 1))
+              patch=0
+            elif [[ "$VERSION_TYPE" == "patch" ]]; then
+              patch=$((patch + 1))
+            else
+              echo "Error: Invalid version_type: $VERSION_TYPE"
+              exit 1
+            fi
+            new_version="v$major.$minor.$patch"
           fi
-          
-          new_tag="v$new_version"
-          
-          echo "new_version=$new_version" >> $GITHUB_OUTPUT
-          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
           echo "New version: $new_version"
-          echo "New tag: $new_tag"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+          echo "new_tag=$new_version" >> $GITHUB_OUTPUT
 
   update-cargo-toml:
     name: 📝 Update version files
@@ -122,9 +137,6 @@ jobs:
       - name: Setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Install cargo-edit
-        run: cargo install cargo-edit --locked
-
       - name: Create version bump branch and PR
         env:
           NEW_VERSION: ${{ needs.calculate-next-version.outputs.new_version }}
@@ -134,27 +146,42 @@ jobs:
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
         run: |
           set -ex
-          branch_name="release/${NEW_TAG}"
+          new_cargo_version=${NEW_VERSION#v}
+          branch_name="release/${NEW_VERSION}"
 
           # Create new branch from source branch
           git checkout "$SOURCE_BRANCH"
           git checkout -b "$branch_name"
           
-          # Update version in Cargo.toml
-          echo "Updating Cargo.toml to version: $NEW_VERSION"
-          cargo set-version "$NEW_VERSION"
+          # Update version in workspace Cargo.toml (safer than cargo set-version)
+          echo "Updating workspace Cargo.toml to version: $new_cargo_version"
+          sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" Cargo.toml
+          
+          # Regenerate Cargo.lock with precise updates for our packages only
+          cargo update -p miner-cli --precise "$new_cargo_version"
+          cargo update -p miner-service --precise "$new_cargo_version"
+          cargo update -p pow-core --precise "$new_cargo_version"
+          cargo update -p metrics --precise "$new_cargo_version"
+          cargo update -p miner-telemetry --precise "$new_cargo_version"
+          cargo update -p engine-cpu --precise "$new_cargo_version"
+          cargo update -p engine-gpu-cuda --precise "$new_cargo_version"
+          cargo update -p engine-gpu-opencl --precise "$new_cargo_version"
+          cargo update -p engine-montgomery --precise "$new_cargo_version"
+          
+          # Verify everything compiles correctly
+          cargo check --workspace
           
           # Commit changes
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           
           git add Cargo.toml Cargo.lock
-          git commit -m "bump version to $NEW_TAG"
+          git commit -m "bump version to $NEW_VERSION"
           git push origin "$branch_name"
 
           # Prepare PR title and body
-          PR_TITLE="Release $NEW_TAG"
-          PR_BODY="Automated version bump for release $NEW_TAG.
+          PR_TITLE="Release $NEW_VERSION"
+          PR_BODY="Automated version bump for release $NEW_VERSION.
 
           ## Overview
           - Version bump: ${{ github.event.inputs.version_type }}
@@ -163,11 +190,6 @@ jobs:
 
           ## What changed
           - Updated version in Cargo.toml and Cargo.lock
-
-          ## Validation
-          - [ ] Version number is correct
-          - [ ] All tests pass
-          - [ ] Ready for release
 
           Triggered by workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
