@@ -3,9 +3,17 @@ name: continuous integration
 
 on:
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,31 +24,105 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality-control:
+  fast-checks:
+    name: 🏁 Fast Checks (Format)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          components: rustfmt, clippy
+          components: rustfmt
       - name: install taplo
         run: cargo install taplo-cli --locked
-      - name: taplo
-        run: taplo format --check --config taplo.toml
-      - name: format
-        run: cargo fmt --all -- --check
+      - name: Run format checks
+        run: |
+          taplo format --check --config taplo.toml
+          cargo fmt --all -- --check
         timeout-minutes: 5
+
+  build-and-test:
+    name: 🛠️ Build & Test
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: compile
         run: cargo build --locked --workspace
         timeout-minutes: 90
-      - name: clippy
-        run: cargo clippy --locked --workspace
-        timeout-minutes: 30
       - name: test
         run: cargo test --locked --workspace
         timeout-minutes: 15
+
+  analysis:
+    name: 🤖 Analysis (Clippy & Doc)
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+          components: clippy
+      - name: clippy
+        run: cargo clippy --locked --workspace
+        timeout-minutes: 30
       - name: doc
         run: cargo doc --locked --workspace --no-deps
         timeout-minutes: 15
+
+  cuda-build:
+    name: 🚀 CUDA Build (cuda=${{ matrix.cuda_tag }} sm=${{ matrix.sm }})
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_tag: ["12.9.0", "13.0.0"]
+        sm: ["86", "89", "120"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Check if cuda-builder image exists
+        id: check-image
+        run: |
+          if docker manifest inspect ghcr.io/quantus-network/cuda-builder:${{ matrix.cuda_tag }} >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ CUDA builder image exists for ${{ matrix.cuda_tag }}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️  CUDA builder image not found for ${{ matrix.cuda_tag }}, skipping build"
+          fi
+      - name: Build with cuda-builder image
+        if: steps.check-image.outputs.exists == 'true'
+        id: build
+        env:
+          CUDA_TAG: ${{ matrix.cuda_tag }}
+          SM: ${{ matrix.sm }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -eux
+          SHORT_TAG="$(echo "${CUDA_TAG}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+          BIN="quantus-miner-cuda-${SHORT_TAG}-sm-${SM}"
+          mkdir -p .cargo-cache target
+          docker run --rm \
+            -e CUDA_ARCH=sm_${SM} \
+            -e CARGO_TERM_COLOR=always \
+            -e GITHUB_SHA="${GITHUB_SHA}" \
+            -v "${PWD}:/workspace" \
+            -v "${PWD}/.cargo-cache:/opt/cargo/registry" \
+            -v "${PWD}/target:/workspace/target" \
+            ghcr.io/quantus-network/cuda-builder:${CUDA_TAG} \
+            bash -lc 'cd /workspace && echo "CUDA version:" && nvcc --version && cargo build -p miner-cli --features cuda --release && strip target/release/quantus-miner || true'
+          install -m 0755 ./target/release/quantus-miner "./${BIN}"
+          echo "bin_path=./${BIN}" >> "$GITHUB_OUTPUT"
+          echo "short_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+      - name: Upload artifact
+        if: steps.check-image.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ format('quantus-miner-cuda-{0}-sm-{1}', steps.build.outputs.short_tag, matrix.sm) }}
+          path: ${{ steps.build.outputs.bin_path }}
+          if-no-files-found: error
+          retention-days: 3
