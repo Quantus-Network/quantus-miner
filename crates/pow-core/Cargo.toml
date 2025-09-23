@@ -1,7 +1,7 @@
 [package]
 name = "pow-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Local QPoW math core for the Quantus external miner (reference + optimized paths)"
 license = "MIT OR Apache-2.0"
 keywords = ["bigint", "crypto", "pow", "qpow", "quantus"]

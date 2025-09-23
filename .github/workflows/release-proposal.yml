@@ -140,9 +140,23 @@ jobs:
           git checkout "$SOURCE_BRANCH"
           git checkout -b "$branch_name"
           
-          # Update version in Cargo.toml
-          echo "Updating Cargo.toml to version: $NEW_VERSION"
-          cargo set-version "$NEW_VERSION"
+          # Update version in workspace Cargo.toml (safer than cargo set-version)
+          echo "Updating workspace Cargo.toml to version: $NEW_VERSION"
+          sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$NEW_VERSION\"/" Cargo.toml
+          
+          # Regenerate Cargo.lock with precise updates for our packages only
+          cargo update -p miner-cli --precise "$NEW_VERSION"
+          cargo update -p miner-service --precise "$NEW_VERSION"
+          cargo update -p pow-core --precise "$NEW_VERSION"
+          cargo update -p metrics --precise "$NEW_VERSION"
+          cargo update -p miner-telemetry --precise "$NEW_VERSION"
+          cargo update -p engine-cpu --precise "$NEW_VERSION"
+          cargo update -p engine-gpu-cuda --precise "$NEW_VERSION"
+          cargo update -p engine-gpu-opencl --precise "$NEW_VERSION"
+          cargo update -p engine-montgomery --precise "$NEW_VERSION"
+          
+          # Verify everything compiles correctly
+          cargo check --workspace
           
           # Commit changes
           git config user.name "${{ github.actor }}"
