@@ -129,7 +129,7 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.calculate-next-version.outputs.new_version }}
           NEW_TAG: ${{ needs.calculate-next-version.outputs.new_tag }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
         run: |
