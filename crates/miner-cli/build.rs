@@ -30,8 +30,8 @@ fn main() {
         println!("cargo:rustc-env=MINER_BUILD_SHA={}", sha);
     }
 
-    // Helpful build log
-    println!("cargo:warning=miner-cli: computed MINER_VERSION={version}");
+    // Log the computed version for debugging
+    println!("miner-cli: computed MINER_VERSION={version}");
 }
 
 /// Attempts to determine the short git SHA (first 8 hex chars) without requiring the `git` binary.
