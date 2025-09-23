@@ -37,7 +37,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 
 # Protocol types from the node repo (keep API compatibility)
-resonance-miner-api = { workspace = true }
+quantus-miner-api = { workspace = true }
 
 # Local crates
 pow-core = { path = "../pow-core" }

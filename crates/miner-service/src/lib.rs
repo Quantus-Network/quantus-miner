@@ -5,7 +5,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
 use pow_core::compat;
 use primitive_types::U512;
-use resonance_miner_api::*;
+use quantus_miner_api::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -902,7 +902,7 @@ pub async fn handle_result_request(
         None => {
             log::warn!("Result request for unknown job: {job_id}");
             return Ok(warp::reply::with_status(
-                warp::reply::json(&resonance_miner_api::MiningResult {
+                warp::reply::json(&quantus_miner_api::MiningResult {
                     status: ApiResponseStatus::NotFound,
                     job_id,
                     nonce: None,
@@ -963,7 +963,7 @@ pub async fn handle_result_request(
     let elapsed_time = job.start_time.elapsed().as_secs_f64();
 
     Ok(warp::reply::with_status(
-        warp::reply::json(&resonance_miner_api::MiningResult {
+        warp::reply::json(&quantus_miner_api::MiningResult {
             status,
             job_id,
             nonce: nonce_hex,
@@ -1563,8 +1563,8 @@ mod tests {
     #[test]
     fn validate_mining_request_rejects_bad_inputs() {
         // Helper to build a baseline-valid request we can mutate per case
-        fn valid_req() -> resonance_miner_api::MiningRequest {
-            resonance_miner_api::MiningRequest {
+        fn valid_req() -> quantus_miner_api::MiningRequest {
+            quantus_miner_api::MiningRequest {
                 job_id: "job-1".to_string(),
                 // 64 hex chars (32 bytes)
                 mining_hash: "11".repeat(32),
@@ -1679,7 +1679,7 @@ mod tests {
         assert_eq!(res.status(), warp::http::StatusCode::NOT_FOUND);
 
         // 3) POST /mine valid -> 200 Accepted, duplicate -> 409
-        let req = resonance_miner_api::MiningRequest {
+        let req = quantus_miner_api::MiningRequest {
             job_id: "job-http-1".to_string(),
             mining_hash: "11".repeat(32),        // 64 hex chars
             distance_threshold: "0".to_string(), // strict, likely to fail later; OK for accept flow
