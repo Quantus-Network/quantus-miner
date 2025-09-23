@@ -673,26 +673,26 @@ mod mont_portable {
                 // low 64-bit product
                 let lo = ai.wrapping_mul(b[j]);
                 // high 64-bit product via UMULH intrinsic
-                let hi = ((ai as u128) * (b[j] as u128) >> 64) as u128;
+                let hi = ((ai as u128) * (b[j] as u128)) >> 64;
                 let sum = acc[j] + (lo as u128) + carry;
                 acc[j] = sum & MASK;
                 carry = (sum >> 64) + hi;
             }
-            acc[8] = acc[8] + carry;
+            acc[8] += carry;
 
             // m = (acc[0] * n0_inv) mod 2^64
-            let m = ((acc[0] as u64).wrapping_mul(n0_inv)) as u64;
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
 
             // acc += m * n
             let mut carry2: u128 = 0;
             for j in 0..8 {
                 let lo2 = m.wrapping_mul(n[j]);
-                let hi2 = ((m as u128) * (n[j] as u128) >> 64) as u128;
+                let hi2 = ((m as u128) * (n[j] as u128)) >> 64;
                 let sum2 = acc[j] + (lo2 as u128) + carry2;
                 acc[j] = sum2 & MASK;
                 carry2 = (sum2 >> 64) + hi2;
             }
-            acc[8] = acc[8] + carry2;
+            acc[8] += carry2;
 
             // shift acc right by one limb
             for j in 0..8 {
