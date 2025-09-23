@@ -20,11 +20,43 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: nightly-2025-06-06
 
 jobs:
+  # Run CI checks if releasing from non-main branch
+  ci-validation:
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+
+      - name: install taplo
+        run: cargo install taplo-cli --locked
+
+      - name: format checks
+        run: |
+          taplo format --check --config taplo.toml
+          cargo fmt --all -- --check
+        timeout-minutes: 5
+
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        timeout-minutes: 30
+
+      - name: build and test
+        run: |
+          cargo build --locked --workspace
+          cargo test --locked --workspace
+        timeout-minutes: 90
+
   version:
     runs-on: ubuntu-latest
+    needs: [ci-validation]
+    if: always() && (needs.ci-validation.result == 'success' || needs.ci-validation.result == 'skipped')
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -33,21 +65,19 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      
+
       - name: install cargo-edit
         run: cargo install cargo-edit --locked
-      
+
       - name: get current version
         id: current_version
         run: |
           current=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           echo "current=$current" >> $GITHUB_OUTPUT
-      
+
       - name: calculate new version
         id: version
         run: |
@@ -82,11 +112,11 @@ jobs:
           echo "version=$new_version" >> $GITHUB_OUTPUT
           echo "tag=$tag" >> $GITHUB_OUTPUT
           echo "New version will be: $new_version"
-      
+
       - name: update Cargo.toml version
         run: |
           cargo set-version ${{ steps.version.outputs.version }}
-      
+
       - name: commit version bump
         run: |
           git config --local user.email "action@github.com"
@@ -94,7 +124,7 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "bump version to v${{ steps.version.outputs.version }}"
           git push origin main
-      
+
       - name: create tag
         run: |
           git tag ${{ steps.version.outputs.tag }}
@@ -123,16 +153,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-      
+
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           target: ${{ matrix.target }}
-      
+
       - name: build binary
         run: cargo build --release --locked --target ${{ matrix.target }}
-      
+
       - name: prepare binary
         shell: bash
         run: |
@@ -143,7 +172,7 @@ jobs:
             cp ${{ matrix.binary_name }} ${{ matrix.asset_name }}
             strip ${{ matrix.asset_name }}
           fi
-      
+
       - name: upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -157,12 +186,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-      
+
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: create release
         uses: softprops/action-gh-release@v2
         with:
@@ -176,4 +205,4 @@ jobs:
             artifacts/quantus-miner-windows-x86_64.exe/quantus-miner-windows-x86_64.exe
             artifacts/quantus-miner-macos-aarch64/quantus-miner-macos-aarch64
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
