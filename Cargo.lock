@@ -1176,7 +1176,7 @@ dependencies = [
  "num_cpus",
  "pow-core",
  "primitive-types",
- "resonance-miner-api",
+ "quantus-miner-api",
  "serde",
  "serde_json",
  "thiserror",
@@ -1533,6 +1533,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quantus-miner-api"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c4679baded32201e79442bd57f9d4d69b72f0f4b9111e7e6ee2428cc04f30bb"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1659,14 +1668,6 @@ name = "regex-syntax"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
-
-[[package]]
-name = "resonance-miner-api"
-version = "0.1.0"
-source = "git+https://github.com/Quantus-Network/chain.git#10ec5e0629c2c276cffcd6a3348b82ae42057fb4"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "ring"
