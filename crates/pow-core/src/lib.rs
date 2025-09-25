@@ -11,12 +11,13 @@
 //
 // Notes:
 // - Current implementation mirrors the reference algorithm using BigUint-based modular arithmetic.
-// - Future work will gate accelerated paths (e.g., Montgomery, SIMD SHA3) behind features.
+// - Future work will gate accelerated paths (e.g., Montgomery, SIMD Poseidon2) behind features.
 
 extern crate alloc;
 
 use core::ops::BitXor;
 use primitive_types::U512;
+use qp_poseidon_core::Poseidon2Core;
 
 #[cfg(feature = "std")]
 use log::{debug, error};
@@ -59,7 +60,7 @@ pub mod compat {
     /// Compute the QPoW distance for (header, nonce).
     ///
     /// distance = target XOR H(m^(h + nonce) mod n)
-    /// where (m, n) are derived deterministically from the header, and H is SHA3-512.
+    /// where (m, n) are derived deterministically from the header, and H is Poseidon2-512.
     pub fn get_nonce_distance(header: [u8; 32], nonce: [u8; 64]) -> U512 {
         super::get_nonce_distance_impl(header, nonce)
     }
@@ -79,7 +80,7 @@ pub mod compat {
         super::is_prime_impl(n)
     }
 
-    /// Apply the reference "hash-to-group" function then SHA3-512.
+    /// Apply the reference "hash-to-group" function then Poseidon2-512.
     pub fn hash_to_group_bigint_sha(h: &U512, m: &U512, n: &U512, solution: &U512) -> U512 {
         super::hash_to_group_bigint_sha_impl(h, m, n, solution)
     }
@@ -94,9 +95,9 @@ pub mod compat {
         super::mod_pow_impl(base, exponent, modulus)
     }
 
-    /// SHA3-512 over the big-endian bytes of input U512.
-    pub fn sha3_512(input: U512) -> U512 {
-        super::sha3_512_impl(input)
+    /// Poseidon2-512 over the big-endian bytes of input U512.
+    pub fn poseidon2_512(input: U512) -> U512 {
+        super::poseidon2_512_impl(input)
     }
 }
 
@@ -150,9 +151,9 @@ pub fn step_mul(ctx: &JobContext, y: U512) -> U512 {
 }
 
 /// Compute distance for the current y:
-/// distance = target XOR SHA3_512(y)
+/// distance = target XOR Poseidon2_512(y)
 pub fn distance_from_y(ctx: &JobContext, y: U512) -> U512 {
-    let hashed = sha3_512_impl(y);
+    let hashed = poseidon2_512_impl(y);
     ctx.target.bitxor(hashed)
 }
 
@@ -190,26 +191,24 @@ fn get_nonce_distance_impl(header: [u8; 32], nonce: [u8; 64]) -> U512 {
 
 /// Generates a pair of RSA-style numbers (m, n) deterministically from input header.
 ///
-/// - m: 256-bit derived via SHA2-256(header)
-/// - n: 512-bit derived via SHA3-512(header), iteratively rehashed until valid:
+/// - m: 256-bit derived via Poseidon2-256(header)
+/// - n: 512-bit derived via Poseidon2-512(header), iteratively rehashed until valid:
 ///   (odd, composite, coprime with m, and n > m)
 fn get_random_rsa_impl(header: &[u8; 32]) -> (U512, U512) {
-    use sha2::{Digest, Sha256};
-    use sha3::Sha3_512;
+    let poseidon = Poseidon2Core::new();
 
-    // m from SHA2-256
-    let mut sha256 = Sha256::new();
-    sha256.update(header);
-    let m = U512::from_big_endian(sha256.finalize().as_slice());
+    // m from Poseidon2-256
+    let m_bytes = poseidon.hash_no_pad_bytes(header);
+    let m = U512::from_big_endian(&m_bytes);
 
-    // initial n from SHA3-512
-    let mut sha3 = Sha3_512::new();
-    sha3.update(header);
-    let mut n = U512::from_big_endian(sha3.finalize().as_slice());
+    // initial n from Poseidon2-512
+    let mut n_bytes = poseidon.hash_512(&m_bytes);
+    let mut n = U512::from_big_endian(&n_bytes);
 
     // Keep hashing until n satisfies constraints
     while n % 2u32 == U512::zero() || n <= m || !is_coprime_impl(&m, &n) || is_prime_impl(&n) {
-        n = sha3_512_impl(n);
+        n_bytes = poseidon.hash_512(&n_bytes);
+        n = U512::from_big_endian(&n_bytes);
     }
 
     (m, n)
@@ -229,12 +228,12 @@ fn is_coprime_impl(a: &U512, b: &U512) -> bool {
     x == U512::one()
 }
 
-/// Hash-to-group then SHA3-512.
+/// Hash-to-group then Poseidon2-512.
 ///
-/// Note: The reference calls `hash_to_group_bigint` followed by an additional SHA3-512.
+/// Note: The reference calls `hash_to_group_bigint` followed by an additional Poseidon2-512.
 fn hash_to_group_bigint_sha_impl(h: &U512, m: &U512, n: &U512, solution: &U512) -> U512 {
     let result = hash_to_group_bigint_impl(h, m, n, solution);
-    sha3_512_impl(result)
+    poseidon2_512_impl(result)
 }
 
 /// Reference hash-to-group big-integer function (no chunk splitting).
@@ -291,11 +290,9 @@ fn mod_mul_impl(a: &U512, b: &U512, modulus: &U512) -> U512 {
 
 /// Miller–Rabin primality test.
 ///
-/// Deterministically selects k=32 bases hashed from `n` using SHA3-512 to
+/// Deterministically selects k=32 bases hashed from `n` using Poseidon2-512 to
 /// bound false-positive probability to ~1/2^64 for composites.
 fn is_prime_impl(n: &U512) -> bool {
-    use sha3::{Digest, Sha3_512};
-
     if *n <= U512::one() {
         return false;
     }
@@ -314,10 +311,10 @@ fn is_prime_impl(n: &U512) -> bool {
         r += 1;
     }
 
-    // Generate test bases deterministically from n using SHA3
+    // Generate test bases deterministically from n using Poseidon2
     let mut bases = [U512::zero(); 32];
     let mut base_count = 0;
-    let mut sha3 = Sha3_512::new();
+    let poseidon = Poseidon2Core::new();
     let mut counter = U512::zero();
 
     while base_count < 32 {
@@ -329,10 +326,10 @@ fn is_prime_impl(n: &U512) -> bool {
         bytes[..64].copy_from_slice(&n_bytes);
         bytes[64..128].copy_from_slice(&counter_bytes);
 
-        sha3.update(bytes);
+        let poseidon_bytes = poseidon.hash_512(&bytes);
 
         // Use the hash to generate a base in [2, n-2]
-        let hash = U512::from_big_endian(sha3.finalize_reset().as_slice());
+        let hash = U512::from_big_endian(&poseidon_bytes);
         let base = (hash % (*n - U512::from(4u32))) + U512::from(2u32);
         bases[base_count] = base;
         base_count += 1;
@@ -363,15 +360,11 @@ fn is_prime_impl(n: &U512) -> bool {
     true
 }
 
-/// SHA3-512 over the big-endian bytes of input `U512`.
-fn sha3_512_impl(input: U512) -> U512 {
-    use sha3::Digest;
-    use sha3::Sha3_512;
-
-    let mut sha3 = Sha3_512::new();
+/// Poseidon2-512 over the big-endian bytes of input `U512`.
+fn poseidon2_512_impl(input: U512) -> U512 {
+    let poseidon = Poseidon2Core::new();
     let bytes = input.to_big_endian();
-    sha3.update(bytes);
-    U512::from_big_endian(sha3.finalize().as_slice())
+    U512::from_big_endian(&poseidon.hash_512(&bytes))
 }
 
 #[cfg(test)]

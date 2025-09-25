@@ -1,6 +1,6 @@
 # engine-gpu-cuda (CUDA backend) – G1 bring‑up
 
-This crate provides the CUDA GPU backend for the Quantus External Miner. It currently implements “G1” bring‑up: the per‑nonce modular multiply loop runs on the GPU (512‑bit Montgomery CIOS), while SHA3‑512 and the threshold check run on the host CPU. This allows correctness and plumbing to be validated before we move SHA3 and early‑exit onto the device in G2.
+This crate provides the CUDA GPU backend for the Quantus External Miner. It currently implements "G1" bring‑up: the per‑nonce modular multiply loop runs on the GPU (512‑bit Montgomery CIOS), while Poseidon2‑512 and the threshold check run on the host CPU. This allows correctness and plumbing to be validated before we move Poseidon2 and early‑exit onto the device in G2.
 
 The backend is feature‑gated. When built with `--features cuda`, the crate’s build script compiles the CUDA kernel and embeds device images into the binary (CUBIN preferred, PTX as fallback). At runtime the engine selects an embedded image and launches the kernel to produce normalized `y` values per iteration.
 
@@ -10,16 +10,16 @@ The backend is feature‑gated. When built with `--features cuda`, the crate’s
 
 - G1 (current):
   - Device: 512‑bit Montgomery multiply (CIOS using 64×64→128 via `__umul64hi`), maintaining `ŷ` in Montgomery domain and converting to normal domain for output.
-  - Host: SHA3‑512 and threshold compare (and orchestration).
+  - Host: Poseidon2‑512 and threshold compare (and orchestration).
   - Correctness: parity against CPU small‑range tests.
-  - Performance: primarily limited by PCIe copy‑back and host SHA3. See “Tuning” below.
+  - Performance: primarily limited by PCIe copy‑back and host Poseidon2. See "Tuning" below.
 
 - G2 (next):
-  - Device: SHA3‑512 (Keccak‑f[1600], 24 rounds) optimized for 64‑byte input.
+  - Device: Poseidon2‑512 optimized for 64‑byte input.
   - Device: threshold compare + global early‑exit flag (atomic) + tiny candidate write.
   - Device: move constants to `__constant__` memory.
   - Host: poll early‑exit; no large copy‑backs (only candidate or counters).
-  - Result: removes PCIe and host‑SHA3 bottlenecks; enables real GPU‑bound throughput. Selection will be enabled via `MINER_CUDA_MODE=g2` once available.
+  - Result: removes PCIe and host‑Poseidon2 bottlenecks; enables real GPU‑bound throughput. Selection will be enabled via `MINER_CUDA_MODE=g2` once available.
 
 ---
 
@@ -43,7 +43,7 @@ Notes:
 
 ## Runtime selection and embeds
 
-At startup, the engine prefers the embedded CUBIN; if absent it falls back to the embedded PTX. You can override with `MINER_CUDA_IMAGE=cubin|ptx`. To attempt the G2 path (device SHA3 + early-exit), set `MINER_CUDA_MODE=g2`; if the G2 kernel isn’t embedded/available for the current device, the engine will fall back to G1 automatically. You’ll see logs like:
+At startup, the engine prefers the embedded CUBIN; if absent it falls back to the embedded PTX. You can override with `MINER_CUDA_IMAGE=cubin|ptx`. To attempt the G2 path (device Poseidon2 + early-exit), set `MINER_CUDA_MODE=g2`; if the G2 kernel isn't embedded/available for the current device, the engine will fall back to G1 automatically. You'll see logs like:
 - `CUDA: using CUBIN (embedded)`
 - `CUDA: using PTX source = embedded`
 - (If neither exists, the engine logs the absence and delegates to CPU fast engine.)
@@ -58,26 +58,26 @@ When a job runs, the engine prints its launch configuration and per‑launch out
 
 ## Env knobs – runtime (G1)
 
-These knobs affect GPU launch shape and how much work is returned to the host (and thus how much SHA3 the CPU must perform per launch).
+These knobs affect GPU launch shape and how much work is returned to the host (and thus how much Poseidon2 the CPU must perform per launch).
 
 - `MINER_CUDA_BLOCK_DIM` (default `256`)
   - Threads per block (`blockDim.x`). Use a multiple of 32 (warp size). 256 is a good default.
 - `MINER_CUDA_THREADS`
   - Total threads (grid workload). Grid dimension is `grid_dim = ceil(threads / block_dim)`. Target at least “#SMs × 1–2 blocks” for decent occupancy (e.g., RTX 3060 has 28 SMs → 28 or 32 blocks).
 - `MINER_CUDA_ITERS`
-  - Iterations per thread. Higher values produce larger output buffers and more host SHA3 work per launch.
+  - Iterations per thread. Higher values produce larger output buffers and more host Poseidon2 work per launch.
 - `MINER_CUDA_IMAGE` = `cubin` | `ptx` (optional)
   - Overrides the embedded image choice (debugging/testing). Default is to prefer CUBIN.
 - `MINER_CUDA_HASH_THREADS` (optional)
-  - Number of host SHA3 worker threads to use to consume GPU output. Defaults to available parallelism.
+  - Number of host Poseidon2 worker threads to use to consume GPU output. Defaults to available parallelism.
 - `MINER_CUDA_PINNED` = `1|true` (optional)
   - Use pinned (page-locked) host buffers and asynchronous device-to-host copies for G1 copy-back to reduce PCIe latency.
 - `MINER_CUDA_MODE` = `g2` (optional)
-  - Attempt G2 kernel (device SHA3-512 + threshold compare + early-exit). Falls back to G1 if the G2 kernel is not available for the current device image.
+  - Attempt G2 kernel (device Poseidon2-512 + threshold compare + early-exit). Falls back to G1 if the G2 kernel is not available for the current device image.
 
 How much data per launch?
 - y_out bytes = `threads × iters × 64`.
-- Keep this around 64–128 MB in G1 to avoid PCIe and host SHA3 dominating.
+- Keep this around 64–128 MB in G1 to avoid PCIe and host Poseidon2 dominating.
 
 Example configs (RTX 3060, SM 86):
 - ~64 MB per launch:
@@ -115,12 +115,12 @@ The build fails with clear messages if:
 
 ## Tuning guide (G1)
 
-Goal in G1: balance kernel time (GPU) against copy-back time (PCIe) and host SHA3 time (CPU) to avoid starving the GPU or overwhelming the host. Practical steps:
+Goal in G1: balance kernel time (GPU) against copy-back time (PCIe) and host Poseidon2 time (CPU) to avoid starving the GPU or overwhelming the host. Practical steps:
 
 1) Size the output buffer:
    - Start with 64–128 MB per launch: `bytes ≈ threads × iters × 64`.
    - Increase `threads` to raise occupancy (more blocks). Start with `block_dim=256`.
-   - Increase `iters` only while host SHA3 still keeps up.
+   - Increase `iters` only while host Poseidon2 still keeps up.
 
 2) Watch timings:
    - The engine logs `kernel_ms` and `copy_ms`.
@@ -159,7 +159,7 @@ Goal in G1: balance kernel time (GPU) against copy-back time (PCIe) and host SHA
 
 ## Roadmap to G2
 
-- Device SHA3‑512 (Keccak‑f[1600], 24 rounds) tuned for 64B input.
+- Device Poseidon2‑512 tuned for 64B input.
 - On‑device threshold compare and early‑exit flag (atomic).
 - Host polling and tiny candidate copy‑back.
 - Constants in `__constant__` memory.
@@ -185,9 +185,9 @@ Runtime:
 - `MINER_CUDA_THREADS` — total threads (increase for more blocks).
 - `MINER_CUDA_ITERS` — iterations per thread (controls y_out size).
 - `MINER_CUDA_IMAGE` = `cubin|ptx` — force embedded image selection (optional).
-- `MINER_CUDA_HASH_THREADS` — parallel host SHA3 workers (optional).
+- `MINER_CUDA_HASH_THREADS` — parallel host Poseidon2 workers (optional).
 - `MINER_CUDA_PINNED` = `1|true` — use pinned host buffers + async D2H copy (G1 optimization).
-- `MINER_CUDA_MODE` = `g2` — try device SHA3 + early-exit; falls back to G1 if G2 kernel isn’t available.
+- `MINER_CUDA_MODE` = `g2` — try device Poseidon2 + early-exit; falls back to G1 if G2 kernel isn't available.
 
 Build-time:
 - `CUDA_ARCH` = `sm_86|sm_89|sm_120|…` — SM target for device images (normalized internally).
@@ -209,4 +209,4 @@ Presets are provided under `examples/.env` and follow a “lower” (≈1× SMs 
 - RTX A5000: `cuda-miner-a5000-lower.env`, `cuda-miner-a5000-upper.env`
 - RTX A6000: `cuda-miner-a6000-lower.env`, `cuda-miner-a6000-upper.env`
 
-Each preset uses `MINER_CUDA_MODE=g2` (device SHA3 + early-exit) and `MINER_CUDA_BLOCK_DIM=256`, and sizes `MINER_CUDA_THREADS` as `blocks × 256`. Adjust `MINER_CUDA_ITERS` to tune kernel dwell time vs early-exit responsiveness. If a G2 kernel image isn’t embedded for your device, the engine falls back to G1 automatically.
+Each preset uses `MINER_CUDA_MODE=g2` (device Poseidon2 + early-exit) and `MINER_CUDA_BLOCK_DIM=256`, and sizes `MINER_CUDA_THREADS` as `blocks × 256`. Adjust `MINER_CUDA_ITERS` to tune kernel dwell time vs early-exit responsiveness. If a G2 kernel image isn't embedded for your device, the engine falls back to G1 automatically.

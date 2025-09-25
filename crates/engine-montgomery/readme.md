@@ -11,7 +11,7 @@ The engine mirrors `cpu-fast` control flow and metrics emission so that apples-t
 Highlights:
 - Fixed-width 512-bit arithmetic using 8×64-bit limbs.
 - Portable CIOS (Coarsely Integrated Operand Scanning) Montgomery multiply with `u128` intermediates.
-- Direct SHA3 over big-endian limbs to avoid intermediate big-integer conversions.
+- Direct Poseidon2 over big-endian limbs to avoid intermediate big-integer conversions.
 - Per-job precompute cache (Montgomery params and `m_hat`) to reduce setup overhead.
 - Runtime backend selection for microarchitecture-optimized kernels (x86_64 BMI2-only and BMI2+ADX; aarch64 UMULH).
 - Metrics label for backend selection to aid dashboards and A/B analysis.
@@ -26,7 +26,7 @@ QPoW distance per nonce is computed as:
    - y0 = m^(h + start_nonce) mod n (one-time per worker).
    - y_{k+1} = (y_k * m) mod n (one multiply per nonce).
 
-2) Distance = target XOR SHA3_512(y), where y is encoded as 64 big-endian bytes.
+2) Distance = target XOR Poseidon2_512(y), where y is encoded as 64 big-endian bytes.
 
 The engine focuses on optimizing step (1) with Montgomery multiplication and reducing overhead in step (2) by hashing directly over the final big-endian representation of y (no extra big-int intermediates).
 
@@ -64,8 +64,8 @@ This yields a single multiply+reduce per nonce with a branchless inner loop (exc
 ## Hashing Strategy
 
 - We keep `y` in Montgomery domain during iteration to minimize transforms.
-- Before SHA3, we convert the residue `ŷ` back to the normal domain via `mont_mul(ŷ, 1)` and serialize as big-endian 64 bytes.
-- We reuse a single `Sha3_512` hasher per search call and `finalize_reset()` each iteration to reduce construction overhead.
+- Before Poseidon2, we convert the residue `ŷ` back to the normal domain via `mont_mul(ŷ, 1)` and serialize as big-endian 64 bytes.
+- We reuse a single `Poseidon2Core` hasher per search call and `hash_512()` each iteration to reduce construction overhead.
 
 This preserves consensus behavior while avoiding unnecessary big-int allocations or conversions.
 
@@ -148,10 +148,10 @@ We recommend running the property tests on machines with and without BMI2/ADX an
 
 ## Performance Notes
 
-- Relative gains depend on how much time the miner spends in SHA3 vs modular multiply.
+- Relative gains depend on how much time the miner spends in Poseidon2 vs modular multiply.
 - Direct-hash-from-residue + precompute caching already yields a measurable uplift over `cpu-fast`.
 - The BMI2-only path should improve throughput on supporting x86_64 hardware.
-- BMI2+ADX typically produces the highest gains on the multiply itself (often 1.5–2.0×), with end-to-end uplift bounded by SHA3 share per nonce.
+- BMI2+ADX typically produces the highest gains on the multiply itself (often 1.5–2.0×), with end-to-end uplift bounded by Poseidon2 share per nonce.
 - aarch64 UMULH/ADCS brings similar relative gains on Apple Silicon and other ARM64 platforms.
 
 To minimize orchestration overhead in the service:
@@ -181,7 +181,7 @@ To minimize orchestration overhead in the service:
 
 - [x] Portable 8×64 CIOS (u128)
 - [x] Per-job precompute cache (`n0_inv`, `R^2 mod n`, `m_hat`)
-- [x] Direct SHA3 from normalized big-endian bytes
+- [x] Direct Poseidon2 from normalized big-endian bytes
 - [x] Backend selection with log + metric
 - [x] x86_64 BMI2-only MULX kernel
 - [x] x86_64 BMI2+ADX (MULX + ADCX/ADOX) dual carry chain

@@ -18,8 +18,7 @@ default = ["baseline", "std"]
 # std feature wires through to dependencies that have separate std/no_std builds.
 std = [
 	"primitive-types/std",
-	"sha2/std",
-	"sha3/std",
+	"qp-poseidon-core/std",
 ]
 
 # Baseline/reference implementation using BigUint-backed modular exponentiation.
@@ -28,8 +27,8 @@ baseline = []
 # Enable accelerated modular arithmetic (e.g., Montgomery multiplication for 512-bit modulus).
 montgomery = []
 
-# Optionally enable a faster SHA3/Keccak path (hook for SIMD/alt backends).
-simd-sha3 = []
+# Optionally enable a faster Poseidon2 path (hook for SIMD/alt backends).
+simd-poseidon2 = []
 
 # Optional shared types/helpers for GPU engines (no device code here).
 gpu-interop = []
@@ -39,8 +38,7 @@ log = { workspace = true }
 primitive-types = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
-sha2 = { workspace = true }
-sha3 = { workspace = true }
+qp-poseidon-core = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 

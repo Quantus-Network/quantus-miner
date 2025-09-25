@@ -16,7 +16,7 @@ default = ["baseline"]
 # Map engine features to pow-core features so engine-cpu consumers can toggle them.
 baseline = ["pow-core/baseline"]
 montgomery = ["pow-core/montgomery"]
-simd-sha3 = ["pow-core/simd-sha3"]
+simd-poseidon2 = ["pow-core/simd-poseidon2"]
 
 [dependencies]
 pow-core = { path = "../pow-core" }
