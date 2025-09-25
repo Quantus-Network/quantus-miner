@@ -32,6 +32,6 @@ cust = { version = "0.3", optional = true }
 rustacuda = { version = "0.1", optional = true }
 
 # Host-side hashing and big-int precompute for GPU constants
-sha3 = { workspace = true }
+qp-poseidon-core = { workspace = true }
 num-bigint = "0.4"
 num-traits = { workspace = true }

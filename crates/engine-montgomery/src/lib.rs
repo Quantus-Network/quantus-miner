@@ -19,7 +19,7 @@
 //! - Replace the per-step `step_mul` with Montgomery domain multiplication:
 //!   y_hat <- montgomery_mul(y_hat, m_hat, n, n') with y kept in Montgomery domain.
 //! - Precompute `R`, `R^2`, and `n'` once per job/thread and transform inputs.
-//! - Convert out of Montgomery before SHA3-512 distance computation.
+//! - Convert out of Montgomery before Poseidon2-512 distance computation.
 //!
 //! Important: We intentionally keep emissions (hash_count increments, control flow)
 //! identical to `cpu-fast` so metrics are directly comparable when pitting

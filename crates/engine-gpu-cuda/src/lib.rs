@@ -19,7 +19,7 @@
 //! This crate now includes a host-side launcher for a minimal CUDA kernel
 //! (see `src/kernels/qpow_kernel.cu`) that performs 512-bit Montgomery
 //! multiplication on-device and returns normalized y values. For G1 bring-up,
-//! we perform SHA3 and threshold checks on the host for parity against CPU.
+//! we perform Poseidon2 and threshold checks on the host for parity against CPU.
 //!
 //! Behavior:
 //! - If compiled without the `cuda` feature or if CUDA init/launch fails,
@@ -462,7 +462,7 @@ impl CudaEngine {
                 total_bytes
             );
 
-            // Branch kernel launch by mode: G2 (device SHA3 + early-exit) vs G1 (return y values)
+            // Branch kernel launch by mode: G2 (device Poseidon2 + early-exit) vs G1 (return y values)
             if is_g2 {
                 // Compute full-precision bounds for accounting (use precomputed)
                 let rem_be = rem_be_all;
@@ -1050,7 +1050,7 @@ impl CudaEngine {
 
             // G2 handled in the launch branch above; proceed with G1 copy-back path below.
             if !is_g2 {
-                // G1 path (host SHA3) — Copy back results (optional pinned host buffer + async copy)
+                // G1 path (host Poseidon2) — Copy back results (optional pinned host buffer + async copy)
                 let use_pinned = std::env::var("MINER_CUDA_PINNED")
                     .ok()
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1086,7 +1086,7 @@ impl CudaEngine {
                     std::sync::Arc::new(y_out_host)
                 };
 
-                // Parallel SHA3 over GPU results; compute earliest valid index (if any)
+                // Parallel Poseidon2 over GPU results; compute earliest valid index (if any)
                 let t_sha_start = std::time::Instant::now();
 
                 // Bound hashing work to remaining range in this chunk (full-precision)
@@ -1126,7 +1126,7 @@ impl CudaEngine {
                             .map(|n| n.get())
                             .unwrap_or(1)
                     });
-                log::info!(target: "miner", "Host SHA3: threads={hash_threads}, total_elems={total_to_hash}");
+                log::info!(target: "miner", "Host Poseidon2: threads={hash_threads}, total_elems={total_to_hash}");
 
                 // Share outputs across worker threads (Vec or LockedBuffer depending on MINER_CUDA_PINNED)
                 let y_shared = y_host_arc.clone();
@@ -1178,9 +1178,9 @@ impl CudaEngine {
                     }
                 });
 
-                // SHA3 (host) timing
-                let sha3_ms = t_sha_start.elapsed().as_millis();
-                log::info!(target: "miner", "SHA3 (host) OK: sha3_ms={sha3_ms}");
+                // Poseidon2 (host) timing
+                let poseidon2_ms = t_sha_start.elapsed().as_millis();
+                log::info!(target: "miner", "Poseidon2 (host) OK: poseidon2_ms={poseidon2_ms}");
 
                 // Outcomes and accounting
                 let total_elems_u64 = total_to_hash as u64;

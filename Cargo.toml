@@ -31,12 +31,11 @@ num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 num_cpus = "1.16"
 primitive-types = { version = "0.13.1", default-features = false }
+qp-poseidon-core = { version = "0.9.5", default-features = false }
 quantus-miner-api = { version = "0.0.3", default-features = false }
 rand = { version = "0.8.5", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.132", default-features = false }
-sha2 = { version = "0.10", default-features = false }
-sha3 = { version = "0.10", default-features = false }
 thiserror = "1"
 tokio = { version = "1.36", features = ["full"] }
 warp = "0.3"
