@@ -555,6 +555,10 @@ mod mont_portable {
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
+        // Fallback to the portable BMI2 path if ADX is not available at runtime.
+        if !std::is_x86_feature_detected!("adx") {
+            return mont_mul_bmi2(a, b, n, n0_inv);
+        }
         use core::arch::x86_64::_mulx_u64;
         const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
 
@@ -625,6 +629,7 @@ mod mont_portable {
 
         for i in 0..8 {
             let ai = a[i];
+
             // Phase A
             let mut carry: u128 = 0;
             for j in 0..8 {
@@ -635,6 +640,7 @@ mod mont_portable {
                 carry = (sum >> 64) + (hi as u128);
             }
             acc[8] = acc[8].wrapping_add(carry);
+
             // Phase B
             let m = (acc[0] as u64).wrapping_mul(n0_inv);
             let mut carry2: u128 = 0;
@@ -646,12 +652,14 @@ mod mont_portable {
                 carry2 = (sum2 >> 64) + (hi2 as u128);
             }
             acc[8] = acc[8].wrapping_add(carry2);
+
             // Shift
             for j in 0..8 {
                 acc[j] = acc[j + 1];
             }
             acc[8] = 0;
-            // Record big-endian limbs
+
+            // Record state (big-endian)
             for j in 0..8 {
                 states[i][j] = acc[7 - j] as u64;
             }
@@ -660,8 +668,6 @@ mod mont_portable {
         states
     }
 
-    // Capture ADX boundaries (after mul-fold and after red-fold) for a specific iteration index.
-    // Returns (mul_be, red_be), each as 8 big-endian limbs.
     #[cfg(target_arch = "x86_64")]
     #[inline]
     #[allow(unsafe_code)]
