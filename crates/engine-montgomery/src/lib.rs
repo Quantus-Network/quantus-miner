@@ -573,8 +573,8 @@ mod mont_portable {
                     // -------------------------------
                     // Clear CF and OF once for the entire inner accumulation and zero OF-carry reg
                     "xor r8d, r8d",
-                    "adcx r8, r8",
                     "adox r8, r8",
+                    "adcx r8, r8",
                     "nop",
 
                     // j = 0
@@ -667,8 +667,8 @@ mod mont_portable {
                     // acc += m * n  (dual carry chains)
                     // -------------------------------
                     "xor r8d, r8d",
-                    "adcx r8, r8",
                     "adox r8, r8",
+                    "adcx r8, r8",
                     "nop",
 
                     // j = 0
