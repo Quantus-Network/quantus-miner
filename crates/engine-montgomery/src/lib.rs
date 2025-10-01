@@ -823,6 +823,55 @@ mod mont_portable {
                                 "ADX TRACE: a_le={} b_le={} n_le={} n0_inv=0x{:016x} res_le={} bmi2_le={}",
                                 fmt(a), fmt(b), fmt(n), n0_inv, fmt(&res), fmt(&ref_res)
                             );
+                            if std::env::var("MINER_MONT_ADX_TRACE_DEEP")
+                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false)
+                            {
+                                // One-shot deep trace: portable CIOS states per iteration after shift
+                                let mut acc128: [u128; 9] = [0; 9];
+                                let mut deep = String::new();
+                                let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+                                for i in 0..8 {
+                                    // acc += a[i] * b
+                                    let ai = a[i] as u128;
+                                    let mut carry: u128 = 0;
+                                    for j in 0..8 {
+                                        let sum = acc128[j] + ai * (b[j] as u128) + carry;
+                                        acc128[j] = sum & mask;
+                                        carry = sum >> 64;
+                                    }
+                                    acc128[8] = acc128[8].wrapping_add(carry);
+                                    // m = (acc[0] * n0_inv) mod 2^64
+                                    let m = ((acc128[0] as u64).wrapping_mul(n0_inv)) as u128;
+                                    // acc += m * n
+                                    let mut carry2: u128 = 0;
+                                    for j in 0..8 {
+                                        let sum2 = acc128[j] + m * (n[j] as u128) + carry2;
+                                        acc128[j] = sum2 & mask;
+                                        carry2 = sum2 >> 64;
+                                    }
+                                    acc128[8] = acc128[8].wrapping_add(carry2);
+                                    // shift right by one limb
+                                    for j in 0..8 {
+                                        acc128[j] = acc128[j + 1];
+                                    }
+                                    acc128[8] = 0;
+                                    // record state after shift (8 limbs), as big-endian hex
+                                    let mut line = String::new();
+                                    for j in (0..8).rev() {
+                                        use std::fmt::Write as _;
+                                        let _ = write!(&mut line, "{:016x}", acc128[j] as u64);
+                                    }
+                                    if i == 0 {
+                                        deep.push_str("i0:");
+                                    } else {
+                                        use std::fmt::Write as _;
+                                        let _ = write!(&mut deep, " i{}:", i);
+                                    }
+                                    deep.push_str(&line);
+                                }
+                                log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
+                            }
                         }
                     }
                     return ref_res;
