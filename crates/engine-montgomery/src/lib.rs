@@ -555,27 +555,38 @@ mod mont_portable {
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // Runtime feature check: if ADX isn’t available, use BMI2 path.
+        // Runtime feature check: fallback to BMI2 if ADX is not available.
         if !std::is_x86_feature_detected!("adx") {
             return mont_mul_bmi2(a, b, n, n0_inv);
         }
 
-        // ADX refactor: two phases per iteration with Rust-side fold+shift.
-        // Keep accumulator as u64 limbs to allow direct asm load/store.
+        // ADX refactor with two phases per iteration:
+        // - Phase A: acc += a[i] * b  (MULX + ADCX/ADOX)
+        // - Rust fold acc8 + OF + CF
+        // - Phase B: m = acc[0] * n0_inv; acc += m * n (MULX + ADCX/ADOX)
+        // - Rust fold acc8 + OF + CF
+        // - Shift (Rust)
+        //
+        // IMPORTANT: Pin pointers to callee-saved registers to avoid aliasing
+        // with our clobber list. Do NOT let the compiler choose r8..r11 for inputs,
+        // since we explicitly clobber those in the asm.
         let mut acc: [u64; 9] = [0; 9];
+        let acc_ptr = acc.as_mut_ptr();
         let b_ptr = b.as_ptr();
         let n_ptr = n.as_ptr();
 
         for i in 0..8 {
             let ai = a[i];
 
-            // Phase A: acc += ai * b (MULX + ADCX/ADOX), export acc8/of/cf to Rust
+            // ---------------------------
+            // Phase A: acc += a[i] * b
+            // ---------------------------
             let mut acc8_a: u64;
             let mut of_a: u64;
             let mut cf_a: u64;
             unsafe {
                 core::arch::asm!(
-                    // rdx supplies multiplicand for MULX
+                    // rdx = ai for MULX
                     "mov rdx, {ai}",
 
                     // Clear both carry chains
@@ -583,68 +594,68 @@ mod mont_portable {
                     "adcx r8, r8",
                     "adox r8, r8",
 
-                    // j = 0..7
-                    "mulx r9, r10, qword ptr [{b} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
+                    // j = 0..7 with dual chains (CF->ADCX, OF->ADOX)
+                    "mulx r9, r10, qword ptr [r13 + 0]",
+                    "mov r11, qword ptr [r12 + 0]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
+                    "mov qword ptr [r12 + 0], r11",
+                    "mov r11, qword ptr [r12 + 8]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
+                    "mov qword ptr [r12 + 8], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
+                    "mulx r9, r10, qword ptr [r13 + 8]",
+                    "mov r11, qword ptr [r12 + 8]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
+                    "mov qword ptr [r12 + 8], r11",
+                    "mov r11, qword ptr [r12 + 16]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
+                    "mov qword ptr [r12 + 16], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
+                    "mulx r9, r10, qword ptr [r13 + 16]",
+                    "mov r11, qword ptr [r12 + 16]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
+                    "mov qword ptr [r12 + 16], r11",
+                    "mov r11, qword ptr [r12 + 24]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
+                    "mov qword ptr [r12 + 24], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
+                    "mulx r9, r10, qword ptr [r13 + 24]",
+                    "mov r11, qword ptr [r12 + 24]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
+                    "mov qword ptr [r12 + 24], r11",
+                    "mov r11, qword ptr [r12 + 32]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
+                    "mov qword ptr [r12 + 32], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
+                    "mulx r9, r10, qword ptr [r13 + 32]",
+                    "mov r11, qword ptr [r12 + 32]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
+                    "mov qword ptr [r12 + 32], r11",
+                    "mov r11, qword ptr [r12 + 40]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
+                    "mov qword ptr [r12 + 40], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
+                    "mulx r9, r10, qword ptr [r13 + 40]",
+                    "mov r11, qword ptr [r12 + 40]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
+                    "mov qword ptr [r12 + 40], r11",
+                    "mov r11, qword ptr [r12 + 48]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
+                    "mov qword ptr [r12 + 48], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
+                    "mulx r9, r10, qword ptr [r13 + 48]",
+                    "mov r11, qword ptr [r12 + 48]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
+                    "mov qword ptr [r12 + 48], r11",
+                    "mov r11, qword ptr [r12 + 56]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
+                    "mov qword ptr [r12 + 56], r11",
 
-                    "mulx r9, r10, qword ptr [{b} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
+                    "mulx r9, r10, qword ptr [r13 + 56]",
+                    "mov r11, qword ptr [r12 + 56]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov qword ptr [r12 + 56], r11",
+                    "mov r11, qword ptr [r12 + 64]",
                     "adox r11, r9",
 
                     // Export acc8 and flags
@@ -655,13 +666,13 @@ mod mont_portable {
                     "movzx {cf_out},  dl",
 
                     ai         = in(reg) ai,
-                    b          = in(reg) b_ptr,
-                    acc        = in(reg) acc.as_mut_ptr(),
+                    in("r12") acc_ptr,
+                    in("r13") b_ptr,
                     acc8_out   = lateout(reg) acc8_a,
                     of_out     = lateout(reg) of_a,
                     cf_out     = lateout(reg) cf_a,
                     out("r8") _, out("r9") _, out("r10") _, out("r11") _,
-                    out("rax") _,
+                    out("rax") _, out("rdx") _,
                     options(nostack)
                 );
             }
@@ -671,79 +682,85 @@ mod mont_portable {
                 .wrapping_add((of_a & 1) as u64)
                 .wrapping_add((cf_a & 1) as u64);
 
+            // ---------------------------
             // Phase B: m = acc[0] * n0_inv; acc += m * n
+            // ---------------------------
             let m = acc[0].wrapping_mul(n0_inv);
             let mut acc8_b: u64;
             let mut of_b: u64;
             let mut cf_b: u64;
             unsafe {
                 core::arch::asm!(
+                    // Place m in rdx for MULX
+                    "mov rdx, {m}",
+
                     // Clear both carry chains
                     "xor r8d, r8d",
                     "adcx r8, r8",
                     "adox r8, r8",
 
-                    "mulx r9, r10, qword ptr [{n} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
+                    // j = 0..7
+                    "mulx r9, r10, qword ptr [r14 + 0]",
+                    "mov r11, qword ptr [r12 + 0]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
+                    "mov qword ptr [r12 + 0], r11",
+                    "mov r11, qword ptr [r12 + 8]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
+                    "mov qword ptr [r12 + 8], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
+                    "mulx r9, r10, qword ptr [r14 + 8]",
+                    "mov r11, qword ptr [r12 + 8]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
+                    "mov qword ptr [r12 + 8], r11",
+                    "mov r11, qword ptr [r12 + 16]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
+                    "mov qword ptr [r12 + 16], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
+                    "mulx r9, r10, qword ptr [r14 + 16]",
+                    "mov r11, qword ptr [r12 + 16]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
+                    "mov qword ptr [r12 + 16], r11",
+                    "mov r11, qword ptr [r12 + 24]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
+                    "mov qword ptr [r12 + 24], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
+                    "mulx r9, r10, qword ptr [r14 + 24]",
+                    "mov r11, qword ptr [r12 + 24]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
+                    "mov qword ptr [r12 + 24], r11",
+                    "mov r11, qword ptr [r12 + 32]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
+                    "mov qword ptr [r12 + 32], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
+                    "mulx r9, r10, qword ptr [r14 + 32]",
+                    "mov r11, qword ptr [r12 + 32]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
+                    "mov qword ptr [r12 + 32], r11",
+                    "mov r11, qword ptr [r12 + 40]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
+                    "mov qword ptr [r12 + 40], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
+                    "mulx r9, r10, qword ptr [r14 + 40]",
+                    "mov r11, qword ptr [r12 + 40]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
+                    "mov qword ptr [r12 + 40], r11",
+                    "mov r11, qword ptr [r12 + 48]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
+                    "mov qword ptr [r12 + 48], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
+                    "mulx r9, r10, qword ptr [r14 + 48]",
+                    "mov r11, qword ptr [r12 + 48]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
+                    "mov qword ptr [r12 + 48], r11",
+                    "mov r11, qword ptr [r12 + 56]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
+                    "mov qword ptr [r12 + 56], r11",
 
-                    "mulx r9, r10, qword ptr [{n} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
+                    "mulx r9, r10, qword ptr [r14 + 56]",
+                    "mov r11, qword ptr [r12 + 56]",
                     "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov qword ptr [r12 + 56], r11",
+                    "mov r11, qword ptr [r12 + 64]",
                     "adox r11, r9",
 
                     // Export acc8 and flags
@@ -753,14 +770,14 @@ mod mont_portable {
                     "movzx {of_out},  al",
                     "movzx {cf_out},  dl",
 
-                    n          = in(reg) n_ptr,
-                    acc        = in(reg) acc.as_mut_ptr(),
+                    in("r12") acc_ptr,
+                    in("r14") n_ptr,
+                    m          = in(reg) m,
                     acc8_out   = lateout(reg) acc8_b,
                     of_out     = lateout(reg) of_b,
                     cf_out     = lateout(reg) cf_b,
-                    in("rdx") m,
                     out("r8") _, out("r9") _, out("r10") _, out("r11") _,
-                    out("rax") _,
+                    out("rax") _, out("rdx") _,
                     options(nostack)
                 );
             }
@@ -770,12 +787,12 @@ mod mont_portable {
                 .wrapping_add((of_b & 1) as u64)
                 .wrapping_add((cf_b & 1) as u64);
 
-            // Shift in Rust
+            // Shift
             acc.copy_within(1..=8, 0);
             acc[8] = 0;
         }
 
-        // Conditional subtraction: if res >= n then res -= n
+        // Conditional subtraction
         let mut res = [0u64; 8];
         res.copy_from_slice(&acc[0..8]);
         if ge_le(&res, n) {
