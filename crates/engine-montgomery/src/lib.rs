@@ -748,27 +748,6 @@ mod mont_portable {
                     "adc r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
-                    // -------------------------------
-                    // acc >>= 64 (drop acc[0]) using buffered non-overlapping move
-                    // -------------------------------
-                    "mov rax, qword ptr [{acc} + 8]",
-                    "mov rdx, qword ptr [{acc} + 16]",
-                    "mov r8,  qword ptr [{acc} + 24]",
-                    "mov r9,  qword ptr [{acc} + 32]",
-                    "mov r10, qword ptr [{acc} + 40]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "mov r12, qword ptr [{acc} + 56]",
-                    "mov r13, qword ptr [{acc} + 64]",
-                    "mov qword ptr [{acc} + 0],  rax",
-                    "mov qword ptr [{acc} + 8],  rdx",
-                    "mov qword ptr [{acc} + 16], r8",
-                    "mov qword ptr [{acc} + 24], r9",
-                    "mov qword ptr [{acc} + 32], r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov qword ptr [{acc} + 48], r12",
-                    "mov qword ptr [{acc} + 56], r13",
-                    "mov qword ptr [{acc} + 64], 0",
-
                     ai     = in(reg) ai,
                     acc    = in(reg) acc.as_mut_ptr(),
                     b_ptr  = in(reg) b.as_ptr(),
@@ -779,6 +758,9 @@ mod mont_portable {
                     options(nostack)
                 );
             }
+            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
+            acc.copy_within(1..=8, 0);
+            acc[8] = 0;
         }
 
         // Conditional subtraction: if acc >= n then acc -= n
@@ -1258,24 +1240,7 @@ mod mont_portable {
                     "adcx r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
-                    // acc >>= 64 (drop acc[0]) using buffered non-overlapping move
-                    "mov rax, qword ptr [{acc} + 8]",
-                    "mov rdx, qword ptr [{acc} + 16]",
-                    "mov r8,  qword ptr [{acc} + 24]",
-                    "mov r9,  qword ptr [{acc} + 32]",
-                    "mov r10, qword ptr [{acc} + 40]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "mov r12, qword ptr [{acc} + 56]",
-                    "mov r13, qword ptr [{acc} + 64]",
-                    "mov qword ptr [{acc} + 0],  rax",
-                    "mov qword ptr [{acc} + 8],  rdx",
-                    "mov qword ptr [{acc} + 16], r8",
-                    "mov qword ptr [{acc} + 24], r9",
-                    "mov qword ptr [{acc} + 32], r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov qword ptr [{acc} + 48], r12",
-                    "mov qword ptr [{acc} + 56], r13",
-                    "mov qword ptr [{acc} + 64], 0",
+
 
                     ai     = in(reg) ai,
                     acc    = in(reg) acc.as_mut_ptr(),
@@ -1287,6 +1252,9 @@ mod mont_portable {
                     options(nostack)
                 );
             }
+            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
+            acc.copy_within(1..=8, 0);
+            acc[8] = 0;
             // Record state after shift as big-endian limbs (acc is LE)
             for j in 0..8 {
                 states[i][j] = acc[7 - j];
@@ -1458,24 +1426,7 @@ mod mont_portable {
                     "add r11, r15",
                     "add r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
-                    // shift using buffered non-overlapping move
-                    "mov rax, qword ptr [{acc} + 8]",
-                    "mov rdx, qword ptr [{acc} + 16]",
-                    "mov r8,  qword ptr [{acc} + 24]",
-                    "mov r9,  qword ptr [{acc} + 32]",
-                    "mov r10, qword ptr [{acc} + 40]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "mov r12, qword ptr [{acc} + 56]",
-                    "mov r13, qword ptr [{acc} + 64]",
-                    "mov qword ptr [{acc} + 0],  rax",
-                    "mov qword ptr [{acc} + 8],  rdx",
-                    "mov qword ptr [{acc} + 16], r8",
-                    "mov qword ptr [{acc} + 24], r9",
-                    "mov qword ptr [{acc} + 32], r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov qword ptr [{acc} + 48], r12",
-                    "mov qword ptr [{acc} + 56], r13",
-                    "mov qword ptr [{acc} + 64], 0",
+
                     ai    = in(reg) a[i],
                     acc   = in(reg) acc.as_mut_ptr(),
                     b_ptr = in(reg) b.as_ptr(),
@@ -1486,6 +1437,9 @@ mod mont_portable {
                     options(nostack)
                 );
             }
+            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
+            acc.copy_within(1..=8, 0);
+            acc[8] = 0;
         }
         // Now run the target iteration in two phases to capture boundaries before shift.
         // Phase 1: ai*b with fold; record mul boundary.
