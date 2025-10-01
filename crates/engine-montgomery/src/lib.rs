@@ -560,16 +560,8 @@ mod mont_portable {
             return mont_mul_bmi2(a, b, n, n0_inv);
         }
 
-        // ADX refactor with two phases per iteration:
-        // - Phase A: acc += a[i] * b  (MULX + ADCX/ADOX)
-        // - Rust fold acc8 + OF + CF
-        // - Phase B: m = acc[0] * n0_inv; acc += m * n (MULX + ADCX/ADOX)
-        // - Rust fold acc8 + OF + CF
-        // - Shift (Rust)
-        //
-        // IMPORTANT: Pin pointers to callee-saved registers to avoid aliasing
-        // with our clobber list. Do NOT let the compiler choose r8..r11 for inputs,
-        // since we explicitly clobber those in the asm.
+        // ADX refactor: two phases per iteration with Rust-side fold+shift.
+        // Keep accumulator as u64 limbs to allow direct asm load/store.
         let mut acc: [u64; 9] = [0; 9];
         let acc_ptr = acc.as_mut_ptr();
         let b_ptr = b.as_ptr();
@@ -578,9 +570,7 @@ mod mont_portable {
         for i in 0..8 {
             let ai = a[i];
 
-            // ---------------------------
-            // Phase A: acc += a[i] * b
-            // ---------------------------
+            // Phase A: acc += ai * b (MULX + ADCX/ADOX), export acc8/of/cf to Rust
             let mut acc8_a: u64;
             let mut of_a: u64;
             let mut cf_a: u64;
@@ -777,7 +767,7 @@ mod mont_portable {
                     of_out     = lateout(reg) of_b,
                     cf_out     = lateout(reg) cf_b,
                     out("r8") _, out("r9") _, out("r10") _, out("r11") _,
-                    out("rax") _, out("rdx") _,
+                    lateout("rax") _,
                     options(nostack)
                 );
             }
