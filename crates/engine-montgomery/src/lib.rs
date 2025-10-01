@@ -871,9 +871,51 @@ mod mont_portable {
                                     deep.push_str(&line);
                                 }
                                 {
+                                    // Log portable per-iteration states (reference)
                                     log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
-                                    // ADX per-iteration states (temporary implementation mirrors CIOS flow to aid diffing)
+                                    // Recompute portable per-iteration states in-machine form for comparison (big-endian limbs)
+                                    let mut ref_states: [[u64; 8]; 8] = [[0; 8]; 8];
+                                    {
+                                        // Re-run the same portable loop used to build `deep`, but capture states into ref_states
+                                        let mut acc128_ref: [u128; 9] = [0; 9];
+                                        let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+                                        for i in 0..8 {
+                                            // acc += a[i] * b
+                                            let ai = a[i] as u128;
+                                            let mut carry: u128 = 0;
+                                            for j in 0..8 {
+                                                let sum =
+                                                    acc128_ref[j] + ai * (b[j] as u128) + carry;
+                                                acc128_ref[j] = sum & mask;
+                                                carry = sum >> 64;
+                                            }
+                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry);
+                                            // m = (acc[0] * n0_inv) mod 2^64
+                                            let m = ((acc128_ref[0] as u64).wrapping_mul(n0_inv))
+                                                as u128;
+                                            // acc += m * n
+                                            let mut carry2: u128 = 0;
+                                            for j in 0..8 {
+                                                let sum2 =
+                                                    acc128_ref[j] + m * (n[j] as u128) + carry2;
+                                                acc128_ref[j] = sum2 & mask;
+                                                carry2 = sum2 >> 64;
+                                            }
+                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry2);
+                                            // shift right by one limb
+                                            for j in 0..8 {
+                                                acc128_ref[j] = acc128_ref[j + 1];
+                                            }
+                                            acc128_ref[8] = 0;
+                                            // record state after shift as big-endian limbs
+                                            for j in 0..8 {
+                                                ref_states[i][7 - j] = acc128_ref[j] as u64;
+                                            }
+                                        }
+                                    }
+                                    // Capture ADX per-iteration states
                                     let states = mont_mul_bmi2_adx_states(a, b, n, n0_inv);
+                                    // Log ADX per-iteration states
                                     let mut deep_adx = String::new();
                                     for i in 0..8 {
                                         use std::fmt::Write as _;
@@ -887,6 +929,29 @@ mod mont_portable {
                                         }
                                     }
                                     log::warn!(target: "miner", "ADX DEEP ADX: {}", deep_adx);
+                                    // Emit a single divergence line with the earliest differing iteration and limb, if any
+                                    let mut first_iter: Option<usize> = None;
+                                    let mut first_limb: usize = 0;
+                                    let mut adx_val: u64 = 0;
+                                    let mut ref_val: u64 = 0;
+                                    'outer: for i in 0..8 {
+                                        for j in 0..8 {
+                                            if states[i][j] != ref_states[i][j] {
+                                                first_iter = Some(i);
+                                                first_limb = j;
+                                                adx_val = states[i][j];
+                                                ref_val = ref_states[i][j];
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                    if let Some(i) = first_iter {
+                                        log::warn!(
+                                            target: "miner",
+                                            "ADX DEEP PHASE: iter={} limb={} adx=0x{:016x} ref=0x{:016x}",
+                                            i, first_limb, adx_val, ref_val
+                                        );
+                                    }
                                 }
                             }
                         }
