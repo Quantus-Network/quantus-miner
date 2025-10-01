@@ -573,7 +573,7 @@ mod mont_portable {
                     "xor r8d, r8d",
                     "adcx r8, r8",
                     "adox r8, r8",
-                    "xor r12, r12",
+                    "nop",
 
                     // j = 0
                     "mulx r9, r10, qword ptr [{b_ptr} + 0]",
@@ -649,17 +649,17 @@ mod mont_portable {
 
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
-                    "xor r13d, r13d",
+                    "mov r13, 0",
                     "adcx r11, r13",
                     "adox r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
-                    // m = (acc[0] * n0_inv) mod 2^64
+                    // m = (acc[0] * n0_inv) mod 2^64 (use MULX to avoid flag side-effects)
                     // -------------------------------
-                    "mov rax, qword ptr [{acc} + 0]",
-                    "imul rax, {n0_inv}",
-                    "mov rdx, rax", // rdx = m for MULX
+                    "mov rdx, qword ptr [{acc} + 0]",
+                    "mulx r9, r10, {n0_inv}",
+                    "mov rdx, r9", // m low 64 bits -> rdx for subsequent MULX
 
                     // -------------------------------
                     // acc += m * n  (dual carry chains)
@@ -667,7 +667,7 @@ mod mont_portable {
                     "xor r8d, r8d",
                     "adcx r8, r8",
                     "adox r8, r8",
-                    "xor r12, r12",
+                    "nop",
 
                     // j = 0
                     "mulx r9, r10, qword ptr [{n_ptr} + 0]",
@@ -743,7 +743,7 @@ mod mont_portable {
 
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
-                    "xor r13d, r13d",
+                    "mov r13, 0",
                     "adcx r11, r13",
                     "adox r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
