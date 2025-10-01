@@ -608,7 +608,7 @@ mod mont_portable {
         res
     }
 
-    #[cfg(any())]
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_states(
@@ -617,224 +617,43 @@ mod mont_portable {
         n: &[u64; 8],
         n0_inv: u64,
     ) -> [[u64; 8]; 8] {
-        // Deep trace: record the actual ADX path accumulator after each outer iteration
-        let mut acc: [u64; 9] = [0; 9];
-        let mut states: [[u64; 8]; 8] = [[0; 8]; 8];
+        use core::arch::x86_64::_mulx_u64;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
+
+        let mut acc = [0u128; 9];
+        let mut states = [[0u64; 8]; 8];
 
         for i in 0..8 {
-            let mut acc8_out: u64;
-            let mut cf_out: u64;
-            let mut of_out: u64;
             let ai = a[i];
-            unsafe {
-                std::arch::asm!(
-                    // rdx = ai for MULX ai*b[j]
-                    "mov rdx, {ai}",
-
-                    // Clear OF then CF for dual chains
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-
-                    // acc += ai * b (dual carry chains; MULX hi, lo)
-                    // j = 0
-                    "mulx r9, r10, qword ptr [{b_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-
-                    // j = 1
-                    "mulx r9, r10, qword ptr [{b_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-
-                    // j = 2
-                    "mulx r9, r10, qword ptr [{b_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-
-                    // j = 3
-                    "mulx r9, r10, qword ptr [{b_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-
-                    // j = 4
-                    "mulx r9, r10, qword ptr [{b_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-
-                    // j = 5
-                    "mulx r9, r10, qword ptr [{b_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-
-                    // j = 6
-                    "mulx r9, r10, qword ptr [{b_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-
-                    // j = 7
-                    "mulx r9, r10, qword ptr [{b_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    // Fold remaining carries into acc[8]: export acc8 and flags to Rust
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "seto al",
-                    "setc dl",
-                    "mov {acc8_out}, r11",
-                    "movzx {of_out}, al",
-                    "movzx {cf_out}, dl",
-                    // Rust will fold (OF from of_out) and (CF from cf_out) into acc[8] after asm
-                    // Rust will fold (OF from of_out) and (CF from cf_out) into acc[8] after asm
-
-                    // m = (acc[0] * n0_inv) low via MULX; set rdx = m_low
-                    "mov rdx, qword ptr [{acc} + 0]",
-                    "mulx r9, r10, {n0_inv}",
-                    "mov rdx, r10",
-
-                    // Clear OF then CF for second dual chain
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-
-                    // acc += m * n (dual chains)
-                    // j = 0
-                    "mulx r9, r10, qword ptr [{n_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-
-                    // j = 1
-                    "mulx r9, r10, qword ptr [{n_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-
-                    // j = 2
-                    "mulx r9, r10, qword ptr [{n_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-
-                    // j = 3
-                    "mulx r9, r10, qword ptr [{n_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-
-                    // j = 4
-                    "mulx r9, r10, qword ptr [{n_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-
-                    // j = 5
-                    "mulx r9, r10, qword ptr [{n_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-
-                    // j = 6
-                    "mulx r9, r10, qword ptr [{n_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-
-                    // j = 7
-                    "mulx r9, r10, qword ptr [{n_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    // Fold remaining carries into acc[8]: ADOX then ADCX
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "seto al",
-                    "movzx rax, al",
-                    "mov qword ptr [{of_ptr}], rax",
-                    "setc dl",
-                    "movzx rdx, dl",
-                    "mov qword ptr [{cf_ptr}], rdx",
-                    "mov qword ptr [{acc8_ptr}], r11",
-
-
-
-                    ai     = in(reg) ai,
-                    acc    = in(reg) acc.as_mut_ptr(),
-                    b_ptr  = in(reg) b.as_ptr(),
-                    n_ptr  = in(reg) n.as_ptr(),
-                    n0_inv = in(reg) n0_inv,
-                    out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
-                    acc8_out = lateout(reg) acc8_out, of_out = lateout(reg) of_out, cf_out = lateout(reg) cf_out,
-                    options(nostack)
-                );
-            }
-            // Fold final carry bits into acc[8] in Rust, then shift
-            let of_bit = (of_out & 0x1) as u64;
-            let cf_bit = (cf_out & 0x1) as u64;
-            acc[8] = acc8_out.wrapping_add(of_bit).wrapping_add(cf_bit);
-            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
-            acc.copy_within(1..=8, 0);
-            acc[8] = 0;
-            // Record state after shift as big-endian limbs (acc is LE)
+            // Phase A
+            let mut carry: u128 = 0;
             for j in 0..8 {
-                states[i][j] = acc[7 - j];
+                let mut hi: u64 = 0;
+                let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + (hi as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry);
+            // Phase B
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
+            let mut carry2: u128 = 0;
+            for j in 0..8 {
+                let mut hi2: u64 = 0;
+                let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + (hi2 as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry2);
+            // Shift
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
+            acc[8] = 0;
+            // Record big-endian limbs
+            for j in 0..8 {
+                states[i][j] = acc[7 - j] as u64;
             }
         }
 
@@ -843,7 +662,7 @@ mod mont_portable {
 
     // Capture ADX boundaries (after mul-fold and after red-fold) for a specific iteration index.
     // Returns (mul_be, red_be), each as 8 big-endian limbs.
-    #[cfg(any())]
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_boundaries_single(
@@ -853,341 +672,77 @@ mod mont_portable {
         n0_inv: u64,
         iter: usize,
     ) -> ([u64; 8], [u64; 8]) {
-        debug_assert!(iter < 8);
-        let mut acc: [u64; 9] = [0; 9];
-        // Advance to the requested iteration by replaying previous iterations with the ADX path
-        for i in 0..iter {
-            unsafe {
-                std::arch::asm!(
-                    "mov rdx, {ai}",
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-                    // ai * b
-                    "mulx r9, r10, qword ptr [{b_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mulx r9, r10, qword ptr [{b_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-                    // fold
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "seto r15b",
-                    "setc r14b",
-                    "movzx r15, r15b",
-                    "movzx r14, r14b",
-                    "add r11, r15",
-                    "adc r11, r14",
-                    "mov qword ptr [{acc} + 64], r11",
-                    // m
-                    "mov rdx, qword ptr [{acc} + 0]",
-                    "mulx r9, r10, {n0_inv}",
-                    "mov rdx, r10",
-                    // clear chains
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-                    // m * n
-                    "mulx r9, r10, qword ptr [{n_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mulx r9, r10, qword ptr [{n_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-                    // fold
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "seto r15b",
-                    "setc r14b",
-                    "movzx r15, r15b",
-                    "movzx r14, r14b",
-                    "add r11, r15",
-                    "add r11, r14",
-                    "mov qword ptr [{acc} + 64], r11",
+        use core::arch::x86_64::_mulx_u64;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
 
-                    ai    = in(reg) a[i],
-                    acc   = in("r12") acc.as_mut_ptr(),
-                    b_ptr = in("r13") b.as_ptr(),
-                    n_ptr = in("r14") n.as_mut_ptr(),
-                    n0_inv = in(reg) n0_inv,
-                    out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
-                    options(nostack)
-                );
+        debug_assert!(iter < 8);
+        let mut acc = [0u128; 9];
+
+        // Replay to start of iter
+        for i in 0..iter {
+            let ai = a[i];
+            // Phase A
+            let mut carry: u128 = 0;
+            for j in 0..8 {
+                let mut hi: u64 = 0;
+                let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + (hi as u128);
             }
-            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
-            acc.copy_within(1..=8, 0);
+            acc[8] = acc[8].wrapping_add(carry);
+            // Phase B
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
+            let mut carry2: u128 = 0;
+            for j in 0..8 {
+                let mut hi2: u64 = 0;
+                let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + (hi2 as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry2);
+            // Shift
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
             acc[8] = 0;
         }
-        // Now run the target iteration in two phases to capture boundaries before shift.
-        // Phase 1: ai*b with fold; record mul boundary.
-        unsafe {
-            std::arch::asm!(
-                "mov rdx, {ai}",
-                "xor r8d, r8d",
-                "adox r8, r8",
-                "adcx r8, r8",
-                // ai * b (same as above)
-                "mulx r9, r10, qword ptr [{b_ptr} + 0]",
-                "mov r11, qword ptr [{acc} + 0]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 0], r11",
-                "mov r11, qword ptr [{acc} + 8]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 8], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 8]",
-                "mov r11, qword ptr [{acc} + 8]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 8], r11",
-                "mov r11, qword ptr [{acc} + 16]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 16], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 16]",
-                "mov r11, qword ptr [{acc} + 16]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 16], r11",
-                "mov r11, qword ptr [{acc} + 24]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 24], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 24]",
-                "mov r11, qword ptr [{acc} + 24]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 24], r11",
-                "mov r11, qword ptr [{acc} + 32]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 32], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 32]",
-                "mov r11, qword ptr [{acc} + 32]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 32], r11",
-                "mov r11, qword ptr [{acc} + 40]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 40], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 40]",
-                "mov r11, qword ptr [{acc} + 40]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 40], r11",
-                "mov r11, qword ptr [{acc} + 48]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 48], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 48]",
-                "mov r11, qword ptr [{acc} + 48]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 48], r11",
-                "mov r11, qword ptr [{acc} + 56]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 56], r11",
-                "mulx r9, r10, qword ptr [{b_ptr} + 56]",
-                "mov r11, qword ptr [{acc} + 56]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 56], r11",
-                "mov r11, qword ptr [{acc} + 64]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 64], r11",
-                // fold
-                "mov r11, qword ptr [{acc} + 64]",
-                "seto r15b",
-                "setc r14b",
-                "movzx r15, r15b",
-                "movzx r14, r14b",
-                "add r11, r15",
-                "adc r11, r14",
-                "mov qword ptr [{acc} + 64], r11",
-                ai    = in(reg) a[iter],
-                acc   = in("r12") acc.as_mut_ptr(),
-                b_ptr = in("r13") b.as_mut_ptr(),
-                out("rax") _, out("rdx") _,
-                out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
-                options(nostack)
-            );
+
+        // mul boundary at iter (before shift)
+        let ai = a[iter];
+        let mut acc_mul = acc;
+        let mut carry_m: u128 = 0;
+        for j in 0..8 {
+            let mut hi: u64 = 0;
+            let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+            let sum = acc_mul[j] + (lo as u128) + carry_m;
+            acc_mul[j] = sum & MASK;
+            carry_m = (sum >> 64) + (hi as u128);
         }
+        acc_mul[8] = acc_mul[8].wrapping_add(carry_m);
         let mut mul_be = [0u64; 8];
         for j in 0..8 {
-            mul_be[7 - j] = acc[j];
+            mul_be[7 - j] = acc_mul[j] as u64;
         }
-        // Phase 2: reduction fold boundary
-        unsafe {
-            std::arch::asm!(
-                "mov rdx, qword ptr [{acc} + 0]",
-                "mulx r9, r10, {n0_inv}",
-                "mov rdx, r10",
-                "xor r8d, r8d",
-                "adox r8, r8",
-                "adcx r8, r8",
-                // m * n
-                "mulx r9, r10, qword ptr [{n_ptr} + 0]",
-                "mov r11, qword ptr [{acc} + 0]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 0], r11",
-                "mov r11, qword ptr [{acc} + 8]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 8], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 8]",
-                "mov r11, qword ptr [{acc} + 8]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 8], r11",
-                "mov r11, qword ptr [{acc} + 16]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 16], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 16]",
-                "mov r11, qword ptr [{acc} + 16]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 16], r11",
-                "mov r11, qword ptr [{acc} + 24]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 24], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 24]",
-                "mov r11, qword ptr [{acc} + 24]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 24], r11",
-                "mov r11, qword ptr [{acc} + 32]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 32], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 32]",
-                "mov r11, qword ptr [{acc} + 32]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 32], r11",
-                "mov r11, qword ptr [{acc} + 40]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 40], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 40]",
-                "mov r11, qword ptr [{acc} + 40]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 40], r11",
-                "mov r11, qword ptr [{acc} + 48]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 48], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 48]",
-                "mov r11, qword ptr [{acc} + 48]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 48], r11",
-                "mov r11, qword ptr [{acc} + 56]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 56], r11",
-                "mulx r9, r10, qword ptr [{n_ptr} + 56]",
-                "mov r11, qword ptr [{acc} + 56]",
-                "adcx r11, r10",
-                "mov qword ptr [{acc} + 56], r11",
-                "mov r11, qword ptr [{acc} + 64]",
-                "adox r11, r9",
-                "mov qword ptr [{acc} + 64], r11",
-                // fold
-                "mov r11, qword ptr [{acc} + 64]",
-                "mov r13, 0",
-                "adox r11, r13",
-                "adcx r11, r13",
-                "mov qword ptr [{acc} + 64], r11",
-                acc   = in("r12") acc.as_mut_ptr(),
-                n_ptr = in("r14") n.as_ptr(),
-                n0_inv = in(reg) n0_inv,
-                out("rax") _, out("rdx") _,
-                out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
-                options(nostack)
-            );
+
+        // red boundary at iter (before shift)
+        let m = (acc_mul[0] as u64).wrapping_mul(n0_inv);
+        let mut acc_red = acc_mul;
+        let mut carry_r: u128 = 0;
+        for j in 0..8 {
+            let mut hi2: u64 = 0;
+            let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+            let sum2 = acc_red[j] + (lo2 as u128) + carry_r;
+            acc_red[j] = sum2 & MASK;
+            carry_r = (sum2 >> 64) + (hi2 as u128);
         }
+        acc_red[8] = acc_red[8].wrapping_add(carry_r);
         let mut red_be = [0u64; 8];
         for j in 0..8 {
-            red_be[7 - j] = acc[j];
+            red_be[7 - j] = acc_red[j] as u64;
         }
+
         (mul_be, red_be)
     }
 
