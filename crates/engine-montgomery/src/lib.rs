@@ -1291,7 +1291,7 @@ mod mont_portable {
                     n_ptr  = in(reg) n.as_ptr(),
                     n0_inv = in(reg) n0_inv,
                     out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
                     options(nostack)
                 );
             }
