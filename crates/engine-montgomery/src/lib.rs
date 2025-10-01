@@ -580,62 +580,78 @@ mod mont_portable {
                     "mov r11, qword ptr [{acc} + 0]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 0], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
 
                     // j = 1
                     "mulx r9, r10, qword ptr [{b_ptr} + 8]",
                     "mov r11, qword ptr [{acc} + 8]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 8], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
 
                     // j = 2
                     "mulx r9, r10, qword ptr [{b_ptr} + 16]",
                     "mov r11, qword ptr [{acc} + 16]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 16], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
 
                     // j = 3
                     "mulx r9, r10, qword ptr [{b_ptr} + 24]",
                     "mov r11, qword ptr [{acc} + 24]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 24], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
 
                     // j = 4
                     "mulx r9, r10, qword ptr [{b_ptr} + 32]",
                     "mov r11, qword ptr [{acc} + 32]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 32], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
 
                     // j = 5
                     "mulx r9, r10, qword ptr [{b_ptr} + 40]",
                     "mov r11, qword ptr [{acc} + 40]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 40], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
 
                     // j = 6
                     "mulx r9, r10, qword ptr [{b_ptr} + 48]",
                     "mov r11, qword ptr [{acc} + 48]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 48], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
 
                     // j = 7
                     "mulx r9, r10, qword ptr [{b_ptr} + 56]",
                     "mov r11, qword ptr [{acc} + 56]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 56], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 64], r11",
 
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
                     "xor r13d, r13d",
                     "adcx r11, r13",
-                    "adox r11, r12",
+                    "adox r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -658,62 +674,78 @@ mod mont_portable {
                     "mov r11, qword ptr [{acc} + 0]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 0], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
 
                     // j = 1
                     "mulx r9, r10, qword ptr [{n_ptr} + 8]",
                     "mov r11, qword ptr [{acc} + 8]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 8], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
 
                     // j = 2
                     "mulx r9, r10, qword ptr [{n_ptr} + 16]",
                     "mov r11, qword ptr [{acc} + 16]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 16], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
 
                     // j = 3
                     "mulx r9, r10, qword ptr [{n_ptr} + 24]",
                     "mov r11, qword ptr [{acc} + 24]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 24], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
 
                     // j = 4
                     "mulx r9, r10, qword ptr [{n_ptr} + 32]",
                     "mov r11, qword ptr [{acc} + 32]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 32], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
 
                     // j = 5
                     "mulx r9, r10, qword ptr [{n_ptr} + 40]",
                     "mov r11, qword ptr [{acc} + 40]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 40], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
 
                     // j = 6
                     "mulx r9, r10, qword ptr [{n_ptr} + 48]",
                     "mov r11, qword ptr [{acc} + 48]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 48], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
 
                     // j = 7
                     "mulx r9, r10, qword ptr [{n_ptr} + 56]",
                     "mov r11, qword ptr [{acc} + 56]",
                     "adcx r11, r9",
                     "mov qword ptr [{acc} + 56], r11",
-                    "adox r12, r10",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r10",
+                    "mov qword ptr [{acc} + 64], r11",
 
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
                     "xor r13d, r13d",
                     "adcx r11, r13",
-                    "adox r11, r12",
+                    "adox r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -755,6 +787,21 @@ mod mont_portable {
 
         if ge_le(&res, n) {
             sub_le_in_place(&mut res, n);
+        }
+
+        // Optional runtime parity guard: if MINER_MONT_ADX_GUARD is set,
+        // compute BMI2 result and return it if mismatch detected.
+        if let Ok(val) = std::env::var("MINER_MONT_ADX_GUARD") {
+            if val == "1" || val.eq_ignore_ascii_case("true") {
+                let ref_res = mont_mul_bmi2(a, b, n, n0_inv);
+                if ref_res != res {
+                    log::warn!(
+                        target: "miner",
+                        "cpu-montgomery ADX parity mismatch; falling back to BMI2 result"
+                    );
+                    return ref_res;
+                }
+            }
         }
 
         res
