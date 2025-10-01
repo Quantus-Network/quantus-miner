@@ -652,8 +652,8 @@ mod mont_portable {
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
                     "mov r13, 0",
-                    "adcx r11, r13",
                     "adox r11, r13",
+                    "adcx r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -746,8 +746,8 @@ mod mont_portable {
                     // Fold remaining carries into acc[8]
                     "mov r11, qword ptr [{acc} + 64]",
                     "mov r13, 0",
-                    "adcx r11, r13",
                     "adox r11, r13",
+                    "adcx r11, r13",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
