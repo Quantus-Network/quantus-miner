@@ -870,7 +870,24 @@ mod mont_portable {
                                     }
                                     deep.push_str(&line);
                                 }
-                                log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
+                                {
+                                    log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
+                                    // ADX per-iteration states (temporary implementation mirrors CIOS flow to aid diffing)
+                                    let states = mont_mul_bmi2_adx_states(a, b, n, n0_inv);
+                                    let mut deep_adx = String::new();
+                                    for i in 0..8 {
+                                        use std::fmt::Write as _;
+                                        if i == 0 {
+                                            deep_adx.push_str("i0:");
+                                        } else {
+                                            let _ = write!(&mut deep_adx, " i{}:", i);
+                                        }
+                                        for limb in states[i].iter() {
+                                            let _ = write!(&mut deep_adx, "{:016x}", limb);
+                                        }
+                                    }
+                                    log::warn!(target: "miner", "ADX DEEP ADX: {}", deep_adx);
+                                }
                             }
                         }
                     }
@@ -880,6 +897,239 @@ mod mont_portable {
         }
 
         res
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[allow(unsafe_code)]
+    fn mont_mul_bmi2_adx_states(
+        a: &[u64; 8],
+        b: &[u64; 8],
+        n: &[u64; 8],
+        n0_inv: u64,
+    ) -> [[u64; 8]; 8] {
+        // Deep trace: record the actual ADX path accumulator after each outer iteration
+        let mut acc: [u64; 9] = [0; 9];
+        let mut states: [[u64; 8]; 8] = [[0; 8]; 8];
+
+        for i in 0..8 {
+            let ai = a[i];
+            unsafe {
+                std::arch::asm!(
+                    // rdx = ai for MULX ai*b[j]
+                    "mov rdx, {ai}",
+
+                    // Clear OF then CF for dual chains
+                    "xor r8d, r8d",
+                    "adox r8, r8",
+                    "adcx r8, r8",
+
+                    // acc += ai * b (dual carry chains; MULX hi, lo)
+                    // j = 0
+                    "mulx r9, r10, qword ptr [{b_ptr} + 0]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+
+                    // j = 1
+                    "mulx r9, r10, qword ptr [{b_ptr} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+
+                    // j = 2
+                    "mulx r9, r10, qword ptr [{b_ptr} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+
+                    // j = 3
+                    "mulx r9, r10, qword ptr [{b_ptr} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+
+                    // j = 4
+                    "mulx r9, r10, qword ptr [{b_ptr} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+
+                    // j = 5
+                    "mulx r9, r10, qword ptr [{b_ptr} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+
+                    // j = 6
+                    "mulx r9, r10, qword ptr [{b_ptr} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+
+                    // j = 7
+                    "mulx r9, r10, qword ptr [{b_ptr} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // Fold remaining carries into acc[8]: ADOX then ADCX
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov r13, 0",
+                    "adox r11, r13",
+                    "adcx r11, r13",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // m = (acc[0] * n0_inv) low via MULX; set rdx = m_low
+                    "mov rdx, qword ptr [{acc} + 0]",
+                    "mulx r9, r10, {n0_inv}",
+                    "mov rdx, r10",
+
+                    // Clear OF then CF for second dual chain
+                    "xor r8d, r8d",
+                    "adox r8, r8",
+                    "adcx r8, r8",
+
+                    // acc += m * n (dual chains)
+                    // j = 0
+                    "mulx r9, r10, qword ptr [{n_ptr} + 0]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+
+                    // j = 1
+                    "mulx r9, r10, qword ptr [{n_ptr} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+
+                    // j = 2
+                    "mulx r9, r10, qword ptr [{n_ptr} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+
+                    // j = 3
+                    "mulx r9, r10, qword ptr [{n_ptr} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+
+                    // j = 4
+                    "mulx r9, r10, qword ptr [{n_ptr} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+
+                    // j = 5
+                    "mulx r9, r10, qword ptr [{n_ptr} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+
+                    // j = 6
+                    "mulx r9, r10, qword ptr [{n_ptr} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+
+                    // j = 7
+                    "mulx r9, r10, qword ptr [{n_ptr} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // Fold remaining carries into acc[8]: ADOX then ADCX
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov r13, 0",
+                    "adox r11, r13",
+                    "adcx r11, r13",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // acc >>= 64 (drop acc[0])
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov qword ptr [{acc} + 64], 0",
+
+                    ai     = in(reg) ai,
+                    acc    = in(reg) acc.as_mut_ptr(),
+                    b_ptr  = in(reg) b.as_ptr(),
+                    n_ptr  = in(reg) n.as_ptr(),
+                    n0_inv = in(reg) n0_inv,
+                    out("rax") _, out("rdx") _,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _,
+                    options(nostack)
+                );
+            }
+            // Record state after shift as big-endian limbs (acc is LE)
+            for j in 0..8 {
+                states[i][j] = acc[7 - j];
+            }
+        }
+
+        states
     }
 
     #[cfg(target_arch = "aarch64")]
