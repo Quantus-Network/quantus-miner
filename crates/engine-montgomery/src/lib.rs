@@ -649,11 +649,14 @@ mod mont_portable {
                     "adox r11, r9",
                     "mov qword ptr [{acc} + 64], r11",
 
-                    // Fold remaining carries into acc[8]
+                    // Fold remaining carries into acc[8] using seto/setc to avoid ADCX/ADOX fold sensitivity
                     "mov r11, qword ptr [{acc} + 64]",
-                    "mov r13, 0",
-                    "adox r11, r13",
-                    "adcx r11, r13",
+                    "seto r15b",
+                    "setc r14b",
+                    "movzx r15, r15b",
+                    "movzx r14, r14b",
+                    "add r11, r15",
+                    "add r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -743,11 +746,14 @@ mod mont_portable {
                     "adox r11, r9",
                     "mov qword ptr [{acc} + 64], r11",
 
-                    // Fold remaining carries into acc[8]
+                    // Fold remaining carries into acc[8] using seto/setc to avoid ADCX/ADOX fold sensitivity
                     "mov r11, qword ptr [{acc} + 64]",
-                    "mov r13, 0",
-                    "adox r11, r13",
-                    "adcx r11, r13",
+                    "seto r15b",
+                    "setc r14b",
+                    "movzx r15, r15b",
+                    "movzx r14, r14b",
+                    "add r11, r15",
+                    "add r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -777,7 +783,7 @@ mod mont_portable {
                     n_ptr  = in(reg) n.as_ptr(),
                     n0_inv = in(reg) n0_inv,
                     out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
                     options(nostack)
                 );
             }
