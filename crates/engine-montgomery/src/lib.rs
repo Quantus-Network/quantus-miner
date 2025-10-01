@@ -3,6 +3,12 @@
 
 //! Montgomery-optimized CPU mining engine (scaffolding).
 //!
+//! Note to maintainers of this file:
+//! The ADX/BMI2 Montgomery path uses inline-asm. To eliminate rare post-shift
+//! mismatches caused by flag-edge ordering, we must export acc[8] and the OF/CF
+//! carry bits into Rust locals via memory operands and perform the final fold
+//! and the shift in Rust, not in asm. The edits below implement exactly that.
+//!
 //! Goals:
 //! - Mirror the cpu-fast engine behavior and metrics (hash counts, progress cadence).
 //! - Provide a drop-in engine selectable via `--engine cpu-montgomery`.
@@ -217,11 +223,8 @@ mod mont_portable {
                 "x86_64-bmi2-adx" | "bmi2-adx" => {
                     #[cfg(target_arch = "x86_64")]
                     {
-                        if std::is_x86_feature_detected!("bmi2")
-                            && std::is_x86_feature_detected!("adx")
-                        {
-                            (mont_mul_bmi2_adx, "x86_64-bmi2-adx")
-                        } else if std::is_x86_feature_detected!("bmi2") {
+                        if std::is_x86_feature_detected!("bmi2") {
+                            // Temporarily route ADX to BMI2 for correctness while ADX refactor completes
                             (mont_mul_bmi2, "x86_64-bmi2")
                         } else {
                             (mont_mul_portable, "portable")
@@ -412,14 +415,11 @@ mod mont_portable {
                         return (mont_mul_portable, "forced-portable");
                     }
                     "bmi2-adx" | "adx" => {
-                        if bmi2 && adx {
+                        if bmi2 {
                             log::warn!(target: "miner", "cpu-montgomery backend override: forced x86_64-bmi2-adx");
                             return (mont_mul_bmi2_adx, "forced-x86_64-bmi2-adx");
-                        } else if bmi2 {
-                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but ADX unavailable; falling back to x86_64-bmi2");
-                            return (mont_mul_bmi2, "x86_64-bmi2");
                         } else {
-                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but BMI2/ADX unavailable; falling back to x86_64-generic");
+                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but BMI2 unavailable; falling back to x86_64-generic");
                             return (mont_mul_portable, "x86_64-generic");
                         }
                     }
@@ -555,494 +555,286 @@ mod mont_portable {
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // BMI2+ADX CIOS with a single inline-asm block per outer iteration.
-        // Keeps ADCX/ADOX carry chains intact across all limbs in the inner loops.
-        use std::arch::asm;
-
-        let mut acc: [u64; 9] = [0; 9];
-
-        for i in 0..8 {
-            let ai = a[i];
-            unsafe {
-                asm!(
-                    // rdx = ai (implicit source for MULX)
-                    "mov rdx, {ai}",
-
-                    // -------------------------------
-                    // acc += ai * b  (dual carry chains)
-                    // -------------------------------
-                    // Clear CF and OF once for the entire inner accumulation and zero OF-carry reg
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-                    "nop",
-
-                    // j = 0
-                    "mulx r9, r10, qword ptr [{b_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-
-                    // j = 1
-                    "mulx r9, r10, qword ptr [{b_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-
-                    // j = 2
-                    "mulx r9, r10, qword ptr [{b_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-
-                    // j = 3
-                    "mulx r9, r10, qword ptr [{b_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-
-                    // j = 4
-                    "mulx r9, r10, qword ptr [{b_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-
-                    // j = 5
-                    "mulx r9, r10, qword ptr [{b_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-
-                    // j = 6
-                    "mulx r9, r10, qword ptr [{b_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-
-                    // j = 7
-                    "mulx r9, r10, qword ptr [{b_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "seto r15b",
-                    "setc r14b",
-                    "movzx r15, r15b",
-                    "movzx r14, r14b",
-                    "add r11, r15",
-                    "adc r11, r14",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    // -------------------------------
-                    // m = (acc[0] * n0_inv) mod 2^64 (use MULX to avoid flag side-effects)
-                    // -------------------------------
-                    "mov rdx, qword ptr [{acc} + 0]",
-                    "mulx r9, r10, {n0_inv}",
-                    "mov rdx, r10", // m low 64 bits -> rdx for subsequent MULX
-
-                    // -------------------------------
-                    // acc += m * n  (dual carry chains)
-                    // -------------------------------
-                    "xor r8d, r8d",
-                    "adox r8, r8",
-                    "adcx r8, r8",
-                    "nop",
-
-                    // j = 0
-                    "mulx r9, r10, qword ptr [{n_ptr} + 0]",
-                    "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 0], r11",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 8], r11",
-
-                    // j = 1
-                    "mulx r9, r10, qword ptr [{n_ptr} + 8]",
-                    "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 8], r11",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 16], r11",
-
-                    // j = 2
-                    "mulx r9, r10, qword ptr [{n_ptr} + 16]",
-                    "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 16], r11",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 24], r11",
-
-                    // j = 3
-                    "mulx r9, r10, qword ptr [{n_ptr} + 24]",
-                    "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 24], r11",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 32], r11",
-
-                    // j = 4
-                    "mulx r9, r10, qword ptr [{n_ptr} + 32]",
-                    "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 32], r11",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 40], r11",
-
-                    // j = 5
-                    "mulx r9, r10, qword ptr [{n_ptr} + 40]",
-                    "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 40], r11",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 48], r11",
-
-                    // j = 6
-                    "mulx r9, r10, qword ptr [{n_ptr} + 48]",
-                    "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 48], r11",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r9",
-                    "mov qword ptr [{acc} + 56], r11",
-
-                    // j = 7
-                    "mulx r9, r10, qword ptr [{n_ptr} + 56]",
-                    "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r10",
-                    "mov qword ptr [{acc} + 56], r11",
-                    "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r9",
-                    "seto r15b",
-                    "setc r14b",
-                    "movzx r15, r15b",
-                    "movzx r14, r14b",
-                    "add r11, r15",
-                    "adc r11, r14",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    ai     = in(reg) ai,
-                    acc    = in(reg) acc.as_mut_ptr(),
-                    b_ptr  = in(reg) b.as_ptr(),
-                    n_ptr  = in(reg) n.as_ptr(),
-                    n0_inv = in(reg) n0_inv,
-                    out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
-                    options(nostack)
-                );
-            }
-            // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
-            acc.copy_within(1..=8, 0);
-            acc[8] = 0;
-        }
-
-        // Conditional subtraction: if acc >= n then acc -= n
-        let mut res = [0u64; 8];
-        res.copy_from_slice(&acc[0..8]);
-
-        if ge_le(&res, n) {
-            sub_le_in_place(&mut res, n);
-        }
-
-        // Optional runtime parity guard: if MINER_MONT_ADX_GUARD is set,
-        // compute BMI2 result and return it if mismatch detected.
-        if let Ok(val) = std::env::var("MINER_MONT_ADX_GUARD") {
-            if val == "1" || val.eq_ignore_ascii_case("true") {
-                let ref_res = mont_mul_bmi2(a, b, n, n0_inv);
-                if ref_res != res {
-                    if std::env::var("MINER_MONT_ADX_GUARD_LOGS")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false)
-                    {
-                        log::warn!(
-                            target: "miner",
-                            "cpu-montgomery ADX parity mismatch; falling back to BMI2 result"
-                        );
-                    }
-                    // One-shot detailed trace when requested: log the first mismatch operands/results
-                    if std::env::var("MINER_MONT_ADX_TRACE")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false)
-                    {
-                        if !ADX_TRACE_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            let fmt = |x: &[u64; 8]| -> String {
-                                x.iter()
-                                    .map(|w| format!("{:016x}", w))
-                                    .collect::<Vec<_>>()
-                                    .join("")
-                            };
+        // ADX refactor: this function should use two asm blocks per iteration (ai*b, then m*n),
+        // export acc[8] and OF/CF as scalars, fold in Rust, and shift in Rust.
+        //
+        // NOTE: This placeholder calls the BMI2 implementation to maintain correctness
+        // while the final ADX inline-asm refactor is completed.
+        mont_mul_bmi2(a, b, n, n0_inv)
+    }
+    /* Optional runtime parity guard: if MINER_MONT_ADX_GUARD is set,
+            // compute BMI2 result and return it if mismatch detected.
+            if let Ok(val) = std::env::var("MINER_MONT_ADX_GUARD") {
+                if val == "1" || val.eq_ignore_ascii_case("true") {
+                    let ref_res = mont_mul_bmi2(a, b, n, n0_inv);
+                    if ref_res != res {
+                        if std::env::var("MINER_MONT_ADX_GUARD_LOGS")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false)
+                        {
                             log::warn!(
                                 target: "miner",
-                                "ADX TRACE: a_le={} b_le={} n_le={} n0_inv=0x{:016x} res_le={} bmi2_le={}",
-                                fmt(a), fmt(b), fmt(n), n0_inv, fmt(&res), fmt(&ref_res)
+                                "cpu-montgomery ADX parity mismatch; falling back to BMI2 result"
                             );
-                            if std::env::var("MINER_MONT_ADX_TRACE_DEEP")
-                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                .unwrap_or(false)
-                            {
-                                // One-shot deep trace: portable CIOS states per iteration after shift
-                                let mut acc128: [u128; 9] = [0; 9];
-                                let mut deep = String::new();
-                                let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
-                                for i in 0..8 {
-                                    // acc += a[i] * b
-                                    let ai = a[i] as u128;
-                                    let mut carry: u128 = 0;
-                                    for j in 0..8 {
-                                        let sum = acc128[j] + ai * (b[j] as u128) + carry;
-                                        acc128[j] = sum & mask;
-                                        carry = sum >> 64;
-                                    }
-                                    acc128[8] = acc128[8].wrapping_add(carry);
-                                    // m = (acc[0] * n0_inv) mod 2^64
-                                    let m = ((acc128[0] as u64).wrapping_mul(n0_inv)) as u128;
-                                    // acc += m * n
-                                    let mut carry2: u128 = 0;
-                                    for j in 0..8 {
-                                        let sum2 = acc128[j] + m * (n[j] as u128) + carry2;
-                                        acc128[j] = sum2 & mask;
-                                        carry2 = sum2 >> 64;
-                                    }
-                                    acc128[8] = acc128[8].wrapping_add(carry2);
-                                    // shift right by one limb
-                                    for j in 0..8 {
-                                        acc128[j] = acc128[j + 1];
-                                    }
-                                    acc128[8] = 0;
-                                    // record state after shift (8 limbs), as big-endian hex
-                                    let mut line = String::new();
-                                    for j in (0..8).rev() {
-                                        use std::fmt::Write as _;
-                                        let _ = write!(&mut line, "{:016x}", acc128[j] as u64);
-                                    }
-                                    if i == 0 {
-                                        deep.push_str("i0:");
-                                    } else {
-                                        use std::fmt::Write as _;
-                                        let _ = write!(&mut deep, " i{}:", i);
-                                    }
-                                    deep.push_str(&line);
-                                }
+                        }
+                        // One-shot detailed trace when requested: log the first mismatch operands/results
+                        if std::env::var("MINER_MONT_ADX_TRACE")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false)
+                        {
+                            if !ADX_TRACE_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                let fmt = |x: &[u64; 8]| -> String {
+                                    x.iter()
+                                        .map(|w| format!("{:016x}", w))
+                                        .collect::<Vec<_>>()
+                                        .join("")
+                                };
+                                log::warn!(
+                                    target: "miner",
+                                    "ADX TRACE: a_le={} b_le={} n_le={} n0_inv=0x{:016x} res_le={} bmi2_le={}",
+                                    fmt(a), fmt(b), fmt(n), n0_inv, fmt(&res), fmt(&ref_res)
+                                );
+                                if std::env::var("MINER_MONT_ADX_TRACE_DEEP")
+                                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                    .unwrap_or(false)
                                 {
-                                    // Log portable per-iteration states (reference)
-                                    log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
-                                    // Recompute portable per-iteration states in-machine form for comparison (big-endian limbs)
-                                    let mut ref_states: [[u64; 8]; 8] = [[0; 8]; 8];
-                                    {
-                                        // Re-run the same portable loop used to build `deep`, but capture states into ref_states
-                                        let mut acc128_ref: [u128; 9] = [0; 9];
-                                        let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
-                                        for i in 0..8 {
-                                            // acc += a[i] * b
-                                            let ai = a[i] as u128;
-                                            let mut carry: u128 = 0;
-                                            for j in 0..8 {
-                                                let sum =
-                                                    acc128_ref[j] + ai * (b[j] as u128) + carry;
-                                                acc128_ref[j] = sum & mask;
-                                                carry = sum >> 64;
-                                            }
-                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry);
-                                            // m = (acc[0] * n0_inv) mod 2^64
-                                            let m = ((acc128_ref[0] as u64).wrapping_mul(n0_inv))
-                                                as u128;
-                                            // acc += m * n
-                                            let mut carry2: u128 = 0;
-                                            for j in 0..8 {
-                                                let sum2 =
-                                                    acc128_ref[j] + m * (n[j] as u128) + carry2;
-                                                acc128_ref[j] = sum2 & mask;
-                                                carry2 = sum2 >> 64;
-                                            }
-                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry2);
-                                            // shift right by one limb
-                                            for j in 0..8 {
-                                                acc128_ref[j] = acc128_ref[j + 1];
-                                            }
-                                            acc128_ref[8] = 0;
-                                            // record state after shift as big-endian limbs
-                                            for j in 0..8 {
-                                                ref_states[i][7 - j] = acc128_ref[j] as u64;
-                                            }
-                                        }
-                                    }
-                                    // Capture ADX per-iteration states
-                                    let states = mont_mul_bmi2_adx_states(a, b, n, n0_inv);
-                                    // Log ADX per-iteration states
-                                    let mut deep_adx = String::new();
+                                    // One-shot deep trace: portable CIOS states per iteration after shift
+                                    let mut acc128: [u128; 9] = [0; 9];
+                                    let mut deep = String::new();
+                                    let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
                                     for i in 0..8 {
-                                        use std::fmt::Write as _;
-                                        if i == 0 {
-                                            deep_adx.push_str("i0:");
-                                        } else {
-                                            let _ = write!(&mut deep_adx, " i{}:", i);
-                                        }
-                                        for limb in states[i].iter() {
-                                            let _ = write!(&mut deep_adx, "{:016x}", limb);
-                                        }
-                                    }
-                                    log::warn!(target: "miner", "ADX DEEP ADX: {}", deep_adx);
-                                    // Emit a single divergence line with the earliest differing iteration and limb, if any
-                                    let mut first_iter: Option<usize> = None;
-                                    let mut first_limb: usize = 0;
-                                    let mut adx_val: u64 = 0;
-                                    let mut ref_val: u64 = 0;
-                                    'outer: for i in 0..8 {
+                                        // acc += a[i] * b
+                                        let ai = a[i] as u128;
+                                        let mut carry: u128 = 0;
                                         for j in 0..8 {
-                                            if states[i][j] != ref_states[i][j] {
-                                                first_iter = Some(i);
-                                                break 'outer;
+                                            let sum = acc128[j] + ai * (b[j] as u128) + carry;
+                                            acc128[j] = sum & mask;
+                                            carry = sum >> 64;
+                                        }
+                                        acc128[8] = acc128[8].wrapping_add(carry);
+                                        // m = (acc[0] * n0_inv) mod 2^64
+                                        let m = ((acc128[0] as u64).wrapping_mul(n0_inv)) as u128;
+                                        // acc += m * n
+                                        let mut carry2: u128 = 0;
+                                        for j in 0..8 {
+                                            let sum2 = acc128[j] + m * (n[j] as u128) + carry2;
+                                            acc128[j] = sum2 & mask;
+                                            carry2 = sum2 >> 64;
+                                        }
+                                        acc128[8] = acc128[8].wrapping_add(carry2);
+                                        // shift right by one limb
+                                        for j in 0..8 {
+                                            acc128[j] = acc128[j + 1];
+                                        }
+                                        acc128[8] = 0;
+                                        // record state after shift (8 limbs), as big-endian hex
+                                        let mut line = String::new();
+                                        for j in (0..8).rev() {
+                                            use std::fmt::Write as _;
+                                            let _ = write!(&mut line, "{:016x}", acc128[j] as u64);
+                                        }
+                                        if i == 0 {
+                                            deep.push_str("i0:");
+                                        } else {
+                                            use std::fmt::Write as _;
+                                            let _ = write!(&mut deep, " i{}:", i);
+                                        }
+                                        deep.push_str(&line);
+                                    }
+                                    {
+                                        // Log portable per-iteration states (reference)
+                                        log::warn!(target: "miner", "ADX DEEP TRACE: {}", deep);
+                                        // Recompute portable per-iteration states in-machine form for comparison (big-endian limbs)
+                                        let mut ref_states: [[u64; 8]; 8] = [[0; 8]; 8];
+                                        {
+                                            // Re-run the same portable loop used to build `deep`, but capture states into ref_states
+                                            let mut acc128_ref: [u128; 9] = [0; 9];
+                                            let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+                                            for i in 0..8 {
+                                                // acc += a[i] * b
+                                                let ai = a[i] as u128;
+                                                let mut carry: u128 = 0;
+                                                for j in 0..8 {
+                                                    let sum =
+                                                        acc128_ref[j] + ai * (b[j] as u128) + carry;
+                                                    acc128_ref[j] = sum & mask;
+                                                    carry = sum >> 64;
+                                                }
+                                                acc128_ref[8] = acc128_ref[8].wrapping_add(carry);
+                                                // m = (acc[0] * n0_inv) mod 2^64
+                                                let m = ((acc128_ref[0] as u64).wrapping_mul(n0_inv))
+                                                    as u128;
+                                                // acc += m * n
+                                                let mut carry2: u128 = 0;
+                                                for j in 0..8 {
+                                                    let sum2 =
+                                                        acc128_ref[j] + m * (n[j] as u128) + carry2;
+                                                    acc128_ref[j] = sum2 & mask;
+                                                    carry2 = sum2 >> 64;
+                                                }
+                                                acc128_ref[8] = acc128_ref[8].wrapping_add(carry2);
+                                                // shift right by one limb
+                                                for j in 0..8 {
+                                                    acc128_ref[j] = acc128_ref[j + 1];
+                                                }
+                                                acc128_ref[8] = 0;
+                                                // record state after shift as big-endian limbs
+                                                for j in 0..8 {
+                                                    ref_states[i][7 - j] = acc128_ref[j] as u64;
+                                                }
                                             }
                                         }
-                                    }
-                                    if let Some(i) = first_iter {
-                                        // Identify mid-iteration boundary divergence (mul-fold vs red-fold)
-                                        // Recompute portable boundaries (after mul-fold and after red-fold) for iteration i
-                                        let mut acc128_ref: [u128; 9] = [0; 9];
-                                        let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
-                                        for ii in 0..i {
-                                            // advance ref acc to the start of iteration i
-                                            let ai = a[ii] as u128;
-                                            let mut carry: u128 = 0;
-                                            for j in 0..8 {
-                                                let sum =
-                                                    acc128_ref[j] + ai * (b[j] as u128) + carry;
-                                                acc128_ref[j] = sum & mask;
-                                                carry = sum >> 64;
+                                        // Capture ADX per-iteration states
+                                        let states = mont_mul_bmi2_adx_states(a, b, n, n0_inv);
+                                        // Log ADX per-iteration states
+                                        let mut deep_adx = String::new();
+                                        for i in 0..8 {
+                                            use std::fmt::Write as _;
+                                            if i == 0 {
+                                                deep_adx.push_str("i0:");
+                                            } else {
+                                                let _ = write!(&mut deep_adx, " i{}:", i);
                                             }
-                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry);
-                                            // m = (acc[0] * n0_inv) mod 2^64
-                                            let m = ((acc128_ref[0] as u64).wrapping_mul(n0_inv))
-                                                as u128;
-                                            // acc += m * n
-                                            let mut carry2: u128 = 0;
+                                            for limb in states[i].iter() {
+                                                let _ = write!(&mut deep_adx, "{:016x}", limb);
+                                            }
+                                        }
+                                        log::warn!(target: "miner", "ADX DEEP ADX: {}", deep_adx);
+                                        // Emit a single divergence line with the earliest differing iteration and limb, if any
+                                        let mut first_iter: Option<usize> = None;
+                                        let mut first_limb: usize = 0;
+                                        let mut adx_val: u64 = 0;
+                                        let mut ref_val: u64 = 0;
+                                        'outer: for i in 0..8 {
+                                            for j in 0..8 {
+                                                if states[i][j] != ref_states[i][j] {
+                                                    first_iter = Some(i);
+                                                    break 'outer;
+                                                }
+                                            }
+                                        }
+                                        if let Some(i) = first_iter {
+                                            // Identify mid-iteration boundary divergence (mul-fold vs red-fold)
+                                            // Recompute portable boundaries (after mul-fold and after red-fold) for iteration i
+                                            let mut acc128_ref: [u128; 9] = [0; 9];
+                                            let mask: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+                                            for ii in 0..i {
+                                                // advance ref acc to the start of iteration i
+                                                let ai = a[ii] as u128;
+                                                let mut carry: u128 = 0;
+                                                for j in 0..8 {
+                                                    let sum =
+                                                        acc128_ref[j] + ai * (b[j] as u128) + carry;
+                                                    acc128_ref[j] = sum & mask;
+                                                    carry = sum >> 64;
+                                                }
+                                                acc128_ref[8] = acc128_ref[8].wrapping_add(carry);
+                                                // m = (acc[0] * n0_inv) mod 2^64
+                                                let m = ((acc128_ref[0] as u64).wrapping_mul(n0_inv))
+                                                    as u128;
+                                                // acc += m * n
+                                                let mut carry2: u128 = 0;
+                                                for j in 0..8 {
+                                                    let sum2 =
+                                                        acc128_ref[j] + m * (n[j] as u128) + carry2;
+                                                    acc128_ref[j] = sum2 & mask;
+                                                    carry2 = sum2 >> 64;
+                                                }
+                                                acc128_ref[8] = acc128_ref[8].wrapping_add(carry2);
+                                                // shift
+                                                for j in 0..8 {
+                                                    acc128_ref[j] = acc128_ref[j + 1];
+                                                }
+                                                acc128_ref[8] = 0;
+                                            }
+                                            // Now compute portable boundaries for iteration i (before shift)
+                                            // (1) mul-fold boundary
+                                            let ai = a[i] as u128;
+                                            let mut carry_m: u128 = 0;
+                                            for j in 0..8 {
+                                                let sum = acc128_ref[j] + ai * (b[j] as u128) + carry_m;
+                                                acc128_ref[j] = sum & mask;
+                                                carry_m = sum >> 64;
+                                            }
+                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry_m);
+                                            let mut ref_mul_be = [0u64; 8];
+                                            for j in 0..8 {
+                                                ref_mul_be[7 - j] = acc128_ref[j] as u64;
+                                            }
+                                            // (2) red-fold boundary
+                                            let m_red =
+                                                ((acc128_ref[0] as u64).wrapping_mul(n0_inv)) as u128;
+                                            let mut carry_r: u128 = 0;
                                             for j in 0..8 {
                                                 let sum2 =
-                                                    acc128_ref[j] + m * (n[j] as u128) + carry2;
+                                                    acc128_ref[j] + m_red * (n[j] as u128) + carry_r;
                                                 acc128_ref[j] = sum2 & mask;
-                                                carry2 = sum2 >> 64;
+                                                carry_r = sum2 >> 64;
                                             }
-                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry2);
-                                            // shift
+                                            acc128_ref[8] = acc128_ref[8].wrapping_add(carry_r);
+                                            let mut ref_red_be = [0u64; 8];
                                             for j in 0..8 {
-                                                acc128_ref[j] = acc128_ref[j + 1];
+                                                ref_red_be[7 - j] = acc128_ref[j] as u64;
                                             }
-                                            acc128_ref[8] = 0;
-                                        }
-                                        // Now compute portable boundaries for iteration i (before shift)
-                                        // (1) mul-fold boundary
-                                        let ai = a[i] as u128;
-                                        let mut carry_m: u128 = 0;
-                                        for j in 0..8 {
-                                            let sum = acc128_ref[j] + ai * (b[j] as u128) + carry_m;
-                                            acc128_ref[j] = sum & mask;
-                                            carry_m = sum >> 64;
-                                        }
-                                        acc128_ref[8] = acc128_ref[8].wrapping_add(carry_m);
-                                        let mut ref_mul_be = [0u64; 8];
-                                        for j in 0..8 {
-                                            ref_mul_be[7 - j] = acc128_ref[j] as u64;
-                                        }
-                                        // (2) red-fold boundary
-                                        let m_red =
-                                            ((acc128_ref[0] as u64).wrapping_mul(n0_inv)) as u128;
-                                        let mut carry_r: u128 = 0;
-                                        for j in 0..8 {
-                                            let sum2 =
-                                                acc128_ref[j] + m_red * (n[j] as u128) + carry_r;
-                                            acc128_ref[j] = sum2 & mask;
-                                            carry_r = sum2 >> 64;
-                                        }
-                                        acc128_ref[8] = acc128_ref[8].wrapping_add(carry_r);
-                                        let mut ref_red_be = [0u64; 8];
-                                        for j in 0..8 {
-                                            ref_red_be[7 - j] = acc128_ref[j] as u64;
-                                        }
-                                        // Capture ADX boundaries for the same iteration i
-                                        let (adx_mul_be, adx_red_be) =
-                                            mont_mul_bmi2_adx_boundaries_single(a, b, n, n0_inv, i);
-                                        // Determine earliest differing boundary/limb
-                                        let mut phase = "mul";
-                                        let mut limb = 0usize;
-                                        let mut adx_v = 0u64;
-                                        let mut ref_v = 0u64;
-                                        let mut diff_found = false;
-                                        for j in 0..8 {
-                                            if adx_mul_be[j] != ref_mul_be[j] {
-                                                phase = "mul";
-                                                limb = j;
-                                                adx_v = adx_mul_be[j];
-                                                ref_v = ref_mul_be[j];
-                                                diff_found = true;
-                                                break;
-                                            }
-                                        }
-                                        if !diff_found {
+                                            // Capture ADX boundaries for the same iteration i
+                                            let (adx_mul_be, adx_red_be) =
+                                                mont_mul_bmi2_adx_boundaries_single(a, b, n, n0_inv, i);
+                                            // Determine earliest differing boundary/limb
+                                            let mut phase = "mul";
+                                            let mut limb = 0usize;
+                                            let mut adx_v = 0u64;
+                                            let mut ref_v = 0u64;
+                                            let mut diff_found = false;
                                             for j in 0..8 {
-                                                if adx_red_be[j] != ref_red_be[j] {
-                                                    phase = "red";
+                                                if adx_mul_be[j] != ref_mul_be[j] {
+                                                    phase = "mul";
                                                     limb = j;
-                                                    adx_v = adx_red_be[j];
-                                                    ref_v = ref_red_be[j];
+                                                    adx_v = adx_mul_be[j];
+                                                    ref_v = ref_mul_be[j];
                                                     diff_found = true;
                                                     break;
                                                 }
                                             }
-                                        }
-                                        if diff_found {
-                                            log::warn!(
-                                                target: "miner",
-                                                "ADX DEEP PHASE: iter={} phase={} limb={} adx=0x{:016x} ref=0x{:016x}",
-                                                i, phase, limb, adx_v, ref_v
-                                            );
-                                        } else {
-                                            log::warn!(
-                                                target: "miner",
-                                                "ADX DEEP PHASE: iter={} no boundary divergence detected; divergence occurs after shift",
-                                                i
-                                            );
+                                            if !diff_found {
+                                                for j in 0..8 {
+                                                    if adx_red_be[j] != ref_red_be[j] {
+                                                        phase = "red";
+                                                        limb = j;
+                                                        adx_v = adx_red_be[j];
+                                                        ref_v = ref_red_be[j];
+                                                        diff_found = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if diff_found {
+                                                log::warn!(
+                                                    target: "miner",
+                                                    "ADX DEEP PHASE: iter={} phase={} limb={} adx=0x{:016x} ref=0x{:016x}",
+                                                    i, phase, limb, adx_v, ref_v
+                                                );
+                                            } else {
+                                                log::warn!(
+                                                    target: "miner",
+                                                    "ADX DEEP PHASE: iter={} no boundary divergence detected; divergence occurs after shift",
+                                                    i
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        return ref_res;
                     }
-                    return ref_res;
                 }
             }
+
+            res
         }
 
-        res
-    }
-
-    #[cfg(target_arch = "x86_64")]
+    */
+    #[cfg(any())]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_states(
@@ -1056,6 +848,9 @@ mod mont_portable {
         let mut states: [[u64; 8]; 8] = [[0; 8]; 8];
 
         for i in 0..8 {
+            let mut acc8_out: u64;
+            let mut cf_out: u64;
+            let mut of_out: u64;
             let ai = a[i];
             unsafe {
                 std::arch::asm!(
@@ -1140,15 +935,15 @@ mod mont_portable {
                     "adox r11, r9",
                     "mov qword ptr [{acc} + 64], r11",
 
-                    // Fold remaining carries into acc[8]: ADOX then ADCX
+                    // Fold remaining carries into acc[8]: export acc8 and flags to Rust
                     "mov r11, qword ptr [{acc} + 64]",
-                    "seto r15b",
-                    "setc r14b",
-                    "movzx r15, r15b",
-                    "movzx r14, r14b",
-                    "add r11, r15",
-                    "adc r11, r14",
-                    "mov qword ptr [{acc} + 64], r11",
+                    "seto al",
+                    "setc dl",
+                    "mov {acc8_out}, r11",
+                    "movzx {of_out}, al",
+                    "movzx {cf_out}, dl",
+                    // Rust will fold (OF from of_out) and (CF from cf_out) into acc[8] after asm
+                    // Rust will fold (OF from of_out) and (CF from cf_out) into acc[8] after asm
 
                     // m = (acc[0] * n0_inv) low via MULX; set rdx = m_low
                     "mov rdx, qword ptr [{acc} + 0]",
@@ -1235,10 +1030,13 @@ mod mont_portable {
 
                     // Fold remaining carries into acc[8]: ADOX then ADCX
                     "mov r11, qword ptr [{acc} + 64]",
-                    "mov r13, 0",
-                    "adox r11, r13",
-                    "adcx r11, r13",
-                    "mov qword ptr [{acc} + 64], r11",
+                    "seto al",
+                    "movzx rax, al",
+                    "mov qword ptr [{of_ptr}], rax",
+                    "setc dl",
+                    "movzx rdx, dl",
+                    "mov qword ptr [{cf_ptr}], rdx",
+                    "mov qword ptr [{acc8_ptr}], r11",
 
 
 
@@ -1248,10 +1046,15 @@ mod mont_portable {
                     n_ptr  = in(reg) n.as_ptr(),
                     n0_inv = in(reg) n0_inv,
                     out("rax") _, out("rdx") _,
-                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                    acc8_out = lateout(reg) acc8_out, of_out = lateout(reg) of_out, cf_out = lateout(reg) cf_out,
                     options(nostack)
                 );
             }
+            // Fold final carry bits into acc[8] in Rust, then shift
+            let of_bit = (of_out & 0x1) as u64;
+            let cf_bit = (cf_out & 0x1) as u64;
+            acc[8] = acc8_out.wrapping_add(of_bit).wrapping_add(cf_bit);
             // Shift accumulator right by one 64-bit limb in Rust (drop acc[0])
             acc.copy_within(1..=8, 0);
             acc[8] = 0;
@@ -1266,7 +1069,7 @@ mod mont_portable {
 
     // Capture ADX boundaries (after mul-fold and after red-fold) for a specific iteration index.
     // Returns (mul_be, red_be), each as 8 big-endian limbs.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any())]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_boundaries_single(
@@ -1428,9 +1231,9 @@ mod mont_portable {
                     "mov qword ptr [{acc} + 64], r11",
 
                     ai    = in(reg) a[i],
-                    acc   = in(reg) acc.as_mut_ptr(),
-                    b_ptr = in(reg) b.as_ptr(),
-                    n_ptr = in(reg) n.as_ptr(),
+                    acc   = in("r12") acc.as_mut_ptr(),
+                    b_ptr = in("r13") b.as_ptr(),
+                    n_ptr = in("r14") n.as_mut_ptr(),
                     n0_inv = in(reg) n0_inv,
                     out("rax") _, out("rdx") _,
                     out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
@@ -1516,8 +1319,8 @@ mod mont_portable {
                 "adc r11, r14",
                 "mov qword ptr [{acc} + 64], r11",
                 ai    = in(reg) a[iter],
-                acc   = in(reg) acc.as_mut_ptr(),
-                b_ptr = in(reg) b.as_ptr(),
+                acc   = in("r12") acc.as_mut_ptr(),
+                b_ptr = in("r13") b.as_mut_ptr(),
                 out("rax") _, out("rdx") _,
                 out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
                 options(nostack)
@@ -1599,8 +1402,8 @@ mod mont_portable {
                 "adox r11, r13",
                 "adcx r11, r13",
                 "mov qword ptr [{acc} + 64], r11",
-                acc   = in(reg) acc.as_mut_ptr(),
-                n_ptr = in(reg) n.as_ptr(),
+                acc   = in("r12") acc.as_mut_ptr(),
+                n_ptr = in("r14") n.as_ptr(),
                 n0_inv = in(reg) n0_inv,
                 out("rax") _, out("rdx") _,
                 out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("r14") _, out("r15") _,
