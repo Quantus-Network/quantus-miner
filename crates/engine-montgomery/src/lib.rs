@@ -656,7 +656,7 @@ mod mont_portable {
                     "movzx r15, r15b",
                     "movzx r14, r14b",
                     "add r11, r15",
-                    "add r11, r14",
+                    "adc r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -753,7 +753,7 @@ mod mont_portable {
                     "movzx r15, r15b",
                     "movzx r14, r14b",
                     "add r11, r15",
-                    "add r11, r14",
+                    "adc r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // -------------------------------
@@ -1173,7 +1173,7 @@ mod mont_portable {
                     "movzx r15, r15b",
                     "movzx r14, r14b",
                     "add r11, r15",
-                    "add r11, r14",
+                    "adc r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // m = (acc[0] * n0_inv) low via MULX; set rdx = m_low
@@ -1390,7 +1390,7 @@ mod mont_portable {
                     "movzx r15, r15b",
                     "movzx r14, r14b",
                     "add r11, r15",
-                    "add r11, r14",
+                    "adc r11, r14",
                     "mov qword ptr [{acc} + 64], r11",
                     // m
                     "mov rdx, qword ptr [{acc} + 0]",
@@ -1567,7 +1567,7 @@ mod mont_portable {
                 "movzx r15, r15b",
                 "movzx r14, r14b",
                 "add r11, r15",
-                "add r11, r14",
+                "adc r11, r14",
                 "mov qword ptr [{acc} + 64], r11",
                 ai    = in(reg) a[iter],
                 acc   = in(reg) acc.as_mut_ptr(),
