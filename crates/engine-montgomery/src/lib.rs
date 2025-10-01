@@ -146,6 +146,8 @@ mod mont_portable {
     // Montgomery context with portable CIOS 8x64 implementation (u128 intermediates).
     // Limbs are stored little-endian (limb 0 is least significant).
     type MulFn = fn(&[u64; 8], &[u64; 8], &[u64; 8], u64) -> [u64; 8];
+    static ADX_TRACE_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     #[derive(Clone)]
     pub struct MontCtx {
@@ -578,73 +580,73 @@ mod mont_portable {
                     // j = 0
                     "mulx r9, r10, qword ptr [{b_ptr} + 0]",
                     "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 0], r11",
                     "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 8], r11",
 
                     // j = 1
                     "mulx r9, r10, qword ptr [{b_ptr} + 8]",
                     "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 8], r11",
                     "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 16], r11",
 
                     // j = 2
                     "mulx r9, r10, qword ptr [{b_ptr} + 16]",
                     "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 16], r11",
                     "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 24], r11",
 
                     // j = 3
                     "mulx r9, r10, qword ptr [{b_ptr} + 24]",
                     "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 24], r11",
                     "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 32], r11",
 
                     // j = 4
                     "mulx r9, r10, qword ptr [{b_ptr} + 32]",
                     "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 32], r11",
                     "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 40], r11",
 
                     // j = 5
                     "mulx r9, r10, qword ptr [{b_ptr} + 40]",
                     "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 40], r11",
                     "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 48], r11",
 
                     // j = 6
                     "mulx r9, r10, qword ptr [{b_ptr} + 48]",
                     "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 48], r11",
                     "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 56], r11",
 
                     // j = 7
                     "mulx r9, r10, qword ptr [{b_ptr} + 56]",
                     "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 56], r11",
                     "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // Fold remaining carries into acc[8]
@@ -659,7 +661,7 @@ mod mont_portable {
                     // -------------------------------
                     "mov rdx, qword ptr [{acc} + 0]",
                     "mulx r9, r10, {n0_inv}",
-                    "mov rdx, r9", // m low 64 bits -> rdx for subsequent MULX
+                    "mov rdx, r10", // m low 64 bits -> rdx for subsequent MULX
 
                     // -------------------------------
                     // acc += m * n  (dual carry chains)
@@ -672,73 +674,73 @@ mod mont_portable {
                     // j = 0
                     "mulx r9, r10, qword ptr [{n_ptr} + 0]",
                     "mov r11, qword ptr [{acc} + 0]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 0], r11",
                     "mov r11, qword ptr [{acc} + 8]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 8], r11",
 
                     // j = 1
                     "mulx r9, r10, qword ptr [{n_ptr} + 8]",
                     "mov r11, qword ptr [{acc} + 8]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 8], r11",
                     "mov r11, qword ptr [{acc} + 16]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 16], r11",
 
                     // j = 2
                     "mulx r9, r10, qword ptr [{n_ptr} + 16]",
                     "mov r11, qword ptr [{acc} + 16]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 16], r11",
                     "mov r11, qword ptr [{acc} + 24]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 24], r11",
 
                     // j = 3
                     "mulx r9, r10, qword ptr [{n_ptr} + 24]",
                     "mov r11, qword ptr [{acc} + 24]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 24], r11",
                     "mov r11, qword ptr [{acc} + 32]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 32], r11",
 
                     // j = 4
                     "mulx r9, r10, qword ptr [{n_ptr} + 32]",
                     "mov r11, qword ptr [{acc} + 32]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 32], r11",
                     "mov r11, qword ptr [{acc} + 40]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 40], r11",
 
                     // j = 5
                     "mulx r9, r10, qword ptr [{n_ptr} + 40]",
                     "mov r11, qword ptr [{acc} + 40]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 40], r11",
                     "mov r11, qword ptr [{acc} + 48]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 48], r11",
 
                     // j = 6
                     "mulx r9, r10, qword ptr [{n_ptr} + 48]",
                     "mov r11, qword ptr [{acc} + 48]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 48], r11",
                     "mov r11, qword ptr [{acc} + 56]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 56], r11",
 
                     // j = 7
                     "mulx r9, r10, qword ptr [{n_ptr} + 56]",
                     "mov r11, qword ptr [{acc} + 56]",
-                    "adcx r11, r9",
+                    "adcx r11, r10",
                     "mov qword ptr [{acc} + 56], r11",
                     "mov r11, qword ptr [{acc} + 64]",
-                    "adox r11, r10",
+                    "adox r11, r9",
                     "mov qword ptr [{acc} + 64], r11",
 
                     // Fold remaining carries into acc[8]
@@ -795,10 +797,34 @@ mod mont_portable {
             if val == "1" || val.eq_ignore_ascii_case("true") {
                 let ref_res = mont_mul_bmi2(a, b, n, n0_inv);
                 if ref_res != res {
-                    log::warn!(
-                        target: "miner",
-                        "cpu-montgomery ADX parity mismatch; falling back to BMI2 result"
-                    );
+                    if std::env::var("MINER_MONT_ADX_GUARD_LOGS")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)
+                    {
+                        log::warn!(
+                            target: "miner",
+                            "cpu-montgomery ADX parity mismatch; falling back to BMI2 result"
+                        );
+                    }
+                    // One-shot detailed trace when requested: log the first mismatch operands/results
+                    if std::env::var("MINER_MONT_ADX_TRACE")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)
+                    {
+                        if !ADX_TRACE_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            let fmt = |x: &[u64; 8]| -> String {
+                                x.iter()
+                                    .map(|w| format!("{:016x}", w))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            };
+                            log::warn!(
+                                target: "miner",
+                                "ADX TRACE: a_le={} b_le={} n_le={} n0_inv=0x{:016x} res_le={} bmi2_le={}",
+                                fmt(a), fmt(b), fmt(n), n0_inv, fmt(&res), fmt(&ref_res)
+                            );
+                        }
+                    }
                     return ref_res;
                 }
             }
