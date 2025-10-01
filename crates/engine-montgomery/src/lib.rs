@@ -553,100 +553,200 @@ mod mont_portable {
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // BMI2+ADX-optimized CIOS using MULX + dual carry chains (ADCX/ADOX).
-        // We retain the same CIOS structure as the portable path:
-        //  - acc is a 9-limb accumulator in 64-bit limbs (little-endian)
-        //  - For each i:
-        //      acc += a[i] * b
-        //      m = (acc[0] * n0_inv) mod 2^64
-        //      acc += m * n
-        //      acc >>= 64 (drop acc[0])
-        //
-        // The inner adds use two independent carry chains:
-        //  - ADCX chain accumulates low halves into acc[j] (carry via CF)
-        //  - ADOX chain accumulates high halves into a separate running carry (OF)
-        //
-        // Note: We keep the logic in Rust around the asm! blocks for readability; the hot add paths
-        // are emitted via inline assembly for ADX utilization.
-        use core::arch::x86_64::_mulx_u64;
+        // BMI2+ADX CIOS with a single inline-asm block per outer iteration.
+        // Keeps ADCX/ADOX carry chains intact across all limbs in the inner loops.
         use std::arch::asm;
 
         let mut acc: [u64; 9] = [0; 9];
 
-        // helper: add (lo, hi) into acc[j] with dual carry chains (CF/OF)
-        #[inline(always)]
-        unsafe fn adx_accumulate(acc_j: &mut u64, lo: u64, hi: u64, of_carry: &mut u64) {
-            // Clear CF and OF, then do:
-            //   acc_j += lo using ADCX (CF chain)
-            //   of_carry += hi using ADOX (OF chain)
-            asm!(
-                // Clear CF and OF carry chains
-                "xor r8d, r8d",
-                "adcx r8, r8",
-                "adox r8, r8",
-                // acc_j = acc_j + lo + CF
-                "adcx {acc_j}, {lo}",
-                // of_carry = of_carry + hi + OF
-                "adox {ofc}, {hi}",
-                acc_j = inout(reg) *acc_j,
-                ofc   = inout(reg) *of_carry,
-                lo    = in(reg) lo,
-                hi    = in(reg) hi,
-                out("r8") _,
-                options(nomem, nostack)
-            );
-        }
+        for i in 0..8 {
+            let ai = a[i];
+            unsafe {
+                asm!(
+                    // rdx = ai (implicit source for MULX)
+                    "mov rdx, {ai}",
 
-        // helper: fold OF carry into next limb (acc[k] += of_carry)
-        #[inline(always)]
-        unsafe fn adx_fold_of(acc_k: &mut u64, of_carry: &mut u64) {
-            // Fold the overflow-chain carry into acc_k using ADCX with cleared CF.
-            asm!(
-                "xor r8d, r8d",
-                "adcx r8, r8",
-                "adcx {acc_k}, {ofc}",
-                acc_k = inout(reg) *acc_k,
-                ofc   = inout(reg) *of_carry,
-                out("r8") _,
-                options(nomem, nostack)
-            );
-        }
+                    // -------------------------------
+                    // acc += ai * b  (dual carry chains)
+                    // -------------------------------
+                    // Clear CF and OF once for the entire inner accumulation and zero OF-carry reg
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+                    "xor r12, r12",
 
-        for &ai in a.iter().take(8) {
-            // acc += ai * b
-            let mut of_carry: u64 = 0;
+                    // j = 0
+                    "mulx r9, r10, qword ptr [{b_ptr} + 0]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "adox r12, r10",
 
-            // iterate j=0..7: accumulate ai*b[j] into acc[j].. with dual chains
-            for j in 0..8 {
-                let mut hi: u64 = 0;
-                let lo: u64 = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                    // j = 1
+                    "mulx r9, r10, qword ptr [{b_ptr} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "adox r12, r10",
 
-                // acc[j] += lo (CF chain), of_carry += hi (OF chain)
-                unsafe { adx_accumulate(&mut acc[j], lo, hi, &mut of_carry) };
+                    // j = 2
+                    "mulx r9, r10, qword ptr [{b_ptr} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "adox r12, r10",
+
+                    // j = 3
+                    "mulx r9, r10, qword ptr [{b_ptr} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "adox r12, r10",
+
+                    // j = 4
+                    "mulx r9, r10, qword ptr [{b_ptr} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "adox r12, r10",
+
+                    // j = 5
+                    "mulx r9, r10, qword ptr [{b_ptr} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "adox r12, r10",
+
+                    // j = 6
+                    "mulx r9, r10, qword ptr [{b_ptr} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "adox r12, r10",
+
+                    // j = 7
+                    "mulx r9, r10, qword ptr [{b_ptr} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "adox r12, r10",
+
+                    // Fold remaining carries into acc[8]
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "xor r13d, r13d",
+                    "adcx r11, r13",
+                    "adox r11, r12",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // -------------------------------
+                    // m = (acc[0] * n0_inv) mod 2^64
+                    // -------------------------------
+                    "mov rax, qword ptr [{acc} + 0]",
+                    "imul rax, {n0_inv}",
+                    "mov rdx, rax", // rdx = m for MULX
+
+                    // -------------------------------
+                    // acc += m * n  (dual carry chains)
+                    // -------------------------------
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+                    "xor r12, r12",
+
+                    // j = 0
+                    "mulx r9, r10, qword ptr [{n_ptr} + 0]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "adox r12, r10",
+
+                    // j = 1
+                    "mulx r9, r10, qword ptr [{n_ptr} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "adox r12, r10",
+
+                    // j = 2
+                    "mulx r9, r10, qword ptr [{n_ptr} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "adox r12, r10",
+
+                    // j = 3
+                    "mulx r9, r10, qword ptr [{n_ptr} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "adox r12, r10",
+
+                    // j = 4
+                    "mulx r9, r10, qword ptr [{n_ptr} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "adox r12, r10",
+
+                    // j = 5
+                    "mulx r9, r10, qword ptr [{n_ptr} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "adox r12, r10",
+
+                    // j = 6
+                    "mulx r9, r10, qword ptr [{n_ptr} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "adox r12, r10",
+
+                    // j = 7
+                    "mulx r9, r10, qword ptr [{n_ptr} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "adox r12, r10",
+
+                    // Fold remaining carries into acc[8]
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "xor r13d, r13d",
+                    "adcx r11, r13",
+                    "adox r11, r12",
+                    "mov qword ptr [{acc} + 64], r11",
+
+                    // -------------------------------
+                    // acc >>= 64 (drop acc[0])
+                    // -------------------------------
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov qword ptr [{acc} + 64], 0",
+
+                    ai     = in(reg) ai,
+                    acc    = in(reg) acc.as_mut_ptr(),
+                    b_ptr  = in(reg) b.as_ptr(),
+                    n_ptr  = in(reg) n.as_ptr(),
+                    n0_inv = in(reg) n0_inv,
+                    out("rax") _, out("rdx") _,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _, out("r12") _, out("r13") _,
+                    options(nostack)
+                );
             }
-            // Propagate remaining OF carry into acc[8]
-            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
-
-            // m = (acc[0] * n0_inv) mod 2^64
-            let m: u64 = (acc[0]).wrapping_mul(n0_inv);
-
-            // acc += m * n
-            of_carry = 0;
-            for j in 0..8 {
-                let mut hi2: u64 = 0;
-                let lo2: u64 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
-
-                // acc[j] += lo2 (CF chain), of_carry += hi2 (OF chain)
-                unsafe { adx_accumulate(&mut acc[j], lo2, hi2, &mut of_carry) };
-            }
-            // Propagate remaining OF carry into acc[8]
-            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
-
-            // shift acc right by one limb (drop acc[0])
-            for j in 0..8 {
-                acc[j] = acc[j + 1];
-            }
-            acc[8] = 0;
         }
 
         // Conditional subtraction: if acc >= n then acc -= n
