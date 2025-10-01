@@ -555,12 +555,301 @@ mod mont_portable {
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // ADX refactor: this function should use two asm blocks per iteration (ai*b, then m*n),
-        // export acc[8] and OF/CF as scalars, fold in Rust, and shift in Rust.
+        // ADX refactor: two asm blocks per iteration with Rust-side fold and shift.
+        // - Phase A: acc += a[i] * b using MULX + ADCX/ADOX
+        // - Fold OF/CF into acc[8] in Rust
+        // - Phase B: m = acc[0] * n0_inv; acc += m * n using MULX + ADCX/ADOX
+        // - Fold OF/CF into acc[8] in Rust
+        // - Shift in Rust
         //
-        // NOTE: This placeholder calls the BMI2 implementation to maintain correctness
-        // while the final ADX inline-asm refactor is completed.
-        mont_mul_bmi2(a, b, n, n0_inv)
+        // This implementation uses the ADX dual-carry structure with BMI2 MULX. The
+        // final carry fold and shift are always performed in Rust to avoid any flag
+        // lifetime or micro-architectural sensitivity at the boundary.
+
+        let mut acc: [u64; 9] = [0; 9];
+        let b_ptr = b.as_ptr();
+        let n_ptr = n.as_ptr();
+
+        for i in 0..8 {
+            let ai = a[i];
+
+            // ---------------------------
+            // Phase A: acc += a[i] * b
+            // ---------------------------
+            let mut acc8_a: u64;
+            let mut of_a: u64;
+            let mut cf_a: u64;
+            unsafe {
+                core::arch::asm!(
+                    // rdx supplies multiplicand for MULX
+                    "mov rdx, {ai}",
+
+                    // Clear both carry chains (CF/OF)
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+
+                    // j = 0..7 (dual chain across limbs)
+                    "mulx r9, r10, qword ptr [{b}]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+
+                    "mulx r9, r10, qword ptr [{b} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r9",
+
+                    // Export acc8 and flags
+                    "seto  al",
+                    "setc  dl",
+                    "mov   {acc8_out}, r11",
+                    "movzx {of_out},  al",
+                    "movzx {cf_out},  dl",
+
+                    ai         = in(reg) ai,
+                    b          = in(reg) b_ptr,
+                    acc        = in(reg) acc.as_mut_ptr(),
+                    acc8_out   = lateout(reg) acc8_a,
+                    of_out     = lateout(reg) of_a,
+                    cf_out     = lateout(reg) cf_a,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                    out("rax") _, out("rdx") _,
+                    options(nostack)
+                );
+            }
+
+            // Rust-side fold for Phase A
+            acc[8] = acc8_a
+                .wrapping_add((of_a & 1) as u64)
+                .wrapping_add((cf_a & 1) as u64);
+
+            // ---------------------------
+            // Phase B: m = acc[0] * n0_inv; acc += m * n
+            // ---------------------------
+            let m = acc[0].wrapping_mul(n0_inv);
+            let mut acc8_b: u64;
+            let mut of_b: u64;
+            let mut cf_b: u64;
+            unsafe {
+                core::arch::asm!(
+                    // Clear both carry chains
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+
+                    // j = 0..7 (dual chain across limbs)
+                    "mulx r9, r10, qword ptr [{n}]",
+                    "mov r11, qword ptr [{acc} + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 0], r11",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 8], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 8]",
+                    "mov r11, qword ptr [{acc} + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 8], r11",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 16], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 16]",
+                    "mov r11, qword ptr [{acc} + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 16], r11",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 24], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 24]",
+                    "mov r11, qword ptr [{acc} + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 24], r11",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 32], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 32]",
+                    "mov r11, qword ptr [{acc} + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 32], r11",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 40], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 40]",
+                    "mov r11, qword ptr [{acc} + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 40], r11",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 48], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 48]",
+                    "mov r11, qword ptr [{acc} + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 48], r11",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [{acc} + 56], r11",
+
+                    "mulx r9, r10, qword ptr [{n} + 56]",
+                    "mov r11, qword ptr [{acc} + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [{acc} + 56], r11",
+                    "mov r11, qword ptr [{acc} + 64]",
+                    "adox r11, r9",
+
+                    // Export acc8 and flags
+                    "seto  al",
+                    "setc  dl",
+                    "mov   {acc8_out}, r11",
+                    "movzx {of_out},  al",
+                    "movzx {cf_out},  dl",
+
+                    n          = in(reg) n_ptr,
+                    acc        = in(reg) acc.as_mut_ptr(),
+                    acc8_out   = lateout(reg) acc8_b,
+                    of_out     = lateout(reg) of_b,
+                    cf_out     = lateout(reg) cf_b,
+                    in("rdx") m,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                    out("rax") _, out("rdx") _,
+                    options(nostack)
+                );
+            }
+
+            // Rust-side fold for Phase B
+            acc[8] = acc8_b
+                .wrapping_add((of_b & 1) as u64)
+                .wrapping_add((cf_b & 1) as u64);
+
+            // Shift in Rust
+            acc.copy_within(1..=8, 0);
+            acc[8] = 0;
+        }
+
+        // Convert to u64 limbs (little-endian)
+        let mut res = [0u64; 8];
+        for j in 0..8 {
+            res[j] = acc[j];
+        }
+
+        // Conditional subtraction if res >= n
+        if ge_le(&res, n) {
+            sub_le_in_place(&mut res, n);
+        }
+
+        res
+    }
+        // Two-phase per-iteration BMI2 (MULX) path with Rust-side fold and shift.
+        // Structure matches the intended ADX backend (ready to drop in ADX asm later).
+        use core::arch::x86_64::_mulx_u64;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
+
+        // 9-limb accumulator in u128 to simplify carries and folds
+        let mut acc = [0u128; 9];
+
+        for i in 0..8 {
+            let ai = a[i];
+
+            // Phase A: acc += ai * b
+            let mut carry: u128 = 0;
+            for j in 0..8 {
+                let mut hi: u64 = 0;
+                let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + (hi as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry);
+
+            // Phase B: m = (acc[0] * n0_inv) mod 2^64; acc += m * n
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
+            let mut carry2: u128 = 0;
+            for j in 0..8 {
+                let mut hi2: u64 = 0;
+                let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + (hi2 as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry2);
+
+            // Shift accumulator right by one 64-bit limb (drop acc[0])
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
+            acc[8] = 0;
+        }
+
+        // Convert to u64 limbs (little-endian)
+        let mut res = [0u64; 8];
+        for j in 0..8 {
+            res[j] = acc[j] as u64;
+        }
+
+        // Conditional subtraction if res >= n
+        if ge_le(&res, n) {
+            sub_le_in_place(&mut res, n);
+        }
+
+        res
     }
     /* Optional runtime parity guard: if MINER_MONT_ADX_GUARD is set,
             // compute BMI2 result and return it if mismatch detected.
