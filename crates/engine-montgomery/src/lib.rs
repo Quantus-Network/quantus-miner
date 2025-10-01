@@ -647,10 +647,6 @@ mod mont_portable {
                     "mov qword ptr [{acc} + 56], r11",
                     "mov r11, qword ptr [{acc} + 64]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    // Fold remaining carries into acc[8] using seto/setc to avoid ADCX/ADOX fold sensitivity
-                    "mov r11, qword ptr [{acc} + 64]",
                     "seto r15b",
                     "setc r14b",
                     "movzx r15, r15b",
@@ -744,10 +740,6 @@ mod mont_portable {
                     "mov qword ptr [{acc} + 56], r11",
                     "mov r11, qword ptr [{acc} + 64]",
                     "adox r11, r9",
-                    "mov qword ptr [{acc} + 64], r11",
-
-                    // Fold remaining carries into acc[8] using seto/setc to avoid ADCX/ADOX fold sensitivity
-                    "mov r11, qword ptr [{acc} + 64]",
                     "seto r15b",
                     "setc r14b",
                     "movzx r15, r15b",
