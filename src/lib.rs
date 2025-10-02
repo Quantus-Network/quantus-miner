@@ -319,6 +319,11 @@ fn thread_mine_range(
     let chunk_size_u512 = U512::from(MINE_RANGE_SIZE);
 
     while current_nonce <= end && !cancel_flag.load(Ordering::Relaxed) {
+        if current_nonce == U512::zero() {
+            println!("Current nonce is zero; breaking");
+            current_nonce = current_nonce.saturating_add(U512::one());
+            continue;
+        }
         // remaining (inclusive)
         let remaining = (end - current_nonce).saturating_add(U512::from(1u64));
         let steps_u64 = if remaining > chunk_size_u512 { MINE_RANGE_SIZE } else { remaining.as_u64() };
