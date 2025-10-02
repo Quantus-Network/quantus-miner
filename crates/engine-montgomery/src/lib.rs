@@ -415,7 +415,7 @@ mod mont_portable {
                     "bmi2-adx" | "adx" => {
                         if bmi2 {
                             log::warn!(target: "miner", "cpu-montgomery backend override: forced x86_64-bmi2-adx");
-                            return (mont_mul_bmi2_adx, "forced-x86_64-bmi2-adx");
+                            return (mont_mul_bmi2, "forced-x86_64-bmi2-adx");
                         } else {
                             log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but BMI2 unavailable; falling back to x86_64-generic");
                             return (mont_mul_portable, "x86_64-generic");
@@ -789,7 +789,7 @@ mod mont_portable {
         res
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_states(
@@ -1029,7 +1029,7 @@ mod mont_portable {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
         #[test]
         fn montgomery_bmi2_equivalence_to_portable_when_available() {
             // On x86_64, ensure bmi2 path produces identical results as portable for the same (a,b).
