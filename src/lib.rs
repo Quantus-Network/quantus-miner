@@ -603,7 +603,8 @@ mod tests {
         state.add_job("fail_job".to_string(), job).await.unwrap();
 
         let mut finished_job = None;
-        for _ in 0..1 {
+        for _ in 0..50 {
+            // Poll for 5 seconds max (50 * 100ms)
             let job_status = state.get_job("fail_job").await.unwrap();
             if job_status.status != JobStatus::Running {
                 finished_job = Some(job_status);
@@ -613,14 +614,8 @@ mod tests {
         }
 
         let finished_job = finished_job.expect("Job did not finish in time");
-        // With the new range miner, a zero threshold may still find an exact match.
-        // Accept either Completed (exact match) or Failed (no match), but never Running.
-        assert!(finished_job.status == JobStatus::Failed || finished_job.status == JobStatus::Completed);
+        assert_eq!(finished_job.status, JobStatus::Failed);
         assert!(finished_job.total_hash_count > 0);
-        if finished_job.status == JobStatus::Completed {
-            let best = finished_job.best_result.as_ref().expect("Completed job must have best_result");
-            assert_eq!(best.distance, U512::zero(), "Zero threshold completion must have zero distance");
-        }
     }
 
     #[tokio::test]
