@@ -3,6 +3,7 @@ use quantus_miner::*;
 // Import everything from lib.rs
 use std::net::SocketAddr;
 use warp::Filter;
+use env_logger::Env;
 
 /// Quantus External Miner Service
 #[derive(Parser, Debug)]
@@ -20,7 +21,7 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse(); // Parse args - this handles --help and --version
-    env_logger::init(); // Initialize logger after parsing args
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     log::info!("Starting external miner service...");
 
     let mut state = MiningState::new();
@@ -68,6 +69,6 @@ async fn main() {
 
     // Use the port from parsed arguments
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
-    log::info!("Server starting on {}", addr);
+    log::debug!("Server starting on {}", addr);
     warp::serve(routes).run(addr).await;
 }

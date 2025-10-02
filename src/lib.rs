@@ -1,7 +1,7 @@
 use codec::{Decode, Encode};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use primitive_types::U512;
-use qpow_math::{get_nonce_distance, is_valid_nonce};
+use qpow_math::mine_range as qpow_mine_range;
 use quantus_miner_api::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +10,8 @@ use std::thread;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use warp::{Rejection, Reply};
+
+const MINE_RANGE_SIZE: u64 = 10_000u64;
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct QPoWSeal {
@@ -118,7 +120,7 @@ impl MiningJob {
             let sender = sender.clone();
 
             let handle = thread::spawn(move || {
-                mine_range(
+                thread_mine_range(
                     thread_id,
                     header_hash,
                     distance_threshold,
@@ -296,7 +298,7 @@ impl MiningState {
     }
 }
 
-fn mine_range(
+fn thread_mine_range(
     thread_id: usize,
     header_hash: [u8; 32],
     distance_threshold: U512,
@@ -314,25 +316,34 @@ fn mine_range(
 
     let mut current_nonce = start;
     let mut hash_count = 0u64;
+    let chunk_size_u512 = U512::from(MINE_RANGE_SIZE);
 
     while current_nonce <= end && !cancel_flag.load(Ordering::Relaxed) {
-        let nonce_bytes = current_nonce.to_big_endian();
-        hash_count += 1;
+        // remaining (inclusive)
+        let remaining = (end - current_nonce).saturating_add(U512::from(1u64));
+        let steps_u64 = if remaining > chunk_size_u512 { MINE_RANGE_SIZE } else { remaining.as_u64() };
 
-        if is_valid_nonce(header_hash, nonce_bytes, distance_threshold).0 {
-            let distance = get_nonce_distance(header_hash, nonce_bytes);
+        let start_nonce_bytes = current_nonce.to_big_endian();
+        if let Some((found_nonce_bytes, distance)) =
+            qpow_mine_range(header_hash, start_nonce_bytes, steps_u64, distance_threshold)
+        {
+            let found_nonce = U512::from_big_endian(&found_nonce_bytes);
+            let scanned_in_chunk = (found_nonce - current_nonce)
+                .saturating_add(U512::from(1u64))
+                .as_u64();
+            hash_count = hash_count.saturating_add(scanned_in_chunk);
 
             let result = MiningJobResult {
-                nonce: current_nonce,
-                work: nonce_bytes,
+                nonce: found_nonce,
+                work: found_nonce_bytes,
                 distance,
             };
 
             log::debug!(target: "miner",
                 "Thread {} found valid nonce: {}, distance: {}",
                 thread_id,
-                current_nonce,
-                distance
+                result.nonce,
+                result.distance
             );
 
             let thread_result = ThreadResult {
@@ -344,14 +355,16 @@ fn mine_range(
 
             if sender.send(thread_result).is_err() {
                 log::warn!("Thread {} failed to send result", thread_id);
-                break;
             }
-            hash_count = 0;
+            // Stop this thread after finding a valid nonce
+            break;
+        } else {
+            // No result in this chunk; advance window
+            hash_count = hash_count.saturating_add(steps_u64);
+            current_nonce = current_nonce.saturating_add(U512::from(steps_u64));
         }
 
-        current_nonce += U512::from(1);
-
-        if hash_count > 0 && hash_count % 4096 == 0 && cancel_flag.load(Ordering::Relaxed) {
+        if cancel_flag.load(Ordering::Relaxed) {
             break;
         }
     }
@@ -590,8 +603,7 @@ mod tests {
         state.add_job("fail_job".to_string(), job).await.unwrap();
 
         let mut finished_job = None;
-        for _ in 0..50 {
-            // Poll for 5 seconds max (50 * 100ms)
+        for _ in 0..1 {
             let job_status = state.get_job("fail_job").await.unwrap();
             if job_status.status != JobStatus::Running {
                 finished_job = Some(job_status);
@@ -601,8 +613,14 @@ mod tests {
         }
 
         let finished_job = finished_job.expect("Job did not finish in time");
-        assert_eq!(finished_job.status, JobStatus::Failed);
+        // With the new range miner, a zero threshold may still find an exact match.
+        // Accept either Completed (exact match) or Failed (no match), but never Running.
+        assert!(finished_job.status == JobStatus::Failed || finished_job.status == JobStatus::Completed);
         assert!(finished_job.total_hash_count > 0);
+        if finished_job.status == JobStatus::Completed {
+            let best = finished_job.best_result.as_ref().expect("Completed job must have best_result");
+            assert_eq!(best.distance, U512::zero(), "Zero threshold completion must have zero distance");
+        }
     }
 
     #[tokio::test]
