@@ -488,7 +488,7 @@ mod mont_portable {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
