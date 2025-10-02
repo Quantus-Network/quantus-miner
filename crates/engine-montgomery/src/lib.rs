@@ -548,7 +548,7 @@ mod mont_portable {
         res
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
     #[inline]
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
@@ -845,7 +845,7 @@ mod mont_portable {
         states
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
     #[inline]
     #[allow(unsafe_code)]
     fn mont_mul_bmi2_adx_boundaries_single(
