@@ -1,6 +1,6 @@
 use primitive_types::U512;
 use quantus_miner::*;
-use resonance_miner_api::*;
+use quantus_miner_api::*;
 use warp::test::request;
 use warp::Filter; // Import shared API types
 

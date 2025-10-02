@@ -3,7 +3,7 @@
 
 use primitive_types::U512;
 use quantus_miner::*;
-use resonance_miner_api::*; // Use the shared API types
+use quantus_miner_api::*; // Use the shared API types
 use serde_json::json;
 use warp::test::request;
 use warp::Filter; // For sending custom/invalid JSON
