@@ -152,8 +152,6 @@ mod mont_portable {
     // Montgomery context with portable CIOS 8x64 implementation (u128 intermediates).
     // Limbs are stored little-endian (limb 0 is least significant).
     type MulFn = fn(&[u64; 8], &[u64; 8], &[u64; 8], u64) -> [u64; 8];
-    static ADX_TRACE_EMITTED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
 
     #[derive(Clone)]
     pub struct MontCtx {
@@ -408,7 +406,7 @@ mod mont_portable {
             #[cfg(target_arch = "x86_64")]
             {
                 let bmi2 = std::is_x86_feature_detected!("bmi2");
-                let adx = std::is_x86_feature_detected!("adx");
+
                 match forced.as_str() {
                     "portable" => {
                         log::warn!(target: "miner", "cpu-montgomery backend override: forced portable");
