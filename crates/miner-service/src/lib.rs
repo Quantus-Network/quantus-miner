@@ -540,30 +540,53 @@ impl MiningJob {
                     .is_none_or(|current_best| result.distance < current_best.distance);
 
                 if is_better {
-                    log::debug!(target: "miner",
-                        "Found better result from thread {}: distance = {}, nonce = {}",
-                        thread_result.thread_id,
-                        result.distance,
-                        result.nonce
-                    );
-                    self.best_result = Some(result.clone());
-                    self.cancel_flag.store(true, Ordering::Relaxed);
-                    // Result is now ready to be fetched via /result
-                    log::info!(target: "miner", "Result ready: engine={}, nonce={}, distance={}",
-                        self.engine_name, result.nonce, result.distance);
-                    #[cfg(feature = "metrics")]
-                    {
-                        // reuse existing http metric bucket for visibility until dedicated counters exist
-                        metrics::inc_mine_requests("result_ready");
-                        if let Some(job_id) = &self.job_id {
-                            let origin_label = match thread_result.origin {
-                                Some(engine_cpu::FoundOrigin::Cpu) => "cpu",
-                                Some(engine_cpu::FoundOrigin::GpuG1) => "gpu-g1",
-                                Some(engine_cpu::FoundOrigin::GpuG2) => "gpu-g2",
-                                _ => "unknown",
-                            };
-                            metrics::set_job_found_origin(self.engine_name, job_id, origin_label);
+                    // Re-verify candidate under the current job context before accepting.
+                    // Compute distance from header and nonce using the reference path.
+                    let nonce_be = result.nonce.to_big_endian();
+                    let recomputed =
+                        pow_core::compat::get_nonce_distance(self.header_hash, nonce_be);
+                    let valid = recomputed <= self.distance_threshold;
+
+                    if valid {
+                        log::debug!(target: "miner",
+                            "Found better result from thread {}: distance = {}, nonce = {} (recheck ok)",
+                            thread_result.thread_id,
+                            result.distance,
+                            result.nonce
+                        );
+                        self.best_result = Some(result.clone());
+                        self.cancel_flag.store(true, Ordering::Relaxed);
+                        // Result is now ready to be fetched via /result
+                        log::info!(target: "miner", "Result ready: engine={}, nonce={}, distance={}",
+                            self.engine_name, result.nonce, result.distance);
+                        #[cfg(feature = "metrics")]
+                        {
+                            // reuse existing http metric bucket for visibility until dedicated counters exist
+                            metrics::inc_mine_requests("result_ready");
+                            if let Some(job_id) = &self.job_id {
+                                let origin_label = match thread_result.origin {
+                                    Some(engine_cpu::FoundOrigin::Cpu) => "cpu",
+                                    Some(engine_cpu::FoundOrigin::GpuG1) => "gpu-g1",
+                                    Some(engine_cpu::FoundOrigin::GpuG2) => "gpu-g2",
+                                    _ => "unknown",
+                                };
+                                metrics::set_job_found_origin(
+                                    self.engine_name,
+                                    job_id,
+                                    origin_label,
+                                );
+                            }
                         }
+                    } else {
+                        // Reject invalid candidate; keep searching without cancelling other threads.
+                        log::warn!(target: "miner",
+                            "Rejected candidate from thread {}: nonce={}, engine={}, recomputed_distance={} > threshold={}",
+                            thread_result.thread_id,
+                            result.nonce,
+                            self.engine_name,
+                            recomputed,
+                            self.distance_threshold
+                        );
                     }
                 }
             }

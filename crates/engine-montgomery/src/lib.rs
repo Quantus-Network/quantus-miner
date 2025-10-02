@@ -3,6 +3,12 @@
 
 //! Montgomery-optimized CPU mining engine (scaffolding).
 //!
+//! Note to maintainers of this file:
+//! The ADX/BMI2 Montgomery path uses inline-asm. To eliminate rare post-shift
+//! mismatches caused by flag-edge ordering, we must export acc[8] and the OF/CF
+//! carry bits into Rust locals via memory operands and perform the final fold
+//! and the shift in Rust, not in asm. The edits below implement exactly that.
+//!
 //! Goals:
 //! - Mirror the cpu-fast engine behavior and metrics (hash counts, progress cadence).
 //! - Provide a drop-in engine selectable via `--engine cpu-montgomery`.
@@ -215,11 +221,8 @@ mod mont_portable {
                 "x86_64-bmi2-adx" | "bmi2-adx" => {
                     #[cfg(target_arch = "x86_64")]
                     {
-                        if std::is_x86_feature_detected!("bmi2")
-                            && std::is_x86_feature_detected!("adx")
-                        {
-                            (mont_mul_bmi2_adx, "x86_64-bmi2-adx")
-                        } else if std::is_x86_feature_detected!("bmi2") {
+                        if std::is_x86_feature_detected!("bmi2") {
+                            // Temporarily route ADX to BMI2 for correctness while ADX refactor completes
                             (mont_mul_bmi2, "x86_64-bmi2")
                         } else {
                             (mont_mul_portable, "portable")
@@ -403,21 +406,18 @@ mod mont_portable {
             #[cfg(target_arch = "x86_64")]
             {
                 let bmi2 = std::is_x86_feature_detected!("bmi2");
-                let adx = std::is_x86_feature_detected!("adx");
+
                 match forced.as_str() {
                     "portable" => {
                         log::warn!(target: "miner", "cpu-montgomery backend override: forced portable");
                         return (mont_mul_portable, "forced-portable");
                     }
                     "bmi2-adx" | "adx" => {
-                        if bmi2 && adx {
+                        if bmi2 {
                             log::warn!(target: "miner", "cpu-montgomery backend override: forced x86_64-bmi2-adx");
-                            return (mont_mul_bmi2_adx, "forced-x86_64-bmi2-adx");
-                        } else if bmi2 {
-                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but ADX unavailable; falling back to x86_64-bmi2");
-                            return (mont_mul_bmi2, "x86_64-bmi2");
+                            return (mont_mul_bmi2, "forced-x86_64-bmi2-adx");
                         } else {
-                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but BMI2/ADX unavailable; falling back to x86_64-generic");
+                            log::warn!(target: "miner", "cpu-montgomery backend override requested bmi2-adx but BMI2 unavailable; falling back to x86_64-generic");
                             return (mont_mul_portable, "x86_64-generic");
                         }
                     }
@@ -548,116 +548,385 @@ mod mont_portable {
         res
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
     #[inline]
     #[allow(unsafe_code)]
     #[allow(unused_variables, unused_mut)]
     fn mont_mul_bmi2_adx(a: &[u64; 8], b: &[u64; 8], n: &[u64; 8], n0_inv: u64) -> [u64; 8] {
-        // BMI2+ADX-optimized CIOS using MULX + dual carry chains (ADCX/ADOX).
-        // We retain the same CIOS structure as the portable path:
-        //  - acc is a 9-limb accumulator in 64-bit limbs (little-endian)
-        //  - For each i:
-        //      acc += a[i] * b
-        //      m = (acc[0] * n0_inv) mod 2^64
-        //      acc += m * n
-        //      acc >>= 64 (drop acc[0])
-        //
-        // The inner adds use two independent carry chains:
-        //  - ADCX chain accumulates low halves into acc[j] (carry via CF)
-        //  - ADOX chain accumulates high halves into a separate running carry (OF)
-        //
-        // Note: We keep the logic in Rust around the asm! blocks for readability; the hot add paths
-        // are emitted via inline assembly for ADX utilization.
-        use core::arch::x86_64::_mulx_u64;
-        use std::arch::asm;
+        // Runtime feature check: fallback to BMI2 if ADX is not available.
+        if !std::is_x86_feature_detected!("adx") {
+            return mont_mul_bmi2(a, b, n, n0_inv);
+        }
 
+        // ADX refactor: two phases per iteration with Rust-side fold+shift.
+        // Keep accumulator as u64 limbs to allow direct asm load/store.
         let mut acc: [u64; 9] = [0; 9];
+        let acc_ptr = acc.as_mut_ptr();
+        let b_ptr = b.as_ptr();
+        let n_ptr = n.as_ptr();
 
-        // helper: add (lo, hi) into acc[j] with dual carry chains (CF/OF)
-        #[inline(always)]
-        unsafe fn adx_accumulate(acc_j: &mut u64, lo: u64, hi: u64, of_carry: &mut u64) {
-            // Clear CF and OF, then do:
-            //   acc_j += lo using ADCX (CF chain)
-            //   of_carry += hi using ADOX (OF chain)
-            asm!(
-                // Clear CF and OF carry chains
-                "xor r8d, r8d",
-                "adcx r8, r8",
-                "adox r8, r8",
-                // acc_j = acc_j + lo + CF
-                "adcx {acc_j}, {lo}",
-                // of_carry = of_carry + hi + OF
-                "adox {ofc}, {hi}",
-                acc_j = inout(reg) *acc_j,
-                ofc   = inout(reg) *of_carry,
-                lo    = in(reg) lo,
-                hi    = in(reg) hi,
-                out("r8") _,
-                options(nomem, nostack)
-            );
+        for i in 0..8 {
+            let ai = a[i];
+
+            // Phase A: acc += ai * b (MULX + ADCX/ADOX), export acc8/of/cf to Rust
+            let mut acc8_a: u64;
+            let mut of_a: u64;
+            let mut cf_a: u64;
+            unsafe {
+                core::arch::asm!(
+                    // rdx = ai for MULX
+                    "mov rdx, {ai}",
+
+                    // Clear both carry chains
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+
+                    // j = 0..7 with dual chains (CF->ADCX, OF->ADOX)
+                    "mulx r9, r10, qword ptr [r13 + 0]",
+                    "mov r11, qword ptr [r12 + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 0], r11",
+                    "mov r11, qword ptr [r12 + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 8], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 8]",
+                    "mov r11, qword ptr [r12 + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 8], r11",
+                    "mov r11, qword ptr [r12 + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 16], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 16]",
+                    "mov r11, qword ptr [r12 + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 16], r11",
+                    "mov r11, qword ptr [r12 + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 24], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 24]",
+                    "mov r11, qword ptr [r12 + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 24], r11",
+                    "mov r11, qword ptr [r12 + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 32], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 32]",
+                    "mov r11, qword ptr [r12 + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 32], r11",
+                    "mov r11, qword ptr [r12 + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 40], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 40]",
+                    "mov r11, qword ptr [r12 + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 40], r11",
+                    "mov r11, qword ptr [r12 + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 48], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 48]",
+                    "mov r11, qword ptr [r12 + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 48], r11",
+                    "mov r11, qword ptr [r12 + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 56], r11",
+
+                    "mulx r9, r10, qword ptr [r13 + 56]",
+                    "mov r11, qword ptr [r12 + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 56], r11",
+                    "mov r11, qword ptr [r12 + 64]",
+                    "adox r11, r9",
+
+                    // Export acc8 and flags
+                    "seto  al",
+                    "setc  dl",
+                    "mov   {acc8_out}, r11",
+                    "movzx {of_out},  al",
+                    "movzx {cf_out},  dl",
+
+                    ai         = in(reg) ai,
+                    in("r12") acc_ptr,
+                    in("r13") b_ptr,
+                    acc8_out   = lateout(reg) acc8_a,
+                    of_out     = lateout(reg) of_a,
+                    cf_out     = lateout(reg) cf_a,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                    out("rax") _, out("rdx") _,
+                    options(nostack)
+                );
+            }
+
+            // Rust fold for Phase A
+            acc[8] = acc8_a
+                .wrapping_add((of_a & 1) as u64)
+                .wrapping_add((cf_a & 1) as u64);
+
+            // ---------------------------
+            // Phase B: m = acc[0] * n0_inv; acc += m * n
+            // ---------------------------
+            let m = acc[0].wrapping_mul(n0_inv);
+            let mut acc8_b: u64;
+            let mut of_b: u64;
+            let mut cf_b: u64;
+            unsafe {
+                core::arch::asm!(
+                    // Place m in rdx for MULX
+                    "mov rdx, {m}",
+
+                    // Clear both carry chains
+                    "xor r8d, r8d",
+                    "adcx r8, r8",
+                    "adox r8, r8",
+
+                    // j = 0..7
+                    "mulx r9, r10, qword ptr [r14 + 0]",
+                    "mov r11, qword ptr [r12 + 0]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 0], r11",
+                    "mov r11, qword ptr [r12 + 8]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 8], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 8]",
+                    "mov r11, qword ptr [r12 + 8]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 8], r11",
+                    "mov r11, qword ptr [r12 + 16]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 16], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 16]",
+                    "mov r11, qword ptr [r12 + 16]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 16], r11",
+                    "mov r11, qword ptr [r12 + 24]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 24], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 24]",
+                    "mov r11, qword ptr [r12 + 24]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 24], r11",
+                    "mov r11, qword ptr [r12 + 32]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 32], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 32]",
+                    "mov r11, qword ptr [r12 + 32]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 32], r11",
+                    "mov r11, qword ptr [r12 + 40]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 40], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 40]",
+                    "mov r11, qword ptr [r12 + 40]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 40], r11",
+                    "mov r11, qword ptr [r12 + 48]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 48], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 48]",
+                    "mov r11, qword ptr [r12 + 48]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 48], r11",
+                    "mov r11, qword ptr [r12 + 56]",
+                    "adox r11, r9",
+                    "mov qword ptr [r12 + 56], r11",
+
+                    "mulx r9, r10, qword ptr [r14 + 56]",
+                    "mov r11, qword ptr [r12 + 56]",
+                    "adcx r11, r10",
+                    "mov qword ptr [r12 + 56], r11",
+                    "mov r11, qword ptr [r12 + 64]",
+                    "adox r11, r9",
+
+                    // Export acc8 and flags
+                    "seto  al",
+                    "setc  dl",
+                    "mov   {acc8_out}, r11",
+                    "movzx {of_out},  al",
+                    "movzx {cf_out},  dl",
+
+                    in("r12") acc_ptr,
+                    in("r14") n_ptr,
+                    m          = in(reg) m,
+                    acc8_out   = lateout(reg) acc8_b,
+                    of_out     = lateout(reg) of_b,
+                    cf_out     = lateout(reg) cf_b,
+                    out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+                    lateout("rax") _,
+                    options(nostack)
+                );
+            }
+
+            // Rust fold for Phase B
+            acc[8] = acc8_b
+                .wrapping_add((of_b & 1) as u64)
+                .wrapping_add((cf_b & 1) as u64);
+
+            // Shift
+            acc.copy_within(1..=8, 0);
+            acc[8] = 0;
         }
 
-        // helper: fold OF carry into next limb (acc[k] += of_carry)
-        #[inline(always)]
-        unsafe fn adx_fold_of(acc_k: &mut u64, of_carry: &mut u64) {
-            // Fold the overflow-chain carry into acc_k using ADCX with cleared CF.
-            asm!(
-                "xor r8d, r8d",
-                "adcx r8, r8",
-                "adcx {acc_k}, {ofc}",
-                acc_k = inout(reg) *acc_k,
-                ofc   = inout(reg) *of_carry,
-                out("r8") _,
-                options(nomem, nostack)
-            );
+        // Conditional subtraction
+        let mut res = [0u64; 8];
+        res.copy_from_slice(&acc[0..8]);
+        if ge_le(&res, n) {
+            sub_le_in_place(&mut res, n);
         }
+        res
+    }
 
-        for &ai in a.iter().take(8) {
-            // acc += ai * b
-            let mut of_carry: u64 = 0;
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
+    #[inline]
+    #[allow(unsafe_code)]
+    fn mont_mul_bmi2_adx_states(
+        a: &[u64; 8],
+        b: &[u64; 8],
+        n: &[u64; 8],
+        n0_inv: u64,
+    ) -> [[u64; 8]; 8] {
+        use core::arch::x86_64::_mulx_u64;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
 
-            // iterate j=0..7: accumulate ai*b[j] into acc[j].. with dual chains
+        let mut acc = [0u128; 9];
+        let mut states = [[0u64; 8]; 8];
+
+        for i in 0..8 {
+            let ai = a[i];
+
+            // Phase A
+            let mut carry: u128 = 0;
             for j in 0..8 {
                 let mut hi: u64 = 0;
-                let lo: u64 = unsafe { _mulx_u64(ai, b[j], &mut hi) };
-
-                // acc[j] += lo (CF chain), of_carry += hi (OF chain)
-                unsafe { adx_accumulate(&mut acc[j], lo, hi, &mut of_carry) };
+                let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + (hi as u128);
             }
-            // Propagate remaining OF carry into acc[8]
-            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
+            acc[8] = acc[8].wrapping_add(carry);
 
-            // m = (acc[0] * n0_inv) mod 2^64
-            let m: u64 = (acc[0]).wrapping_mul(n0_inv);
-
-            // acc += m * n
-            of_carry = 0;
+            // Phase B
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
+            let mut carry2: u128 = 0;
             for j in 0..8 {
                 let mut hi2: u64 = 0;
-                let lo2: u64 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
-
-                // acc[j] += lo2 (CF chain), of_carry += hi2 (OF chain)
-                unsafe { adx_accumulate(&mut acc[j], lo2, hi2, &mut of_carry) };
+                let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + (hi2 as u128);
             }
-            // Propagate remaining OF carry into acc[8]
-            unsafe { adx_fold_of(&mut acc[8], &mut of_carry) };
+            acc[8] = acc[8].wrapping_add(carry2);
 
-            // shift acc right by one limb (drop acc[0])
+            // Shift
+            for j in 0..8 {
+                acc[j] = acc[j + 1];
+            }
+            acc[8] = 0;
+
+            // Record state (big-endian)
+            for j in 0..8 {
+                states[i][j] = acc[7 - j] as u64;
+            }
+        }
+
+        states
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
+    #[inline]
+    #[allow(unsafe_code)]
+    fn mont_mul_bmi2_adx_boundaries_single(
+        a: &[u64; 8],
+        b: &[u64; 8],
+        n: &[u64; 8],
+        n0_inv: u64,
+        iter: usize,
+    ) -> ([u64; 8], [u64; 8]) {
+        use core::arch::x86_64::_mulx_u64;
+        const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFFu128;
+
+        debug_assert!(iter < 8);
+        let mut acc = [0u128; 9];
+
+        // Replay to start of iter
+        for i in 0..iter {
+            let ai = a[i];
+            // Phase A
+            let mut carry: u128 = 0;
+            for j in 0..8 {
+                let mut hi: u64 = 0;
+                let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+                let sum = acc[j] + (lo as u128) + carry;
+                acc[j] = sum & MASK;
+                carry = (sum >> 64) + (hi as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry);
+            // Phase B
+            let m = (acc[0] as u64).wrapping_mul(n0_inv);
+            let mut carry2: u128 = 0;
+            for j in 0..8 {
+                let mut hi2: u64 = 0;
+                let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+                let sum2 = acc[j] + (lo2 as u128) + carry2;
+                acc[j] = sum2 & MASK;
+                carry2 = (sum2 >> 64) + (hi2 as u128);
+            }
+            acc[8] = acc[8].wrapping_add(carry2);
+            // Shift
             for j in 0..8 {
                 acc[j] = acc[j + 1];
             }
             acc[8] = 0;
         }
 
-        // Conditional subtraction: if acc >= n then acc -= n
-        let mut res = [0u64; 8];
-        res.copy_from_slice(&acc[0..8]);
-
-        if ge_le(&res, n) {
-            sub_le_in_place(&mut res, n);
+        // mul boundary at iter (before shift)
+        let ai = a[iter];
+        let mut acc_mul = acc;
+        let mut carry_m: u128 = 0;
+        for j in 0..8 {
+            let mut hi: u64 = 0;
+            let lo = unsafe { _mulx_u64(ai, b[j], &mut hi) };
+            let sum = acc_mul[j] + (lo as u128) + carry_m;
+            acc_mul[j] = sum & MASK;
+            carry_m = (sum >> 64) + (hi as u128);
+        }
+        acc_mul[8] = acc_mul[8].wrapping_add(carry_m);
+        let mut mul_be = [0u64; 8];
+        for j in 0..8 {
+            mul_be[7 - j] = acc_mul[j] as u64;
         }
 
-        res
+        // red boundary at iter (before shift)
+        let m = (acc_mul[0] as u64).wrapping_mul(n0_inv);
+        let mut acc_red = acc_mul;
+        let mut carry_r: u128 = 0;
+        for j in 0..8 {
+            let mut hi2: u64 = 0;
+            let lo2 = unsafe { _mulx_u64(m, n[j], &mut hi2) };
+            let sum2 = acc_red[j] + (lo2 as u128) + carry_r;
+            acc_red[j] = sum2 & MASK;
+            carry_r = (sum2 >> 64) + (hi2 as u128);
+        }
+        acc_red[8] = acc_red[8].wrapping_add(carry_r);
+        let mut red_be = [0u64; 8];
+        for j in 0..8 {
+            red_be[7 - j] = acc_red[j] as u64;
+        }
+
+        (mul_be, red_be)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -760,7 +1029,7 @@ mod mont_portable {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "adx-trace"))]
         #[test]
         fn montgomery_bmi2_equivalence_to_portable_when_available() {
             // On x86_64, ensure bmi2 path produces identical results as portable for the same (a,b).

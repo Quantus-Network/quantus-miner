@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [features]
 default = []
 metrics = ["dep:metrics"]
+adx-trace = []
 
 [dependencies]
 # Reuse the engine trait and shared types exposed by engine-cpu
