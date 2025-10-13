@@ -3,7 +3,7 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
-use pow_core::compat;
+use pow_core;
 use primitive_types::U512;
 use quantus_miner_api::*;
 use std::collections::HashMap;
@@ -941,7 +941,7 @@ pub async fn handle_result_request(
     // Inline re-verify using the exact nonce bytes we will return
     if let Some(result) = &job.best_result {
         let nonce_be = result.nonce.to_big_endian();
-        let d2 = compat::get_nonce_distance(job.header_hash, nonce_be);
+        let d2 = pow_core::get_nonce_distance(job.header_hash, nonce_be);
         let ok = d2 <= job.distance_threshold;
         log::info!(
             target: "miner",
