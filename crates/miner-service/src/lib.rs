@@ -3,7 +3,6 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
-use pow_core;
 use primitive_types::U512;
 use quantus_miner_api::*;
 use std::collections::HashMap;

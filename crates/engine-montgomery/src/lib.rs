@@ -29,7 +29,6 @@ use core::cmp::Ordering;
 
 use engine_cpu::EngineStatus;
 use engine_cpu::{EngineCandidate as Candidate, EngineRange as Range, MinerEngine};
-use pow_core;
 use pow_core::{init_worker_y0, is_valid_distance, JobContext};
 use primitive_types::U512;
 
