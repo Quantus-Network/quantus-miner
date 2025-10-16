@@ -27,3 +27,9 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
+criterion = "0.5"
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[[bench]]
+name = "cpu_engine_bench"
+harness = false

@@ -1273,8 +1273,8 @@ impl GpuConstants {
         // n0_inv from n[0] (must be odd)
         let n0_inv = mont_n0_inv(n_le[0]);
 
-        // R^2 mod n via pow-core compat (2^1024 mod n)
-        let r2_u512 = pow_core::compat::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
+        // R^2 mod n via pow-core (2^1024 mod n)
+        let r2_u512 = pow_core::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
         let r2_le = u512_to_le_limbs(r2_u512);
 
         // m_hat = to_mont(m) = mont_mul(m, R^2)

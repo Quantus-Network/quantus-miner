@@ -29,7 +29,6 @@ use core::cmp::Ordering;
 
 use engine_cpu::EngineStatus;
 use engine_cpu::{EngineCandidate as Candidate, EngineRange as Range, MinerEngine};
-use pow_core::compat;
 use pow_core::{init_worker_y0, is_valid_distance, JobContext};
 use primitive_types::U512;
 
@@ -160,7 +159,7 @@ mod mont_portable {
         pub fn from_ctx(ctx: &JobContext) -> Self {
             let n = u512_to_le(ctx.n);
             let n0_inv = mont_n0_inv(n[0]);
-            let r2_u512 = compat::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
+            let r2_u512 = pow_core::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
             let r2 = u512_to_le(r2_u512);
             let m = u512_to_le(ctx.m);
             let (mul_fn, backend) = select_backend();
@@ -206,7 +205,7 @@ mod mont_portable {
         pub fn from_ctx_with_backend_tag(ctx: &JobContext, tag: &str) -> Self {
             let n = u512_to_le(ctx.n);
             let n0_inv = mont_n0_inv(n[0]);
-            let r2_u512 = compat::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
+            let r2_u512 = pow_core::mod_pow(&U512::from(2u32), &U512::from(1024u32), &ctx.n);
             let r2 = u512_to_le(r2_u512);
             let m = u512_to_le(ctx.m);
 
