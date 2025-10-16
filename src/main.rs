@@ -37,6 +37,11 @@ async fn main() {
         log::info!("Using all available cores: {}", state.num_cores);
     }
 
+    if state.num_cores == 0 {
+        log::error!("Invalid core count detected. This should not happen.");
+        std::process::exit(1);
+    }
+
     // --- Start the mining loop ---
     state.start_mining_loop().await;
 

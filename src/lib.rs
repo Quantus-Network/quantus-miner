@@ -87,6 +87,11 @@ impl MiningJob {
     }
 
     pub fn start_mining(&mut self, num_cores: usize) {
+        if num_cores == 0 {
+            log::error!(target: "miner", "Cannot start mining with 0 cores");
+            return;
+        }
+
         let (sender, receiver) = bounded(num_cores * 2);
         self.result_receiver = Some(receiver);
 
@@ -103,11 +108,13 @@ impl MiningJob {
         );
 
         for thread_id in 0..num_cores {
-            let start = self.nonce_start + range_per_core * U512::from(thread_id as u64);
-            let mut end = start + range_per_core - U512::from(1);
+            let start = self.nonce_start.saturating_add(
+                range_per_core.saturating_mul(U512::from(thread_id as u64))
+            );
+            let mut end = start.saturating_add(range_per_core).saturating_sub(U512::from(1));
 
             if thread_id == num_cores - 1 {
-                end += remainder;
+                end = end.saturating_add(remainder);
             }
 
             if end > self.nonce_end {
@@ -218,9 +225,13 @@ impl Default for MiningState {
 
 impl MiningState {
     pub fn new() -> Self {
+        let cores = num_cpus::get();
+        if cores == 0 {
+            log::warn!(target: "miner", "num_cpus::get() returned 0, using 1 core as fallback");
+        }
         MiningState {
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            num_cores: num_cpus::get(),
+            num_cores: cores.max(1),
         }
     }
 
@@ -325,17 +336,29 @@ fn thread_mine_range(
             continue;
         }
         // remaining (inclusive)
-        let remaining = (end - current_nonce).saturating_add(U512::from(1u64));
-        let steps_u64 = if remaining > chunk_size_u512 { MINE_RANGE_SIZE } else { remaining.as_u64() };
+        let remaining = if current_nonce <= end {
+            (end - current_nonce).saturating_add(U512::from(1u64))
+        } else {
+            U512::zero()
+        };
+        let steps_u64 = if remaining > chunk_size_u512 { 
+            MINE_RANGE_SIZE 
+        } else { 
+            remaining.as_u64().min(MINE_RANGE_SIZE)
+        };
 
         let start_nonce_bytes = current_nonce.to_big_endian();
         if let Some((found_nonce_bytes, distance)) =
             qpow_mine_range(header_hash, start_nonce_bytes, steps_u64, distance_threshold)
         {
             let found_nonce = U512::from_big_endian(&found_nonce_bytes);
-            let scanned_in_chunk = (found_nonce - current_nonce)
-                .saturating_add(U512::from(1u64))
-                .as_u64();
+            let scanned_in_chunk = if found_nonce >= current_nonce {
+                (found_nonce - current_nonce)
+                    .saturating_add(U512::from(1u64))
+                    .as_u64()
+            } else {
+                1u64
+            };
             hash_count = hash_count.saturating_add(scanned_in_chunk);
 
             let result = MiningJobResult {
@@ -652,5 +675,55 @@ mod tests {
         let finished_job = finished_job.expect("Job did not finish in time");
         assert_eq!(finished_job.status, JobStatus::Completed);
         assert!(finished_job.best_result.is_some());
+    }
+
+    #[test]
+    fn test_zero_cores_handling() {
+        // Test that zero cores are handled gracefully
+        let mut job = MiningJob::new(
+            [1u8; 32],
+            U512::from(1000000u64),
+            U512::zero(),
+            U512::from(1000u64),
+        );
+        
+        // This should not panic
+        job.start_mining(0);
+        
+        // Should have no thread handles since no cores were used
+        assert!(job.thread_handles.is_empty());
+    }
+
+    #[test]
+    fn test_single_core_handling() {
+        // Test that single core works correctly
+        let mut job = MiningJob::new(
+            [1u8; 32],
+            U512::from(1000000u64),
+            U512::zero(),
+            U512::from(1000u64),
+        );
+        
+        job.start_mining(1);
+        
+        // Should have exactly one thread handle
+        assert_eq!(job.thread_handles.len(), 1);
+    }
+
+    #[test]
+    fn test_overflow_protection() {
+        // Test that overflow-prone operations are handled safely
+        let mut job = MiningJob::new(
+            [1u8; 32],
+            U512::from(1000000u64),
+            U512::MAX, // Start at max value
+            U512::MAX, // End at max value
+        );
+        
+        // This should not panic even with edge case values
+        job.start_mining(3);
+        
+        // Should have thread handles
+        assert_eq!(job.thread_handles.len(), 3);
     }
 }
