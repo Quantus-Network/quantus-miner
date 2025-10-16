@@ -51,9 +51,6 @@ fn bench_distance_from_y(c: &mut Criterion) {
             black_box(distance)
         })
     });
-
 }
 criterion_group!(benches, bench_cpu_fast_engine, bench_distance_from_y);
 criterion_main!(benches);
-
-
