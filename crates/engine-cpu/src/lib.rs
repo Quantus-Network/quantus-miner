@@ -14,7 +14,7 @@
 
 use core::cmp::Ordering;
 
-use pow_core::{is_valid_nonce, JobContext, is_valid_nonce_for_context};
+use pow_core::{is_valid_nonce, is_valid_nonce_for_context, JobContext};
 use primitive_types::U512;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
@@ -31,7 +31,7 @@ pub struct Range {
 pub struct Candidate {
     pub nonce: U512,
     pub work: [u8; 64], // big-endian representation of nonce
-    pub hash: U512, // achieved distance for this nonce
+    pub hash: U512,     // output hash for this nonce
 }
 
 /// Origin of a found candidate.

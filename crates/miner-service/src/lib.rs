@@ -686,23 +686,14 @@ fn mine_range_with_engine(
 
         match status {
             engine_cpu::EngineStatus::Found {
-                candidate:
-                    EngineCandidate {
-                        nonce,
-                        work,
-                        hash,
-                    },
+                candidate: EngineCandidate { nonce, work, hash },
                 hash_count,
                 origin,
             } => {
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
                     thread_id,
-                    result: Some(MiningJobResult {
-                        nonce,
-                        work,
-                        hash,
-                    }),
+                    result: Some(MiningJobResult { nonce, work, hash }),
                     hash_count,
                     origin: Some(origin),
                     completed: true,
