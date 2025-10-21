@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use engine_cpu::{FastCpuEngine, MinerEngine, Range};
-use pow_core::{distance_from_y, JobContext};
+use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
@@ -19,8 +19,8 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
         b.iter(|| {
             let mut header = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut header);
-            let threshold = U512::one() << 500;
-            let ctx = JobContext::new(header, threshold);
+            let difficulty = U512::from(1000u64);
+            let ctx = JobContext::new(header, difficulty);
 
             let result = engine.search_range(
                 black_box(&ctx),
@@ -32,25 +32,25 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
     });
 }
 
-fn bench_distance_from_y(c: &mut Criterion) {
+fn bench_hash_from_nonce(c: &mut Criterion) {
     // Create a test job context
     let mut header = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut header);
-    let threshold = U512::one() << 500;
-    let ctx = JobContext::new(header, threshold);
+    let difficulty = U512::from(1000u64);
+    let ctx = JobContext::new(header, difficulty);
 
-    // Create some test y values
-    let test_y_values: Vec<U512> = (0..100).map(|i| U512::from(1000u64 + i)).collect();
+    // Create some test nonce values
+    let test_nonce_values: Vec<U512> = (0..100).map(|i| U512::from(1000u64 + i)).collect();
 
-    c.bench_function("distance_from_y_single", |b| {
+    c.bench_function("hash_from_nonce_single", |b| {
         let mut i = 0;
         b.iter(|| {
-            let y = test_y_values[i % test_y_values.len()];
+            let nonce = test_nonce_values[i % test_nonce_values.len()];
             i += 1;
-            let distance = distance_from_y(black_box(&ctx), black_box(y));
-            black_box(distance)
+            let hash = hash_from_nonce(black_box(&ctx), black_box(nonce));
+            black_box(hash)
         })
     });
 }
-criterion_group!(benches, bench_cpu_fast_engine, bench_distance_from_y);
+criterion_group!(benches, bench_cpu_fast_engine, bench_hash_from_nonce);
 criterion_main!(benches);

@@ -19,7 +19,7 @@
 //! This crate now includes a host-side launcher for a minimal CUDA kernel
 //! (see `src/kernels/qpow_kernel.cu`) that performs 512-bit Montgomery
 //! multiplication on-device and returns normalized y values. For G1 bring-up,
-//! we perform Poseidon2 and threshold checks on the host for parity against CPU.
+//! we perform Poseidon2 and target checks on the host for parity against CPU.
 //!
 //! Behavior:
 //! - If compiled without the `cuda` feature or if CUDA init/launch fails,
@@ -89,9 +89,9 @@ impl CudaEngine {
         "gpu-cuda"
     }
 
-    /// Prepare a precomputed job context for a given header and threshold.
-    pub fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
-        JobContext::new(header_hash, threshold)
+    /// Prepare a precomputed job context for a given header and difficulty.
+    pub fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+        JobContext::new(header_hash, difficulty)
     }
 
     /// Returns whether CUDA is compiled in and the driver/device can be initialized.
@@ -470,13 +470,12 @@ impl CudaEngine {
                 let total_elems_u64 = total_elems_u64_cfg;
                 let covered: u64 = covered_u64;
 
-                // Prepare target/threshold (64-byte big-endian) for device
+                // Prepare target (64-byte big-endian) for device
                 let target_be = ctx.target.to_big_endian();
-                let threshold_be = ctx.threshold.to_big_endian();
                 let d_target = cuda::memory::DeviceBuffer::<u8>::from_slice(&target_be)
                     .with_context(|| "alloc/copy d_target")?;
-                let d_threshold = cuda::memory::DeviceBuffer::<u8>::from_slice(&threshold_be)
-                    .with_context(|| "alloc/copy d_threshold")?;
+                let d_threshold = cuda::memory::DeviceBuffer::<u8>::from_slice(&target_be)
+                    .with_context(|| "alloc/copy d_threshold (same as target)")?;
 
                 // Early-exit outputs are allocated per-batch in the G2 batching path
 
@@ -485,16 +484,15 @@ impl CudaEngine {
                 // If any symbol is unavailable, leave C_CONSTS_READY at 0 and the kernel will use parameters.
                 {
                     let mut consts_ready_set = false;
-                    // Prepare big-endian 64-bit limbs for target and threshold
+                    // Prepare big-endian 64-bit limbs for target
                     let mut target_limbs = [0u64; 8];
                     let mut thresh_limbs = [0u64; 8];
                     for i in 0..8 {
                         let mut limb = [0u8; 8];
                         limb.copy_from_slice(&target_be[i * 8..(i + 1) * 8]);
                         target_limbs[i] = u64::from_be_bytes(limb);
-                        let mut limb2 = [0u8; 8];
-                        limb2.copy_from_slice(&threshold_be[i * 8..(i + 1) * 8]);
-                        thresh_limbs[i] = u64::from_be_bytes(limb2);
+                        // For Bitcoin-style PoW, threshold is same as target
+                        thresh_limbs[i] = target_limbs[i];
                     }
                     if let (
                         Ok(mut c_n),
@@ -557,9 +555,9 @@ impl CudaEngine {
                             ) {
                                 let one_i32: i32 = 1;
                                 c_samp_en.copy_from(&one_i32)?;
-                                // Initialize sampler buffers (copy target/threshold; zero y/h/index/decision)
+                                // Initialize sampler buffers (copy target; zero y/h/index/decision)
                                 c_samp_target_be.copy_from(&target_be)?;
-                                c_samp_thresh_be.copy_from(&threshold_be)?;
+                                c_samp_thresh_be.copy_from(&target_be)?;
                                 c_samp_index.copy_from(&0u32)?;
                                 c_samp_dec.copy_from(&0u32)?;
                                 let zero64 = [0u8; 64];
@@ -1228,8 +1226,8 @@ impl MinerEngine for CudaEngine {
         "gpu-cuda"
     }
 
-    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
-        self.prepare_context(header_hash, threshold)
+    fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+        self.prepare_context(header_hash, difficulty)
     }
 
     fn search_range(
@@ -1432,8 +1430,8 @@ mod cuda_tests {
         // Prepare context and a small range
         let eng = CudaEngine::new();
         let header = [5u8; 32];
-        let threshold = U512::MAX; // permissive for parity in small ranges
-        let ctx = eng.prepare_context(header, threshold);
+        let difficulty = U512::from(1u64); // easy difficulty for parity in small ranges
+        let ctx = eng.prepare_context(header, difficulty);
 
         let range = engine_cpu::EngineRange {
             start: U512::from(0u64),
@@ -1488,10 +1486,10 @@ mod tests {
 
         // Ensure context creation works and is deterministic in shape.
         let header = [1u8; 32];
-        let threshold = U512::from(12345u64);
-        let ctx = eng.prepare_context(header, threshold);
+        let difficulty = U512::from(12345u64);
+        let ctx = eng.prepare_context(header, difficulty);
 
         assert_eq!(ctx.header, header);
-        assert_eq!(ctx.threshold, threshold);
+        assert_eq!(ctx.difficulty, difficulty);
     }
 }

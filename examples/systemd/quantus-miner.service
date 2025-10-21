@@ -28,7 +28,7 @@
 Description=Quantus External Miner Service
 Wants=network-online.target
 After=network-online.target
-Documentation=https://github.com/Quantus-Network/quantus-external-miner
+Documentation=https://github.com/Quantus-Network/quantus-miner
 
 [Service]
 Type=simple

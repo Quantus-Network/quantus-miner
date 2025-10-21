@@ -126,4 +126,4 @@ Operational tips
 - Use RUST_LOG=info,miner=debug temporarily to verify startup detection (cpuset mask, effective CPUs) and to observe mining loop behavior; then turn back down to reduce log volume.
 
 Support
-- Repository: https://github.com/Quantus-Network/quantus-external-miner
+- Repository: https://github.com/Quantus-Network/quantus-miner
