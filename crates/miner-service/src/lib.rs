@@ -929,8 +929,7 @@ pub async fn handle_result_request(
     // Inline re-verify using the exact nonce bytes we will return
     if let Some(result) = &job.best_result {
         let nonce_be = result.nonce.to_big_endian();
-        let hash_result = pow_core::get_nonce_hash(job.header_hash, nonce_be);
-        let (ok, _) = pow_core::is_valid_nonce(job.header_hash, nonce_be, job.difficulty);
+        let (ok, hash_result) = pow_core::is_valid_nonce(job.header_hash, nonce_be, job.difficulty);
         log::info!(
             target: "miner",
             "Serving result: job_id={}, engine={}, ok={}, hash={}, difficulty={}",
