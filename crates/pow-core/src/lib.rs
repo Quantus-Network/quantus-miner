@@ -1,5 +1,4 @@
 use primitive_types::U512;
-use qp_poseidon_core::Poseidon2Core;
 
 pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
 
