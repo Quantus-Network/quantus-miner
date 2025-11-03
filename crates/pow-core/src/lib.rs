@@ -46,13 +46,6 @@ pub fn is_valid_hash(ctx: &JobContext, hash: U512) -> bool {
     hash < ctx.target
 }
 
-/// Convenience: compute hash for an arbitrary nonce and check validity
-pub fn is_valid_nonce_for_context(ctx: &JobContext, nonce: U512) -> (bool, U512) {
-    let hash = hash_from_nonce(ctx, nonce);
-    let is_valid = is_valid_hash(ctx, hash);
-    (is_valid, hash)
-}
-
 /// Mine a range of nonces starting from start_nonce
 pub fn mine_nonce_range(ctx: &JobContext, start_nonce: U512, steps: u64) -> Option<(U512, U512)> {
     let start_nonce_bytes = start_nonce.to_big_endian();

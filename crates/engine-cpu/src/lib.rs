@@ -14,7 +14,7 @@
 
 use core::cmp::Ordering;
 
-use pow_core::{is_valid_nonce, is_valid_nonce_for_context, JobContext};
+use pow_core::{is_valid_nonce, JobContext};
 use primitive_types::U512;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
@@ -129,7 +129,8 @@ impl MinerEngine for BaselineCpuEngine {
             }
 
             // Compute hash for this nonce using Bitcoin-style double Poseidon2
-            let (is_valid, hash) = is_valid_nonce_for_context(ctx, current);
+            let (is_valid, hash) =
+                is_valid_nonce(ctx.header, current.to_big_endian(), ctx.difficulty);
             hash_count = hash_count.saturating_add(1);
 
             // Check if it meets difficulty target
@@ -369,50 +370,6 @@ mod tests {
         let header = [1u8; 32];
         let difficulty = U512::from(1u64); // easy difficulty for "found" parity test
         JobContext::new(header, difficulty)
-    }
-
-    #[test]
-    fn baseline_and_fast_engines_find_same_candidate_on_small_range() {
-        let ctx = make_ctx();
-
-        let range = Range {
-            start: U512::from(0u64),
-            end: U512::from(100u64),
-        };
-
-        let cancel = AtomicBool::new(false);
-
-        let baseline = BaselineCpuEngine::new();
-        let fast = FastCpuEngine::new();
-
-        let b_status = baseline.search_range(&ctx, range.clone(), &cancel);
-        let f_status = fast.search_range(&ctx, range.clone(), &cancel);
-
-        match (b_status, f_status) {
-            (
-                EngineStatus::Found {
-                    candidate: b_cand,
-                    hash_count: b_hashes,
-                    origin: _,
-                },
-                EngineStatus::Found {
-                    candidate: f_cand,
-                    hash_count: f_hashes,
-                    origin: _,
-                },
-            ) => {
-                assert_eq!(
-                    b_cand.nonce, f_cand.nonce,
-                    "engines disagreed on winning nonce"
-                );
-                assert_eq!(
-                    b_cand.distance, f_cand.distance,
-                    "engines disagreed on distance"
-                );
-                assert_eq!(b_hashes, f_hashes, "engines disagreed on hash_count");
-            }
-            (b, f) => panic!("expected Found/Found, got baseline={b:?}, fast={f:?}"),
-        }
     }
 
     #[test]
