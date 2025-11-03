@@ -425,16 +425,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crypto-bigint"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
-dependencies = [
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -593,19 +583,6 @@ dependencies = [
  "pow-core",
  "primitive-types",
  "thiserror",
-]
-
-[[package]]
-name = "engine-montgomery"
-version = "0.3.0"
-dependencies = [
- "crypto-bigint",
- "engine-cpu",
- "log",
- "metrics",
- "num-traits 0.2.19",
- "pow-core",
- "primitive-types",
 ]
 
 [[package]]
@@ -1186,15 +1163,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keccak"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc2af9a1119c51f12a14607e783cb977bde58bc069ff0c3da1095e635d70654"
-dependencies = [
- "cpufeatures",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1290,7 +1258,6 @@ dependencies = [
  "engine-cpu",
  "engine-gpu-cuda",
  "engine-gpu-opencl",
- "engine-montgomery",
  "hex",
  "log",
  "metrics",
@@ -1811,23 +1778,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "qp-poseidon-core"
-version = "0.9.5"
+name = "qp-poseidon-constants"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec326fc2631a929de09a38af2613a3db5230882c12a2f68205693ec632751e8b"
+checksum = "4d56b56652e9f44a43de9593e75d7c3e0c3a352e10675cf3024e5b3175711cd3"
+dependencies = [
+ "p3-field",
+ "p3-goldilocks",
+ "p3-poseidon2",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
+]
+
+[[package]]
+name = "qp-poseidon-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e658a373a7fb22babeda9ffcc8af0a894e6e3c008272ed735509eccb7769ead3"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
  "p3-poseidon2",
  "p3-symmetric",
- "rand 0.9.2",
+ "qp-poseidon-constants",
  "rand_chacha 0.9.0",
 ]
 
 [[package]]
 name = "qpow-math"
 version = "0.1.0"
-source = "git+https://github.com/Quantus-Network/chain.git#ac516684d7340f5fad68eb12633d683a03591838"
+source = "git+https://github.com/Quantus-Network/chain.git#a5b9e4cc6900641884171a9972e0276ebb73a3ab"
 dependencies = [
  "hex",
  "log",
@@ -1835,8 +1815,6 @@ dependencies = [
  "num-traits 0.2.19",
  "primitive-types",
  "qp-poseidon-core",
- "sha2",
- "sha3",
 ]
 
 [[package]]
@@ -2196,27 +2174,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
-]
-
-[[package]]
-name = "sha3"
-version = "0.10.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75872d278a8f37ef87fa0ddbda7802605cb18344497949862c0d4dcb291eba60"
-dependencies = [
- "digest",
- "keccak",
 ]
 
 [[package]]

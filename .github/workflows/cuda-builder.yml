@@ -1,83 +1,83 @@
-name: Cuda Docker Image Builder
+# name: Cuda Docker Image Builder
 
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - cuda-builder.cf
-  pull_request:
-    branches:
-      - main
-    paths:
-      - cuda-builder.cf
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - cuda-builder.cf
+#   pull_request:
+#     branches:
+#       - main
+#     paths:
+#       - cuda-builder.cf
 
-permissions:
-  contents: read
-  packages: write
+# permissions:
+#   contents: read
+#   packages: write
 
-jobs:
-  build-and-push:
-    name: cuda-builder:${{ matrix.cuda_tag }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        cuda_tag:
-          - 12.9.0
-          - 13.0.0
-    steps:
-      - shell: bash
-        run: |
-          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cuda-builder" >> "$GITHUB_ENV"
+# jobs:
+#   build-and-push:
+#     name: cuda-builder:${{ matrix.cuda_tag }}
+#     runs-on: ubuntu-latest
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         cuda_tag:
+#           - 12.9.0
+#           - 13.0.0
+#     steps:
+#       - shell: bash
+#         run: |
+#           echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cuda-builder" >> "$GITHUB_ENV"
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
 
-      - uses: ./.github/actions/disk
+#       - uses: ./.github/actions/disk
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
 
-      - name: Prepare Buildx cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-cuda-builder-${{ matrix.cuda_tag }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-cuda-builder-${{ matrix.cuda_tag }}-
+#       - name: Prepare Buildx cache
+#         uses: actions/cache@v4
+#         with:
+#           path: /tmp/.buildx-cache
+#           key: ${{ runner.os }}-buildx-cuda-builder-${{ matrix.cuda_tag }}-${{ github.sha }}
+#           restore-keys: |
+#             ${{ runner.os }}-buildx-cuda-builder-${{ matrix.cuda_tag }}-
 
-      - name: Log in to GHCR
-        if: github.event_name == 'push'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+#       - name: Log in to GHCR
+#         if: github.event_name == 'push'
+#         uses: docker/login-action@v3
+#         with:
+#           registry: ghcr.io
+#           username: ${{ github.repository_owner }}
+#           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and (conditionally) push cuda-builder image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: cuda-builder.cf
-          build-args: |
-            CUDA_TAG=${{ matrix.cuda_tag }}
-          pull: true
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ matrix.cuda_tag }}
-          labels: |
-            org.opencontainers.image.source=${{ github.repository }}
-            org.opencontainers.image.description=Pristine CUDA builder image (CUDA ${{ matrix.cuda_tag }})
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.title=cuda-builder
-            org.opencontainers.image.vendor=Quantus Network
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-          provenance: false
+#       - name: Build and (conditionally) push cuda-builder image
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: .
+#           file: cuda-builder.cf
+#           build-args: |
+#             CUDA_TAG=${{ matrix.cuda_tag }}
+#           pull: true
+#           push: ${{ github.event_name == 'push' }}
+#           tags: |
+#             ${{ env.IMAGE_NAME }}:${{ matrix.cuda_tag }}
+#           labels: |
+#             org.opencontainers.image.source=${{ github.repository }}
+#             org.opencontainers.image.description=Pristine CUDA builder image (CUDA ${{ matrix.cuda_tag }})
+#             org.opencontainers.image.licenses=Apache-2.0
+#             org.opencontainers.image.title=cuda-builder
+#             org.opencontainers.image.vendor=Quantus Network
+#           cache-from: type=local,src=/tmp/.buildx-cache
+#           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+#           provenance: false
 
-      - name: Move Buildx cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+#       - name: Move Buildx cache
+#         run: |
+#           rm -rf /tmp/.buildx-cache
+#           mv /tmp/.buildx-cache-new /tmp/.buildx-cache

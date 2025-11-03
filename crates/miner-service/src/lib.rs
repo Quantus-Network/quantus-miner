@@ -44,7 +44,6 @@ pub struct ServiceConfig {
 pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
-    CpuMontgomery,
     CpuChainManipulator,
     GpuCuda,
     GpuOpenCl,
@@ -71,7 +70,6 @@ impl fmt::Display for ServiceConfig {
         let engine = match self.engine {
             EngineSelection::CpuBaseline => "cpu-baseline",
             EngineSelection::CpuFast => "cpu-fast",
-            EngineSelection::CpuMontgomery => "cpu-montgomery",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
             EngineSelection::GpuCuda => "gpu-cuda",
             EngineSelection::GpuOpenCl => "gpu-opencl",
@@ -280,14 +278,14 @@ pub enum JobStatus {
 pub struct MiningJobResult {
     pub nonce: U512,
     pub work: [u8; 64],
-    pub distance: U512,
+    pub hash: U512,
 }
 
 /// Mining job data structure stored in the service.
 #[derive(Debug)]
 pub struct MiningJob {
     pub header_hash: [u8; 32],
-    pub distance_threshold: U512,
+    pub difficulty: U512,
     pub nonce_start: U512,
     pub nonce_end: U512,
 
@@ -312,7 +310,7 @@ impl Clone for MiningJob {
     fn clone(&self) -> Self {
         MiningJob {
             header_hash: self.header_hash,
-            distance_threshold: self.distance_threshold,
+            difficulty: self.difficulty,
             nonce_start: self.nonce_start,
             nonce_end: self.nonce_end,
 
@@ -348,13 +346,13 @@ pub struct ThreadResult {
 impl MiningJob {
     pub fn new(
         header_hash: [u8; 32],
-        distance_threshold: U512,
+        difficulty: U512,
         nonce_start: U512,
         nonce_end: U512,
     ) -> Self {
         MiningJob {
             header_hash,
-            distance_threshold,
+            difficulty,
             nonce_start,
             nonce_end,
             status: JobStatus::Running,
@@ -400,7 +398,7 @@ impl MiningJob {
         );
 
         // Prepare shared job context once per job.
-        let ctx = engine.prepare_context(self.header_hash, self.distance_threshold);
+        let ctx = engine.prepare_context(self.header_hash, self.difficulty);
 
         for (thread_id, (start, end)) in partitions.ranges.into_iter().enumerate() {
             let cancel_flag = self.cancel_flag.clone();
@@ -536,20 +534,20 @@ impl MiningJob {
                 let is_better = self
                     .best_result
                     .as_ref()
-                    .is_none_or(|current_best| result.distance < current_best.distance);
+                    .is_none_or(|current_best| result.hash < current_best.hash);
 
                 if is_better {
                     log::debug!(target: "miner",
                         "Found better result from thread {}: distance = {}, nonce = {}",
                         thread_result.thread_id,
-                        result.distance,
+                        result.hash,
                         result.nonce
                     );
                     self.best_result = Some(result.clone());
                     self.cancel_flag.store(true, Ordering::Relaxed);
                     // Result is now ready to be fetched via /result
                     log::info!(target: "miner", "Result ready: engine={}, nonce={}, distance={}",
-                        self.engine_name, result.nonce, result.distance);
+                        self.engine_name, result.nonce, result.hash);
                     #[cfg(feature = "metrics")]
                     {
                         // reuse existing http metric bucket for visibility until dedicated counters exist
@@ -688,23 +686,14 @@ fn mine_range_with_engine(
 
         match status {
             engine_cpu::EngineStatus::Found {
-                candidate:
-                    EngineCandidate {
-                        nonce,
-                        work,
-                        distance,
-                    },
+                candidate: EngineCandidate { nonce, work, hash },
                 hash_count,
                 origin,
             } => {
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
                     thread_id,
-                    result: Some(MiningJobResult {
-                        nonce,
-                        work,
-                        distance,
-                    }),
+                    result: Some(MiningJobResult { nonce, work, hash }),
                     hash_count,
                     origin: Some(origin),
                     completed: true,
@@ -844,11 +833,11 @@ pub async fn handle_mine_request(
         .unwrap()
         .try_into()
         .expect("Validated hex string is 32 bytes");
-    let distance_threshold = U512::from_dec_str(&request.distance_threshold).unwrap();
+    let difficulty = U512::from_dec_str(&request.distance_threshold).unwrap();
     let nonce_start = U512::from_str_radix(&request.nonce_start, 16).unwrap();
     let nonce_end = U512::from_str_radix(&request.nonce_end, 16).unwrap();
 
-    let job = MiningJob::new(header_hash, distance_threshold, nonce_start, nonce_end);
+    let job = MiningJob::new(header_hash, difficulty, nonce_start, nonce_end);
 
     match state.add_job(request.job_id.clone(), job).await {
         Ok(_) => {
@@ -940,16 +929,15 @@ pub async fn handle_result_request(
     // Inline re-verify using the exact nonce bytes we will return
     if let Some(result) = &job.best_result {
         let nonce_be = result.nonce.to_big_endian();
-        let d2 = pow_core::get_nonce_distance(job.header_hash, nonce_be);
-        let ok = d2 <= job.distance_threshold;
+        let (ok, hash_result) = pow_core::is_valid_nonce(job.header_hash, nonce_be, job.difficulty);
         log::info!(
             target: "miner",
-            "Serving result: job_id={}, engine={}, ok={}, host_distance={}, threshold={}",
+            "Serving result: job_id={}, engine={}, ok={}, hash={}, difficulty={}",
             job_id,
             job.engine_name,
             ok,
-            d2,
-            job.distance_threshold
+            hash_result,
+            job.difficulty
         );
         #[cfg(feature = "metrics")]
         {
@@ -1184,17 +1172,6 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
         EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
         EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
-        EngineSelection::CpuMontgomery => {
-            #[cfg(feature = "montgomery")]
-            {
-                Arc::new(engine_montgomery::MontgomeryCpuEngine::new())
-            }
-            #[cfg(not(feature = "montgomery"))]
-            {
-                // Fallback if montgomery backend is not compiled in
-                Arc::new(engine_cpu::FastCpuEngine::new())
-            }
-        }
         EngineSelection::CpuChainManipulator => {
             let mut eng = engine_cpu::ChainEngine::new();
             // Apply optional throttle parameters if provided.
@@ -1436,13 +1413,13 @@ mod tests {
         let state = MiningService::new(2, engine, 2000);
         state.start_mining_loop().await;
 
-        // Impossible threshold with a nonce range that excludes 0
+        // Impossible difficulty with a nonce range that excludes 0
         let header_hash = [1u8; 32];
-        let distance_threshold = U512::zero();
+        let difficulty = U512::MAX;
         let nonce_start = U512::from(1);
         let nonce_end = U512::from(100);
 
-        let job = MiningJob::new(header_hash, distance_threshold, nonce_start, nonce_end);
+        let job = MiningJob::new(header_hash, difficulty, nonce_start, nonce_end);
         state.add_job("fail_job".to_string(), job).await.unwrap();
 
         let mut finished_job = None;
@@ -1534,13 +1511,13 @@ mod tests {
         let state = MiningService::new(2, engine, 2000);
         state.start_mining_loop().await;
 
-        // Easy threshold
+        // Easy difficulty
         let header_hash = [1u8; 32];
-        let distance_threshold = U512::MAX; // Easiest difficulty
+        let difficulty = U512::from(1u64); // Easiest difficulty
         let nonce_start = U512::from(0);
         let nonce_end = U512::from(10000);
 
-        let job = MiningJob::new(header_hash, distance_threshold, nonce_start, nonce_end);
+        let job = MiningJob::new(header_hash, difficulty, nonce_start, nonce_end);
         state.add_job("success_job".to_string(), job).await.unwrap();
 
         let mut finished_job = None;
@@ -1598,7 +1575,7 @@ mod tests {
             assert!(e.contains("mining_hash must be valid hex"));
         }
 
-        // 4) Bad distance_threshold decimal
+        // 4) Bad difficulty decimal
         {
             let mut r = valid_req();
             r.distance_threshold = "not-a-decimal".to_string();
@@ -1680,9 +1657,9 @@ mod tests {
         // 3) POST /mine valid -> 200 Accepted, duplicate -> 409
         let req = quantus_miner_api::MiningRequest {
             job_id: "job-http-1".to_string(),
-            mining_hash: "11".repeat(32),        // 64 hex chars
-            distance_threshold: "0".to_string(), // strict, likely to fail later; OK for accept flow
-            nonce_start: "00".repeat(64),        // 128 hex chars
+            mining_hash: "11".repeat(32), // 64 hex chars
+            distance_threshold: "99999999999999".to_string(), // hard, likely to fail later; OK for accept flow
+            nonce_start: "00".repeat(64),                     // 128 hex chars
             nonce_end: format!("{:0128x}", 1u8),
         };
 
@@ -1708,11 +1685,11 @@ mod tests {
         use crossbeam_channel::bounded;
         use std::sync::atomic::AtomicBool;
 
-        // Baseline engine, strict threshold to force Exhausted path for the sub-range
+        // Baseline engine, hard difficulty to force Exhausted path for the sub-range
         let engine = engine_cpu::BaselineCpuEngine::new();
         let header = [3u8; 32];
-        let threshold = U512::zero();
-        let ctx = engine.prepare_context(header, threshold);
+        let difficulty = U512::MAX;
+        let ctx = engine.prepare_context(header, difficulty);
 
         // Small range; chunking derives a large chunk size, so it will be a single chunk,
         // which still exercises the Exhausted -> progress update and final completion paths.

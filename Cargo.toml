@@ -3,7 +3,6 @@ members = [
 	"crates/engine-cpu",
 	"crates/engine-gpu-cuda",
 	"crates/engine-gpu-opencl",
-	"crates/engine-montgomery",
 	"crates/metrics",
 	"crates/miner-cli",
 	"crates/miner-service",
@@ -31,7 +30,7 @@ num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 num_cpus = "1.16"
 primitive-types = { version = "0.13.1", default-features = false }
-qp-poseidon-core = { version = "0.9.5", default-features = false }
+qp-poseidon-core = { version = "1.0.1", default-features = false }
 qpow-math = { git = "https://github.com/Quantus-Network/chain.git", package = "qpow-math", default-features = false }
 quantus-miner-api = { version = "0.0.3", default-features = false }
 rand = { version = "0.8.5", default-features = false }

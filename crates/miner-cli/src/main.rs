@@ -96,8 +96,6 @@ enum EngineCli {
     CpuBaseline,
     /// Optimized CPU engine (incremental precompute + step_mul)
     CpuFast,
-    /// Montgomery-optimized CPU engine (fixed-width 512-bit ops)
-    CpuMontgomery,
     /// Throttling CPU engine that slows per block to help reduce difficulty
     CpuChainManipulator,
     /// CUDA GPU engine (unimplemented; selecting will return an error)
@@ -111,7 +109,6 @@ impl From<EngineCli> for EngineSelection {
         match value {
             EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
             EngineCli::CpuFast => EngineSelection::CpuFast,
-            EngineCli::CpuMontgomery => EngineSelection::CpuMontgomery,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             EngineCli::GpuCuda => EngineSelection::GpuCuda,
             EngineCli::GpuOpencl => EngineSelection::GpuOpenCl,

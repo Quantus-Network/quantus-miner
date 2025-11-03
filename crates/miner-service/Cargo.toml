@@ -6,21 +6,18 @@ publish = false
 description = "Service layer: HTTP API, job orchestration, and engine abstraction for the Quantus External Miner"
 
 [features]
-default = ["cpu", "metrics", "montgomery"]
+default = ["cpu", "metrics"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
 # Optional metrics/observability (Prometheus endpoint).
 metrics = [
 	"dep:metrics",
 	"engine-gpu-cuda?/metrics",
-	"engine-montgomery?/metrics",
 	"metrics/http-exporter",
 ]
 # Optional GPU backends (off by default).
 cuda = ["dep:engine-gpu-cuda", "engine-gpu-cuda/cuda"]
 opencl = ["engine-gpu-opencl"]
-# Optional Montgomery-optimized CPU backend
-montgomery = ["engine-montgomery"]
 
 [dependencies]
 # Workspace-shared deps
@@ -42,7 +39,6 @@ quantus-miner-api = { workspace = true }
 # Local crates
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
-engine-montgomery = { path = "../engine-montgomery", optional = true }
 engine-gpu-cuda = { path = "../engine-gpu-cuda", optional = true, features = ["cuda"] }
 engine-gpu-opencl = { path = "../engine-gpu-opencl", optional = true }
 metrics = { path = "../metrics", optional = true }

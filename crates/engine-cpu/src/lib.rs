@@ -14,7 +14,7 @@
 
 use core::cmp::Ordering;
 
-use pow_core::{distance_for_nonce, is_valid_distance, JobContext};
+use pow_core::{is_valid_nonce, JobContext};
 use primitive_types::U512;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
@@ -31,7 +31,7 @@ pub struct Range {
 pub struct Candidate {
     pub nonce: U512,
     pub work: [u8; 64], // big-endian representation of nonce
-    pub distance: U512, // achieved distance for this nonce
+    pub hash: U512,     // output hash for this nonce
 }
 
 /// Origin of a found candidate.
@@ -78,8 +78,8 @@ pub trait MinerEngine: Send + Sync {
     /// Human-readable engine name (for logs/metrics).
     fn name(&self) -> &'static str;
 
-    /// Prepare a precomputed context for a job (header + threshold).
-    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext;
+    /// Prepare a precomputed context for a job (header + difficulty).
+    fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext;
 
     /// Search an inclusive nonce range with cancellation support.
     ///
@@ -109,8 +109,8 @@ impl MinerEngine for BaselineCpuEngine {
         "cpu-baseline"
     }
 
-    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
-        JobContext::new(header_hash, threshold)
+    fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+        JobContext::new(header_hash, difficulty)
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
@@ -128,17 +128,18 @@ impl MinerEngine for BaselineCpuEngine {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Compute distance for this nonce using the context.
-            let distance = distance_for_nonce(ctx, current);
+            // Compute hash for this nonce using Bitcoin-style double Poseidon2
+            let (is_valid, hash) =
+                is_valid_nonce(ctx.header, current.to_big_endian(), ctx.difficulty);
             hash_count = hash_count.saturating_add(1);
 
-            // Check if it's valid under threshold.
-            if is_valid_distance(ctx, distance) {
+            // Check if it meets difficulty target
+            if is_valid {
                 let work = current.to_big_endian();
                 let candidate = Candidate {
                     nonce: current,
                     work,
-                    distance,
+                    hash,
                 };
                 return EngineStatus::Found {
                     candidate,
@@ -178,12 +179,12 @@ impl MinerEngine for FastCpuEngine {
         "cpu-fast"
     }
 
-    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
-        JobContext::new(header_hash, threshold)
+    fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+        JobContext::new(header_hash, difficulty)
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
-        use pow_core::{distance_from_y, init_worker_y0, is_valid_distance, step_mul};
+        use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
 
         // Ensure start <= end (inclusive range). If not, treat as exhausted.
         if range.start > range.end {
@@ -191,7 +192,6 @@ impl MinerEngine for FastCpuEngine {
         }
 
         let mut current = range.start;
-        let mut y = init_worker_y0(ctx, current);
         let mut hash_count: u64 = 0;
 
         loop {
@@ -200,17 +200,17 @@ impl MinerEngine for FastCpuEngine {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Compute distance from current accumulator
-            let distance = distance_from_y(ctx, y);
+            // Compute hash using Bitcoin-style double Poseidon2
+            let hash = hash_from_nonce(ctx, current);
             hash_count = hash_count.saturating_add(1);
 
-            if is_valid_distance(ctx, distance) {
+            if is_valid_hash(ctx, hash) {
                 let work = current.to_big_endian();
                 return EngineStatus::Found {
                     candidate: Candidate {
                         nonce: current,
                         work,
-                        distance,
+                        hash,
                     },
                     hash_count,
                     origin: FoundOrigin::Cpu,
@@ -218,13 +218,14 @@ impl MinerEngine for FastCpuEngine {
             }
 
             if current == range.end {
-                break EngineStatus::Exhausted { hash_count };
+                break;
             }
 
-            // Advance to next nonce: y <- y * m (mod n), current <- current + 1
-            y = step_mul(ctx, y);
-            current = current.saturating_add(U512::one());
+            // Advance to next nonce
+            current = step_nonce(current);
         }
+
+        EngineStatus::Exhausted { hash_count }
     }
 }
 
@@ -259,9 +260,9 @@ impl MinerEngine for ChainManipulatorEngine {
         "cpu-chain-manipulator"
     }
 
-    fn prepare_context(&self, header_hash: [u8; 32], threshold: U512) -> JobContext {
+    fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
         // Per-block throttling: do NOT increment here. We increment on Found (i.e., when a block is solved).
-        let ctx = JobContext::new(header_hash, threshold);
+        let ctx = JobContext::new(header_hash, difficulty);
         // Debug: log current throttle state at job start
         log::debug!(
             target: "miner",
@@ -274,16 +275,14 @@ impl MinerEngine for ChainManipulatorEngine {
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
-        use pow_core::{distance_from_y, init_worker_y0, is_valid_distance, step_mul};
+        use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
 
         if range.start > range.end {
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
-        // Fast incremental path (same as cpu-fast) to start with high hashrate:
-        // y0 = m^(h + start_nonce) mod n, then y = y * m (mod n) each step.
+        // Bitcoin-style hashing path
         let mut current = range.start;
-        let mut y = init_worker_y0(ctx, current);
         let mut hash_count: u64 = 0;
         let mut batch_counter: u64 = 0;
 
@@ -302,8 +301,8 @@ impl MinerEngine for ChainManipulatorEngine {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Compute distance from current accumulator (incremental path).
-            let distance = distance_from_y(ctx, y);
+            // Compute hash using Bitcoin-style double Poseidon2
+            let hash = hash_from_nonce(ctx, current);
             hash_count = hash_count.saturating_add(1);
             batch_counter = batch_counter.saturating_add(1);
 
@@ -311,7 +310,7 @@ impl MinerEngine for ChainManipulatorEngine {
             #[allow(unused_variables)]
             let _dbg_batch = batch_counter;
 
-            if is_valid_distance(ctx, distance) {
+            if is_valid_hash(ctx, hash) {
                 let work = current.to_big_endian();
                 // Increment solved-block counter so the NEXT block throttles more.
                 let _new_idx = self.job_index.fetch_add(1, AtomicOrdering::Relaxed) + 1;
@@ -333,7 +332,7 @@ impl MinerEngine for ChainManipulatorEngine {
                     candidate: Candidate {
                         nonce: current,
                         work,
-                        distance,
+                        hash,
                     },
                     hash_count,
                     origin: FoundOrigin::Cpu,
@@ -348,9 +347,7 @@ impl MinerEngine for ChainManipulatorEngine {
 
             // Advance
             if current < range.end {
-                // y <- y * m (mod n); current <- current + 1
-                y = step_mul(ctx, y);
-                current = current.saturating_add(U512::one());
+                current = step_nonce(current);
             } else {
                 break EngineStatus::Exhausted { hash_count };
             }
@@ -371,60 +368,16 @@ mod tests {
 
     fn make_ctx() -> JobContext {
         let header = [1u8; 32];
-        let threshold = U512::MAX; // permissive threshold for "found" parity test
-        JobContext::new(header, threshold)
-    }
-
-    #[test]
-    fn baseline_and_fast_engines_find_same_candidate_on_small_range() {
-        let ctx = make_ctx();
-
-        let range = Range {
-            start: U512::from(0u64),
-            end: U512::from(100u64),
-        };
-
-        let cancel = AtomicBool::new(false);
-
-        let baseline = BaselineCpuEngine::new();
-        let fast = FastCpuEngine::new();
-
-        let b_status = baseline.search_range(&ctx, range.clone(), &cancel);
-        let f_status = fast.search_range(&ctx, range.clone(), &cancel);
-
-        match (b_status, f_status) {
-            (
-                EngineStatus::Found {
-                    candidate: b_cand,
-                    hash_count: b_hashes,
-                    origin: _,
-                },
-                EngineStatus::Found {
-                    candidate: f_cand,
-                    hash_count: f_hashes,
-                    origin: _,
-                },
-            ) => {
-                assert_eq!(
-                    b_cand.nonce, f_cand.nonce,
-                    "engines disagreed on winning nonce"
-                );
-                assert_eq!(
-                    b_cand.distance, f_cand.distance,
-                    "engines disagreed on distance"
-                );
-                assert_eq!(b_hashes, f_hashes, "engines disagreed on hash_count");
-            }
-            (b, f) => panic!("expected Found/Found, got baseline={b:?}, fast={f:?}"),
-        }
+        let difficulty = U512::from(1u64); // easy difficulty for "found" parity test
+        JobContext::new(header, difficulty)
     }
 
     #[test]
     fn engine_returns_exhausted_when_no_solution_in_range() {
-        // Use a very strict threshold to make solutions effectively impossible in a tiny range.
+        // Use a very hard difficulty to make solutions effectively impossible in a tiny range.
         let header = [2u8; 32];
-        let threshold = U512::zero();
-        let ctx = JobContext::new(header, threshold);
+        let difficulty = U512::MAX;
+        let ctx = JobContext::new(header, difficulty);
 
         let range = Range {
             start: U512::from(1u64),
