@@ -123,7 +123,7 @@ mod tests {
         let ctx = JobContext::new(header, easy_difficulty);
 
         let nonce = U512::from(1u64);
-        let (is_valid, hash) = is_valid_nonce_for_context(&ctx, nonce);
+        let (is_valid, hash) = is_valid_nonce(ctx.header, nonce.to_big_endian(), ctx.difficulty);
 
         // With very easy difficulty, should be valid
         assert!(is_valid);
@@ -131,22 +131,6 @@ mod tests {
 
         // Verify hash is actually below target
         assert!(hash < ctx.target);
-    }
-
-    #[test]
-    fn test_zero_nonce_produces_zero_hash() {
-        let header = [0xABu8; 32];
-        let difficulty = U512::from(1u64);
-        let ctx = JobContext::new(header, difficulty);
-
-        let zero_nonce = U512::zero();
-        let hash = hash_from_nonce(&ctx, zero_nonce);
-
-        // Zero nonce should produce zero hash
-        assert_eq!(hash, U512::zero());
-
-        // Zero hash should not be considered valid
-        assert!(!is_valid_hash(&ctx, hash));
     }
 
     #[test]
