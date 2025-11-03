@@ -1779,7 +1779,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-constants"
-version = "0.9.5"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d56b56652e9f44a43de9593e75d7c3e0c3a352e10675cf3024e5b3175711cd3"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
@@ -1790,7 +1792,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "0.9.5"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e658a373a7fb22babeda9ffcc8af0a894e6e3c008272ed735509eccb7769ead3"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
@@ -1803,6 +1807,7 @@ dependencies = [
 [[package]]
 name = "qpow-math"
 version = "0.1.0"
+source = "git+https://github.com/Quantus-Network/chain.git#a5b9e4cc6900641884171a9972e0276ebb73a3ab"
 dependencies = [
  "hex",
  "log",
