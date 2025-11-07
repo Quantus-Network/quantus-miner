@@ -40,7 +40,7 @@ struct Args {
     manip_throttle_cap: Option<u64>,
 
     /// Mining engine to use (default: cpu-fast).
-    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, cpu-montgomery, gpu-cuda, gpu-opencl
+    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, gpu-cuda, gpu-opencl
     /// Note: GPU engines are currently unimplemented and will return a clear error at runtime.
     #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
     engine: EngineCli,
