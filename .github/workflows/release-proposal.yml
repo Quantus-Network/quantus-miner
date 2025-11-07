@@ -96,15 +96,9 @@ jobs:
 
             # Increment based on type
             if [[ "$VERSION_TYPE" == "major" ]]; then
-              if [[ "$major" == "0" ]]; then # Handle 0.x.y -> 0.(x+1).0
-                major=$major
-                minor=$((minor + 1))
-                patch=0
-              else
-                major=$((major + 1))
-                minor=0
-                patch=0
-              fi
+              major=$((major + 1))
+              minor=0
+              patch=0
             elif [[ "$VERSION_TYPE" == "minor" ]]; then
               minor=$((minor + 1))
               patch=0
