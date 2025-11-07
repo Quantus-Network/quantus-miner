@@ -166,7 +166,6 @@ jobs:
           cargo update -p engine-cpu --precise "$new_cargo_version"
           cargo update -p engine-gpu-cuda --precise "$new_cargo_version"
           cargo update -p engine-gpu-opencl --precise "$new_cargo_version"
-          cargo update -p engine-montgomery --precise "$new_cargo_version"
           
           # Verify everything compiles correctly
           cargo check --workspace
