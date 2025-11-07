@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "engine-cpu"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "engine-gpu-cuda"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "engine-gpu-opencl"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -1210,7 +1210,7 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 
 [[package]]
 name = "metrics"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "miner-cli"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "miner-service"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "miner-telemetry"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "pow-core"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "hex",
