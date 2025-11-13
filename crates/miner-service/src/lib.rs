@@ -187,10 +187,9 @@ impl MiningService {
         log::debug!(target: "miner", "Starting mining loop...");
 
         tokio::spawn(async move {
+            let loop_start_time = std::time::Instant::now();
             let mut last_watchdog = std::time::Instant::now();
-            let mut iter: u64 = 0;
             loop {
-                iter += 1;
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
@@ -251,10 +250,11 @@ impl MiningService {
                 };
                 drop(jobs_guard);
                 if do_watchdog {
+                    let uptime = loop_start_time.elapsed();
                     log::info!(
                         target: "miner",
-                        "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, loop_iter={}",
-                        total, running, completed, failed, cancelled, iter
+                        "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, uptime={:?}",
+                        total, running, completed, failed, cancelled, uptime
                     );
                     last_watchdog = std::time::Instant::now();
                 }
