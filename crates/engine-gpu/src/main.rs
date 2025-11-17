@@ -2,6 +2,245 @@ use bytemuck;
 use futures::executor::block_on;
 use wgpu::{self, util::DeviceExt};
 
+// Test vector generation using the CPU implementation
+fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
+    println!("Generating test vectors using CPU Poseidon2...");
+
+    let mut test_vectors = Vec::new();
+
+    // Test vector 1: All zeros
+    let input1 = [0u8; 96];
+    let expected1 = qp_poseidon_core::hash_squeeze_twice(&input1);
+    test_vectors.push((input1, expected1));
+    println!(
+        "Test vector 1 (zeros): input={:?}, expected={:?}",
+        &input1[..8],
+        &expected1[..8]
+    );
+
+    // Test vector 2: Incremental pattern
+    let mut input2 = [0u8; 96];
+    for i in 0..96 {
+        input2[i] = (i % 256) as u8;
+    }
+    let expected2 = qp_poseidon_core::hash_squeeze_twice(&input2);
+    test_vectors.push((input2, expected2));
+    println!(
+        "Test vector 2 (incremental): input={:?}, expected={:?}",
+        &input2[..8],
+        &expected2[..8]
+    );
+
+    // Test vector 3: Example mining input (header + nonce)
+    let mut input3 = [0u8; 96];
+    // Header (32 bytes)
+    input3[..32].copy_from_slice(&[
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+        26, 27, 28, 29, 30, 31, 32,
+    ]);
+    // Nonce (64 bytes) - start with simple pattern
+    for i in 32..96 {
+        input3[i] = ((i - 32) % 256) as u8;
+    }
+    let expected3 = qp_poseidon_core::hash_squeeze_twice(&input3);
+    test_vectors.push((input3, expected3));
+    println!(
+        "Test vector 3 (mining): input={:?}, expected={:?}",
+        &input3[..8],
+        &expected3[..8]
+    );
+
+    test_vectors
+}
+
+fn u8_array_to_u32_array(bytes: &[u8; 96]) -> [u32; 24] {
+    let mut result = [0u32; 24];
+    for i in 0..24 {
+        let idx = i * 4;
+        result[i] =
+            u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
+    }
+    result
+}
+
+fn u8_array_to_u32_array_64(bytes: &[u8; 64]) -> [u32; 16] {
+    let mut result = [0u32; 16];
+    for i in 0..16 {
+        let idx = i * 4;
+        result[i] =
+            u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
+    }
+    result
+}
+
+async fn test_gpu_with_vectors(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    pipeline: &wgpu::ComputePipeline,
+    test_vectors: &[([u8; 96], [u8; 64])],
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nTesting GPU implementation with known vectors...");
+
+    for (i, (input_bytes, expected_bytes)) in test_vectors.iter().enumerate() {
+        println!("\n--- Testing Vector {} ---", i + 1);
+
+        let input_u32 = u8_array_to_u32_array(input_bytes);
+        let expected_u32 = u8_array_to_u32_array_64(expected_bytes);
+
+        // Create test buffers
+        let test_results_data = vec![0u32; 33];
+        let test_results_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Results Buffer"),
+            contents: bytemuck::cast_slice(&test_results_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+
+        // Split input into header and nonce parts
+        let header_data = [
+            input_u32[0],
+            input_u32[1],
+            input_u32[2],
+            input_u32[3],
+            input_u32[4],
+            input_u32[5],
+            input_u32[6],
+            input_u32[7],
+        ];
+        let nonce_data = [
+            input_u32[8],
+            input_u32[9],
+            input_u32[10],
+            input_u32[11],
+            input_u32[12],
+            input_u32[13],
+            input_u32[14],
+            input_u32[15],
+            input_u32[16],
+            input_u32[17],
+            input_u32[18],
+            input_u32[19],
+            input_u32[20],
+            input_u32[21],
+            input_u32[22],
+            input_u32[23],
+        ];
+
+        let test_header_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Header Buffer"),
+            contents: bytemuck::cast_slice(&header_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let test_nonce_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Nonce Buffer"),
+            contents: bytemuck::cast_slice(&nonce_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Use max target so any hash will be "valid"
+        let max_target_data = [0xFFFFFFFFu32; 16];
+        let test_target_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Target Buffer"),
+            contents: bytemuck::cast_slice(&max_target_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let test_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Test Bind Group"),
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: test_results_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: test_header_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: test_nonce_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: test_target_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Run single thread (thread 0 will use exact nonce)
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Test Command Encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Test Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &test_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1); // Just 1 workgroup = 64 threads, thread 0 uses exact nonce
+        }
+        queue.submit(Some(encoder.finish()));
+
+        // Read results
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Test Staging Buffer"),
+            size: test_results_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Test Copy Command Encoder"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &test_results_buffer,
+            0,
+            &staging,
+            0,
+            test_results_buffer.size(),
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+        let mapped = slice.get_mapped_range();
+        let result: Vec<u32> = bytemuck::cast_slice(&mapped).to_vec();
+        drop(mapped);
+        staging.unmap();
+
+        if result[0] == 1 {
+            let gpu_hash = &result[17..33];
+            println!("GPU result: {:?}", &gpu_hash[..4]);
+            println!("Expected:   {:?}", &expected_u32[..4]);
+
+            let matches = gpu_hash
+                .iter()
+                .zip(expected_u32.iter())
+                .all(|(a, b)| a == b);
+            if matches {
+                println!("✅ Test vector {} PASSED", i + 1);
+            } else {
+                println!("❌ Test vector {} FAILED", i + 1);
+                println!("GPU hash: {:?}", gpu_hash);
+                println!("Expected: {:?}", expected_u32);
+            }
+        } else {
+            println!("❌ Test vector {} FAILED - no result computed", i + 1);
+        }
+    }
+
+    Ok(())
+}
+
 fn main() {
     block_on(run()).unwrap();
 }
@@ -19,6 +258,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await?;
+
+    // Generate test vectors first
+    let test_vectors = generate_test_vectors();
 
     // Load WGSL shader from external file
     let shader_source = include_str!("mining.wgsl");
@@ -203,6 +445,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("First few results: {:?}", &result[0..10]);
     }
+
+    // Test with known vectors
+    test_gpu_with_vectors(
+        &device,
+        &queue,
+        &bind_group_layout,
+        &pipeline,
+        &test_vectors,
+    )
+    .await?;
 
     Ok(())
 }
