@@ -2,6 +2,8 @@ use bytemuck;
 use futures::executor::block_on;
 use wgpu::{self, util::DeviceExt};
 
+mod tests;
+
 // Extract Poseidon2 constants and generate WGSL code
 fn generate_wgsl_constants() {
     println!("Extracting Poseidon2 constants for WGSL...");
@@ -784,6 +786,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &test_vectors,
     )
     .await?;
+
+    // Run gf_mul tests
+    if let Err(e) = tests::test_gf_mul(&device, &queue).await {
+        eprintln!("gf_mul tests failed: {}", e);
+    }
 
     Ok(())
 }
