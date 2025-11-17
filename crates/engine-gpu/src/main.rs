@@ -2,6 +2,78 @@ use bytemuck;
 use futures::executor::block_on;
 use wgpu::{self, util::DeviceExt};
 
+// Extract Poseidon2 constants and generate WGSL code
+fn generate_wgsl_constants() {
+    println!("Extracting Poseidon2 constants for WGSL...");
+
+    // Internal round constants (22 values)
+    println!("// Internal round constants");
+    println!("const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(");
+    for (i, &constant) in qp_poseidon_constants::POSEIDON2_INTERNAL_CONSTANTS_RAW
+        .iter()
+        .enumerate()
+    {
+        let low = (constant & 0xFFFFFFFF) as u32;
+        let high = (constant >> 32) as u32;
+        if i < 21 {
+            println!("    array<u32, 2>({}, {}),", low, high);
+        } else {
+            println!("    array<u32, 2>({}, {})", low, high);
+        }
+    }
+    println!(");");
+
+    // Initial external round constants (4 rounds x 12 elements each)
+    println!("\n// Initial external round constants");
+    println!("const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
+    for (round_idx, round) in qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW
+        .iter()
+        .enumerate()
+    {
+        println!("    array<array<u32, 2>, 12>(");
+        for (i, &constant) in round.iter().enumerate() {
+            let low = (constant & 0xFFFFFFFF) as u32;
+            let high = (constant >> 32) as u32;
+            if i < 11 {
+                println!("        array<u32, 2>({}, {}),", low, high);
+            } else {
+                println!("        array<u32, 2>({}, {})", low, high);
+            }
+        }
+        if round_idx < 3 {
+            println!("    ),");
+        } else {
+            println!("    )");
+        }
+    }
+    println!(");");
+
+    // Terminal external round constants (4 rounds x 12 elements each)
+    println!("\n// Terminal external round constants");
+    println!("const TERMINAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
+    for (round_idx, round) in qp_poseidon_constants::POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW
+        .iter()
+        .enumerate()
+    {
+        println!("    array<array<u32, 2>, 12>(");
+        for (i, &constant) in round.iter().enumerate() {
+            let low = (constant & 0xFFFFFFFF) as u32;
+            let high = (constant >> 32) as u32;
+            if i < 11 {
+                println!("        array<u32, 2>({}, {}),", low, high);
+            } else {
+                println!("        array<u32, 2>({}, {})", low, high);
+            }
+        }
+        if round_idx < 3 {
+            println!("    ),");
+        } else {
+            println!("    )");
+        }
+    }
+    println!(");");
+}
+
 // Test vector generation using the CPU implementation
 fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
     println!("Generating test vectors using CPU Poseidon2...");
@@ -258,6 +330,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await?;
+
+    // Generate WGSL constants
+    generate_wgsl_constants();
 
     // Generate test vectors first
     let test_vectors = generate_test_vectors();

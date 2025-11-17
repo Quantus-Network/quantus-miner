@@ -531,6 +531,7 @@ dependencies = [
  "hex",
  "log",
  "primitive-types",
+ "qp-poseidon-constants 1.0.1",
  "qp-poseidon-core 1.0.1",
  "rand 0.8.5",
  "thiserror 1.0.69",
