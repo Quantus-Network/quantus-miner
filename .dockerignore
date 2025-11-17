@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+.github
+
+# Build artifacts
+target/
+*.rs.bk
+*.pdb
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Examples and tests (not needed for runtime)
+examples/
+
+# Other
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.github/
+
+# License
+LICENSE
+
+# Dockerfiles themselves
+Dockerfile*
+.dockerignore
+
+# Cargo cache
+.cargo/
+

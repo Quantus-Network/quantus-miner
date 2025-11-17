@@ -237,6 +237,33 @@ The miner previously used a flag named `--num-cores`. To better reflect intent, 
 * `GET /result/{job_id}`: Retrieves the status and result of a specific mining job.
 * `POST /cancel/{job_id}`: Cancels an ongoing mining job.
 
+## Docker
+
+### Quick Start
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/quantus-network/quantus-miner:latest
+
+# Run with 3 workers
+docker run -d \
+  --name quantus-miner \
+  -p 9833:9833 \
+  -p 9900:9900 \
+  ghcr.io/quantus-network/quantus-miner:latest \
+  --engine cpu-fast --workers 3 --metrics-port 9900
+
+# Check logs
+docker logs -f quantus-miner
+```
+
+### Build from Source
+
+```bash
+docker build -t quantus-miner .
+docker run -d -p 9833:9833 -p 9900:9900 quantus-miner --workers 3
+```
+
 ## Implementation and PR review docs
 
 These documents provide reviewers with the authoritative context for changes. Commits and pull requests should link to the relevant prompt/response entry.
