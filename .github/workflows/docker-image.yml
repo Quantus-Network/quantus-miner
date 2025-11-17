@@ -131,6 +131,7 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          provenance: false
           tags: |
             ${{ env.GHCR_IMAGE_PATH }}:${{ env.TARGET_VERSION_WITH_V }}
             ${{ env.GHCR_IMAGE_PATH }}:latest
