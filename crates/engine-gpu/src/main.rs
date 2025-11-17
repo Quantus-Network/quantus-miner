@@ -383,6 +383,133 @@ async fn test_gpu_with_vectors(
                 drop(debug_mapped);
                 debug_staging.unmap();
 
+                println!("=== SIMPLIFIED DEBUG TEST ===");
+                println!("Global marker (should be 9999): {}", debug_result[0]);
+                println!("Thread ID: {}", debug_result[1]);
+
+                if debug_result.len() > 8 {
+                    println!("Thread 0 tests:");
+                    println!("  Thread 0 marker (should be 1111): {}", debug_result[2]);
+                    println!("  Simple value (should be 2): {}", debug_result[3]);
+                    println!("  Simple arithmetic 1+1 (should be 2): {}", debug_result[4]);
+                    println!(
+                        "  gf_one() result: ({}, {})",
+                        debug_result[5], debug_result[6]
+                    );
+                    println!(
+                        "  gf_add(one, one) result: ({}, {})",
+                        debug_result[7], debug_result[8]
+                    );
+                }
+
+                if debug_result.len() > 12 {
+                    println!("S-box and permutation tests:");
+                    println!("  S-box(2): ({}, {})", debug_result[9], debug_result[10]);
+                    println!("  S-box(1): ({}, {})", debug_result[11], debug_result[12]);
+                }
+
+                if debug_result.len() > 98 {
+                    println!("MDS matrix test:");
+                    println!("  Initial state (first 4 elements):");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[80 + i * 2],
+                            debug_result[80 + i * 2 + 1]
+                        );
+                    }
+                    println!("  After MDS matrix (first 4 elements):");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[90 + i * 2],
+                            debug_result[90 + i * 2 + 1]
+                        );
+                    }
+                }
+
+                if debug_result.len() > 101 {
+                    println!("Round constant addition test:");
+                    println!(
+                        "  1 + INTERNAL_CONSTANTS[0]: ({}, {})",
+                        debug_result[100], debug_result[101]
+                    );
+                }
+
+                if debug_result.len() > 148 {
+                    println!("Step-by-step Poseidon2 permutation test:");
+                    println!("  Initial state:");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[110 + i * 2],
+                            debug_result[110 + i * 2 + 1]
+                        );
+                    }
+                    println!("  After adding round constants:");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[120 + i * 2],
+                            debug_result[120 + i * 2 + 1]
+                        );
+                    }
+                    println!("  After S-box:");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[130 + i * 2],
+                            debug_result[130 + i * 2 + 1]
+                        );
+                    }
+                    println!("  After linear layer:");
+                    for i in 0..4 {
+                        println!(
+                            "    Element {}: ({}, {})",
+                            i,
+                            debug_result[140 + i * 2],
+                            debug_result[140 + i * 2 + 1]
+                        );
+                    }
+                }
+
+                if debug_result.len() > 68 {
+                    println!("Input conversion debug:");
+                    println!("  Raw input bytes: {:?}", &debug_result[50..58]);
+                    println!(
+                        "  Field element 0: ({}, {})",
+                        debug_result[60], debug_result[61]
+                    );
+                    println!(
+                        "  Field element 1: ({}, {})",
+                        debug_result[62], debug_result[63]
+                    );
+                    println!(
+                        "  Field element 2: ({}, {})",
+                        debug_result[64], debug_result[65]
+                    );
+                    println!(
+                        "  Field element 3: ({}, {})",
+                        debug_result[66], debug_result[67]
+                    );
+                }
+
+                if debug_result.len() > 26 {
+                    println!(
+                        "  gf_add inputs: a=({}, {}), b=({}, {})",
+                        debug_result[20], debug_result[21], debug_result[22], debug_result[23]
+                    );
+                    println!(
+                        "  gf_add outputs: sum=({}, {}), carry={}",
+                        debug_result[24], debug_result[25], debug_result[26]
+                    );
+                }
+
                 // Print debug information
                 println!("\n=== GPU DEBUG STATES ===");
                 println!("Initial state: {:?}", &debug_result[0..8]);
