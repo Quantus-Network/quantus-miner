@@ -96,6 +96,34 @@ jobs:
         with:
           ref: ${{ env.TARGET_VERSION_WITH_V }}
 
+      - name: Check if Dockerfile exists in tag
+        id: check_dockerfile
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "::warning::Dockerfile not found in tag ${{ env.TARGET_VERSION_WITH_V }}, falling back to main branch Dockerfile"
+            echo "use_main=true" >> $GITHUB_OUTPUT
+          else
+            echo "Dockerfile found in tag"
+            echo "use_main=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout main branch for Dockerfile (if needed)
+        if: steps.check_dockerfile.outputs.use_main == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            Dockerfile
+            .dockerignore
+          sparse-checkout-cone-mode: false
+          path: dockerfile-source
+
+      - name: Copy Dockerfile from main (if needed)
+        if: steps.check_dockerfile.outputs.use_main == 'true'
+        run: |
+          cp dockerfile-source/Dockerfile ./
+          [ -f dockerfile-source/.dockerignore ] && cp dockerfile-source/.dockerignore ./ || true
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
