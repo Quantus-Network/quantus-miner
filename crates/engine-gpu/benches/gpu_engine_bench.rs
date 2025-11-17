@@ -1,13 +1,12 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use engine_cpu::{FastCpuEngine, MinerEngine, Range};
 use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
-fn bench_cpu_fast_engine(c: &mut Criterion) {
+fn bench_gpu_engine(c: &mut Criterion) {
     // Create the engine
-    let engine = FastCpuEngine::new();
+    let engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     let large_range = Range {
@@ -15,7 +14,7 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
         end: U512::from(1000u64), // 1000 nonces
     };
 
-    c.bench_function("cpu_fast_large_range", |b| {
+    c.bench_function("gpu_fast_large_range", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut header);
@@ -52,5 +51,5 @@ fn bench_hash_from_nonce(c: &mut Criterion) {
         })
     });
 }
-criterion_group!(benches, bench_cpu_fast_engine, bench_hash_from_nonce);
+criterion_group!(benches, bench_gpu_engine, bench_hash_from_nonce);
 criterion_main!(benches);
