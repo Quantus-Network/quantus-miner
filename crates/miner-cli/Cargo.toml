@@ -7,7 +7,6 @@ description = "CLI binary to run the Quantus External Miner service"
 
 [features]
 default = []
-cuda = ["miner-service/cuda"]
 
 [dependencies]
 miner-service = { path = "../miner-service" }
