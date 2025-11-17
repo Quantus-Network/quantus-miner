@@ -74,6 +74,38 @@ fn generate_wgsl_constants() {
     println!(");");
 }
 
+// Generate simple debug test vectors
+fn generate_debug_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
+    println!("Generating simplified debug test vectors...");
+
+    let mut test_vectors = Vec::new();
+
+    // Test vector 1: All zeros
+    let input1 = [0u8; 96];
+    let expected1 = qp_poseidon_core::hash_squeeze_twice(&input1);
+    test_vectors.push((input1, expected1));
+    println!(
+        "Test vector 1 (zeros): {:?} -> {:?}",
+        &input1[..8],
+        &expected1[..8]
+    );
+
+    // Test vector 2: Simple sequential pattern
+    let mut input2 = [0u8; 96];
+    for i in 0..16 {
+        input2[i] = (i + 1) as u8; // [1,2,3...16,0,0,...]
+    }
+    let expected2 = qp_poseidon_core::hash_squeeze_twice(&input2);
+    test_vectors.push((input2, expected2));
+    println!(
+        "Test vector 2 (sequential): {:?} -> {:?}",
+        &input2[..8],
+        &expected2[..8]
+    );
+
+    test_vectors
+}
+
 // Test vector generation using the CPU implementation
 fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
     println!("Generating test vectors using CPU Poseidon2...");
@@ -168,6 +200,14 @@ async fn test_gpu_with_vectors(
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         });
 
+        // Create debug buffer for intermediate state logging (250 u32s should be enough)
+        let debug_data = vec![0u32; 250];
+        let debug_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Debug Buffer"),
+            contents: bytemuck::cast_slice(&debug_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+
         // Split input into header and nonce parts
         let header_data = [
             input_u32[0],
@@ -238,6 +278,10 @@ async fn test_gpu_with_vectors(
                     binding: 3,
                     resource: test_target_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: debug_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -304,6 +348,53 @@ async fn test_gpu_with_vectors(
                 println!("❌ Test vector {} FAILED", i + 1);
                 println!("GPU hash: {:?}", gpu_hash);
                 println!("Expected: {:?}", expected_u32);
+
+                // Read debug buffer to compare intermediate states
+                let debug_staging = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Debug Staging Buffer"),
+                    size: debug_buffer.size(),
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+
+                let mut debug_encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Debug Copy Command Encoder"),
+                    });
+                debug_encoder.copy_buffer_to_buffer(
+                    &debug_buffer,
+                    0,
+                    &debug_staging,
+                    0,
+                    debug_buffer.size(),
+                );
+                queue.submit(Some(debug_encoder.finish()));
+
+                let debug_slice = debug_staging.slice(..);
+                debug_slice.map_async(wgpu::MapMode::Read, |_| ());
+                device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    })
+                    .unwrap();
+                let debug_mapped = debug_slice.get_mapped_range();
+                let debug_result: Vec<u32> = bytemuck::cast_slice(&debug_mapped).to_vec();
+                drop(debug_mapped);
+                debug_staging.unmap();
+
+                // Print debug information
+                println!("\n=== GPU DEBUG STATES ===");
+                println!("Initial state: {:?}", &debug_result[0..8]);
+                println!("Input felts: {:?}", &debug_result[24..32]);
+                println!("After 1st absorption: {:?}", &debug_result[48..56]);
+                println!("After 1st permutation: {:?}", &debug_result[72..80]);
+                println!("After 2nd absorption: {:?}", &debug_result[96..104]);
+                println!("After 2nd permutation: {:?}", &debug_result[120..128]);
+                println!("After 3rd absorption: {:?}", &debug_result[144..152]);
+                println!("After padding: {:?}", &debug_result[168..176]);
+                println!("After 3rd permutation: {:?}", &debug_result[192..200]);
+                println!("After 4th permutation: {:?}", &debug_result[216..224]);
             }
         } else {
             println!("❌ Test vector {} FAILED - no result computed", i + 1);
@@ -331,10 +422,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .request_device(&wgpu::DeviceDescriptor::default())
         .await?;
 
-    // Generate WGSL constants
-    generate_wgsl_constants();
+    // Generate simplified debug test vectors
+    let debug_test_vectors = generate_debug_test_vectors();
 
-    // Generate test vectors first
+    // Also generate regular test vectors for comparison
     let test_vectors = generate_test_vectors();
 
     // Load WGSL shader from external file
@@ -373,11 +464,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Target buffer (64 bytes = 16 u32s) - very easy target for testing
+    // Very easy target for testing
     let target_data = [0xFFFFFFFFu32; 16]; // Maximum target (very easy)
     let target_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Target Buffer"),
         contents: bytemuck::cast_slice(&target_data),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    // Debug buffer for main mining (even though we won't use it much here)
+    let main_debug_data = vec![0u32; 250];
+    let main_debug_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Main Debug Buffer"),
+        contents: bytemuck::cast_slice(&main_debug_data),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     });
 
     // Pipeline with multiple buffers
@@ -428,6 +528,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 count: None,
             },
+            // Debug buffer (read-write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -464,6 +575,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: target_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: main_debug_buffer.as_entire_binding(),
             },
         ],
     });
@@ -520,6 +635,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("First few results: {:?}", &result[0..10]);
     }
+
+    // Test with debug vectors first (more detailed logging)
+    test_gpu_with_vectors(
+        &device,
+        &queue,
+        &bind_group_layout,
+        &pipeline,
+        &debug_test_vectors,
+    )
+    .await?;
+
+    println!("\n=== Running regular test vectors for comparison ===");
 
     // Test with known vectors
     test_gpu_with_vectors(

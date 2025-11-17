@@ -24,6 +24,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 qp-poseidon-core = { path = "../../../qp-poseidon/core" }
 qp-poseidon-constants = { path = "../../../qp-poseidon/constants" }
+qp-plonky2 = { path = "../../../qp-plonky2/plonky2" }
+qp-plonky2-field = { path = "../../../qp-plonky2/field" }
 
 wgpu = { version = "27.0.1" }  # GPU compute library
 futures = "0.3"  # For async executor

@@ -173,6 +173,7 @@ const MDS_MATRIX_FIRST_ROW: array<i32, 12> = array<i32, 12>(1, 1, 2, 1, 8, 9, 10
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
+@group(0) @binding(4) var<storage, read_write> debug_buffer: array<u32>;      // Debug output buffer
 
 // Goldilocks field element represented as [low_32, high_32]
 struct GoldilocksField {
@@ -316,6 +317,14 @@ fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     return GoldilocksField(final_low, final_high);
 }
 
+// Debug helper function to write state to debug buffer
+fn debug_write_state(offset: u32, state: array<GoldilocksField, 12>) {
+    for (var i = 0u; i < 12u; i++) {
+        debug_buffer[offset + i * 2u] = state[i].low;
+        debug_buffer[offset + i * 2u + 1u] = state[i].high;
+    }
+}
+
 // S-box: x^7 in Goldilocks field (simplified)
 fn sbox(x: GoldilocksField) -> GoldilocksField {
     let x2 = gf_mul(x, x);
@@ -433,30 +442,44 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     for (var i = 0u; i < WIDTH; i++) {
         state[i] = gf_zero();
     }
+    debug_write_state(0u, state); // Debug: initial state
 
     // Convert input to field elements
     let input_felts = bytes_to_field_elements(input);
+
+    // Debug: write input felts to debug buffer
+    for (var i = 0u; i < 12u; i++) {
+        debug_buffer[24u + i * 2u] = input_felts[i].low;
+        debug_buffer[24u + i * 2u + 1u] = input_felts[i].high;
+    }
 
     // Proper sponge absorption
     // First absorb 4 field elements (RATE = 4)
     for (var i = 0u; i < RATE; i++) {
         state[i] = gf_add(state[i], input_felts[i]);
     }
+    debug_write_state(48u, state); // Debug: after first absorption
     poseidon2_permute(&state);
+    debug_write_state(72u, state); // Debug: after first permutation
 
     // Second absorption - next 4 elements
     for (var i = 0u; i < RATE && (i + RATE) < 12u; i++) {
         state[i] = gf_add(state[i], input_felts[i + RATE]);
     }
+    debug_write_state(96u, state); // Debug: after second absorption
     poseidon2_permute(&state);
+    debug_write_state(120u, state); // Debug: after second permutation
 
     // Third absorption - remaining elements with padding
     for (var i = 0u; i < RATE && (i + 8u) < 12u; i++) {
         state[i] = gf_add(state[i], input_felts[i + 8u]);
     }
+    debug_write_state(144u, state); // Debug: after third absorption
     // Add padding bit
     state[0] = gf_add(state[0], gf_one());
+    debug_write_state(168u, state); // Debug: after padding
     poseidon2_permute(&state);
+    debug_write_state(192u, state); // Debug: after third permutation
 
     // First squeeze - get first 32 bytes
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
@@ -465,6 +488,7 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
 
     // Second squeeze
     poseidon2_permute(&state);
+    debug_write_state(216u, state); // Debug: after fourth permutation
     let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
