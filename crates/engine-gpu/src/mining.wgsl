@@ -1078,6 +1078,51 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             debug_buffer[180 + i * 2 + 1] = sbox_result.limb2 | (sbox_result.limb3 << 16u); // High 32 bits
         }
 
+        // 4x4 MDS MATRIX TEST VECTORS
+        let mds_test_chunks = array<array<u32, 4>, 8>(
+            array<u32, 4>(0u, 0u, 0u, 0u),      // [0,0,0,0]
+            array<u32, 4>(1u, 0u, 0u, 0u),      // [1,0,0,0]
+            array<u32, 4>(0u, 1u, 0u, 0u),      // [0,1,0,0]
+            array<u32, 4>(0u, 0u, 1u, 0u),      // [0,0,1,0]
+            array<u32, 4>(0u, 0u, 0u, 1u),      // [0,0,0,1]
+            array<u32, 4>(1u, 2u, 3u, 4u),      // [1,2,3,4]
+            array<u32, 4>(5u, 6u, 7u, 8u),      // [5,6,7,8]
+            array<u32, 4>(1u, 1u, 1u, 1u)       // [1,1,1,1]
+        );
+
+        // Test each 4-element chunk with the 4x4 MDS matrix
+        for (var test_idx = 0u; test_idx < 8u; test_idx++) {
+            var chunk_state: array<GoldilocksField, 4>;
+
+            // Convert to field elements
+            for (var i = 0u; i < 4u; i++) {
+                chunk_state[i] = gf_from_u32(mds_test_chunks[test_idx][i]);
+            }
+
+            // Apply 4x4 MDS matrix transformation (same as in external_linear_layer)
+            let t01 = gf_add(chunk_state[0], chunk_state[1]);
+            let t23 = gf_add(chunk_state[2], chunk_state[3]);
+            let t0123 = gf_add(t01, t23);
+            let t01123 = gf_add(t0123, chunk_state[1]);
+            let t01233 = gf_add(t0123, chunk_state[3]);
+
+            let new_3 = gf_add(t01233, gf_add(chunk_state[0], chunk_state[0])); // 3*x[0] + x[1] + x[2] + 2*x[3]
+            let new_1 = gf_add(t01123, gf_add(chunk_state[2], chunk_state[2])); // x[0] + 2*x[1] + 3*x[2] + x[3]
+            let new_0 = gf_add(t01123, t01); // 2*x[0] + 3*x[1] + x[2] + x[3]
+            let new_2 = gf_add(t01233, t23); // x[0] + x[1] + 2*x[2] + 3*x[3]
+
+            // Store results as 64-bit values (8 u32s per test, starting at index 300)
+            let base_idx = 300u + test_idx * 8u;
+            debug_buffer[base_idx + 0u] = new_0.limb0 | (new_0.limb1 << 16u);
+            debug_buffer[base_idx + 1u] = new_0.limb2 | (new_0.limb3 << 16u);
+            debug_buffer[base_idx + 2u] = new_1.limb0 | (new_1.limb1 << 16u);
+            debug_buffer[base_idx + 3u] = new_1.limb2 | (new_1.limb3 << 16u);
+            debug_buffer[base_idx + 4u] = new_2.limb0 | (new_2.limb1 << 16u);
+            debug_buffer[base_idx + 5u] = new_2.limb2 | (new_2.limb3 << 16u);
+            debug_buffer[base_idx + 6u] = new_3.limb0 | (new_3.limb1 << 16u);
+            debug_buffer[base_idx + 7u] = new_3.limb2 | (new_3.limb3 << 16u);
+        }
+
         // S-BOX FAILURE TEST - Test the specific values that are failing
         // Test value from debug: Element 2: (0, 4150273596)
         let failing_val1 = gf_from_limbs(0u, 0u, 4150273596u & 0xFFFFu, (4150273596u >> 16u) & 0xFFFFu);

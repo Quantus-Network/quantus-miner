@@ -251,8 +251,8 @@ async fn test_gpu_with_vectors(
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         });
 
-        // Create debug buffer for intermediate state logging (250 u32s should be enough)
-        let debug_data = vec![0u32; 250];
+        // Create debug buffer for intermediate state logging (400 u32s for MDS matrix tests)
+        let debug_data = vec![0u32; 400];
         let debug_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Debug Buffer"),
             contents: bytemuck::cast_slice(&debug_data),
@@ -660,7 +660,7 @@ async fn test_gpu_with_vectors(
                     println!("Debug buffer length: {}", debug_result.len());
 
                     // Check comprehensive S-box test vectors
-                    if debug_result.len() >= 250 {
+                    if debug_result.len() > 350 {
                         println!("=== COMPREHENSIVE S-BOX TEST RESULTS ===");
 
                         // Test vectors (matching what we put in WGSL)
@@ -703,6 +703,167 @@ async fn test_gpu_with_vectors(
                             println!("🎉 All S-box test vectors PASSED!");
                         } else {
                             println!("❌ Some S-box test vectors FAILED!");
+                        }
+                    }
+
+                    // Check 4x4 MDS matrix test vectors
+                    if debug_result.len() > 700 {
+                        println!("=== 4x4 MDS MATRIX TEST RESULTS ===");
+
+                        // Generate comprehensive test vectors
+                        let mut test_chunks = vec![
+                            // Basic test cases
+                            [0u64, 0, 0, 0],
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                            [1, 1, 1, 1],
+                            [1, 2, 3, 4],
+                            [5, 6, 7, 8],
+                            // Edge cases
+                            [0xFFFFFFFFFFFFFFFFu64, 0, 0, 0],
+                            [0, 0xFFFFFFFFFFFFFFFFu64, 0, 0],
+                            [0, 0, 0xFFFFFFFFFFFFFFFFu64, 0],
+                            [0, 0, 0, 0xFFFFFFFFFFFFFFFFu64],
+                            [
+                                0xFFFFFFFFFFFFFFFFu64,
+                                0xFFFFFFFFFFFFFFFFu64,
+                                0xFFFFFFFFFFFFFFFFu64,
+                                0xFFFFFFFFFFFFFFFFu64,
+                            ],
+                            // Powers of 2
+                            [1, 2, 4, 8],
+                            [16, 32, 64, 128],
+                            [256, 512, 1024, 2048],
+                            // Small random-like values
+                            [13, 37, 42, 123],
+                            [999, 1337, 2021, 8080],
+                            [271, 314, 159, 265],
+                            [111, 222, 333, 444],
+                        ];
+
+                        // Generate more random test vectors using a simple PRNG
+                        let mut seed = 12345u64;
+                        for _ in 0..30 {
+                            let mut chunk = [0u64; 4];
+                            for j in 0..4 {
+                                // Simple linear congruential generator
+                                seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                                chunk[j] = seed & 0x7FFFFFFFFFFFFFFF; // Keep in positive range
+                            }
+                            test_chunks.push(chunk);
+                        }
+
+                        // Calculate expected CPU results using the 4x4 MDS matrix
+                        // [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+                        let mut expected_results = Vec::new();
+                        for chunk in &test_chunks {
+                            let input: Vec<GoldilocksField> = chunk
+                                .iter()
+                                .map(|&x| GoldilocksField::from_canonical_u64(x))
+                                .collect();
+
+                            // Apply 4x4 MDS matrix manually
+                            let result = [
+                                input[0] * GoldilocksField::from_canonical_u64(2)
+                                    + input[1] * GoldilocksField::from_canonical_u64(3)
+                                    + input[2]
+                                    + input[3],
+                                input[0]
+                                    + input[1] * GoldilocksField::from_canonical_u64(2)
+                                    + input[2] * GoldilocksField::from_canonical_u64(3)
+                                    + input[3],
+                                input[0]
+                                    + input[1]
+                                    + input[2] * GoldilocksField::from_canonical_u64(2)
+                                    + input[3] * GoldilocksField::from_canonical_u64(3),
+                                input[0] * GoldilocksField::from_canonical_u64(3)
+                                    + input[1]
+                                    + input[2]
+                                    + input[3] * GoldilocksField::from_canonical_u64(2),
+                            ];
+
+                            expected_results.push([
+                                result[0].to_canonical_u64(),
+                                result[1].to_canonical_u64(),
+                                result[2].to_canonical_u64(),
+                                result[3].to_canonical_u64(),
+                            ]);
+                        }
+
+                        println!(
+                            "Comparing {} 4x4 MDS matrix test vectors:",
+                            test_chunks.len().min(50)
+                        );
+                        let mut all_match = true;
+                        let mut pass_count = 0;
+                        let mut fail_count = 0;
+
+                        for i in 0..test_chunks.len().min(50) {
+                            // Show raw debug buffer values first
+                            println!(
+                                "  Raw debug[{}..{}]: [{}, {}, {}, {}, {}, {}, {}, {}]",
+                                300 + i * 8,
+                                300 + i * 8 + 7,
+                                debug_result[300 + i * 8],
+                                debug_result[300 + i * 8 + 1],
+                                debug_result[300 + i * 8 + 2],
+                                debug_result[300 + i * 8 + 3],
+                                debug_result[300 + i * 8 + 4],
+                                debug_result[300 + i * 8 + 5],
+                                debug_result[300 + i * 8 + 6],
+                                debug_result[300 + i * 8 + 7]
+                            );
+
+                            // GPU results are stored starting at index 300
+                            let gpu_results = [
+                                debug_result[300 + i * 8] as u64
+                                    | ((debug_result[300 + i * 8 + 1] as u64) << 32),
+                                debug_result[300 + i * 8 + 2] as u64
+                                    | ((debug_result[300 + i * 8 + 3] as u64) << 32),
+                                debug_result[300 + i * 8 + 4] as u64
+                                    | ((debug_result[300 + i * 8 + 5] as u64) << 32),
+                                debug_result[300 + i * 8 + 6] as u64
+                                    | ((debug_result[300 + i * 8 + 7] as u64) << 32),
+                            ];
+                            let expected = expected_results[i];
+
+                            let matches = gpu_results == expected;
+                            all_match = all_match && matches;
+
+                            if matches {
+                                pass_count += 1;
+                            } else {
+                                fail_count += 1;
+                            }
+
+                            if !matches || i < 5 || (i % 10 == 0 && i > 0) {
+                                // Show first 5, every 10th, and any mismatches
+                                println!(
+                                    "  MDS({:?}): GPU=[{}, {}, {}, {}], CPU=[{}, {}, {}, {}] {}",
+                                    test_chunks[i],
+                                    gpu_results[0],
+                                    gpu_results[1],
+                                    gpu_results[2],
+                                    gpu_results[3],
+                                    expected[0],
+                                    expected[1],
+                                    expected[2],
+                                    expected[3],
+                                    if matches { "✓" } else { "✗" }
+                                );
+                            }
+                        }
+
+                        println!(
+                            "MDS Matrix Test Summary: {} PASSED, {} FAILED",
+                            pass_count, fail_count
+                        );
+                        if all_match {
+                            println!("🎉 All 4x4 MDS matrix test vectors PASSED!");
+                        } else {
+                            println!("❌ Some 4x4 MDS matrix test vectors FAILED!");
                         }
                     }
                 }
@@ -875,7 +1036,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Debug buffer for main mining (even though we won't use it much here)
-    let main_debug_data = vec![0u32; 250];
+    let main_debug_data = vec![0u32; 400];
     let main_debug_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Main Debug Buffer"),
         contents: bytemuck::cast_slice(&main_debug_data),
@@ -1063,6 +1224,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Run gf_mul tests
     if let Err(e) = tests::test_gf_mul(&device, &queue).await {
         eprintln!("gf_mul tests failed: {}", e);
+    }
+
+    // Run MDS matrix tests
+    if let Err(e) = tests::test_mds_matrix(&device, &queue).await {
+        eprintln!("MDS matrix tests failed: {}", e);
     }
 
     Ok(())
