@@ -1,5 +1,6 @@
 use bytemuck;
 use futures::executor::block_on;
+
 use wgpu::{self, util::DeviceExt};
 
 mod tests;
@@ -116,44 +117,70 @@ fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
 
     // Test vector 1: All zeros
     let input1 = [0u8; 96];
+    println!("=== CPU DEBUG for Test Vector 1 (all zeros) ===");
+    println!("Input bytes: {:?}", &input1[..24]);
+
+    // Manual CPU implementation to see what it produces
     let expected1 = qp_poseidon_core::hash_squeeze_twice(&input1);
-    test_vectors.push((input1, expected1));
-    println!(
-        "Test vector 1 (zeros): input={:?}, expected={:?}",
-        &input1[..8],
-        &expected1[..8]
-    );
 
-    // Test vector 2: Incremental pattern
-    let mut input2 = [0u8; 96];
-    for i in 0..96 {
-        input2[i] = (i % 256) as u8;
+    // Also get debug version to see intermediate states
+    let felts = qp_poseidon_core::serialization::injective_bytes_to_felts::<
+        qp_poseidon_core::serialization::p2_backend::GF,
+    >(&input1);
+    println!("CPU converted to {} field elements:", felts.len());
+    for (i, felt) in felts.iter().enumerate() {
+        println!("  CPU felt[{}] = {} (0x{:016x})", i, felt.0, felt.0);
     }
-    let expected2 = qp_poseidon_core::hash_squeeze_twice(&input2);
-    test_vectors.push((input2, expected2));
+
+    test_vectors.push((input1, expected1));
+    println!("CPU Test vector 1 (zeros): expected={:?}", &expected1[..8]);
+
+    // Test vector 2: Simple 4-byte test to debug conversion
+    let input2 = [1u8, 2u8, 3u8, 4u8]; // Just 4 bytes
+    let felts2 = qp_poseidon_core::serialization::injective_bytes_to_felts::<
+        qp_poseidon_core::serialization::p2_backend::GF,
+    >(&input2);
+    println!("=== CPU DEBUG for 4-byte test ===");
+    println!("Input: {:?}", input2);
+    println!("Expected field elements after injective padding:");
+    for (i, felt) in felts2.iter().enumerate() {
+        println!("  felt[{}] = {} (0x{:08x})", i, felt.0, felt.0);
+    }
     println!(
-        "Test vector 2 (incremental): input={:?}, expected={:?}",
-        &input2[..8],
-        &expected2[..8]
+        "Should be: [0x04030201, 0x00000001] -> [{}, 1]",
+        u32::from_le_bytes([1, 2, 3, 4])
     );
 
-    // Test vector 3: Example mining input (header + nonce)
+    // Test vector 3: Incremental pattern
     let mut input3 = [0u8; 96];
+    for i in 0..96 {
+        input3[i] = (i % 256) as u8;
+    }
+    let expected3 = qp_poseidon_core::hash_squeeze_twice(&input3);
+    test_vectors.push((input3, expected3));
+    println!(
+        "Test vector 3 (incremental): input={:?}, expected={:?}",
+        &input3[..8],
+        &expected3[..8]
+    );
+
+    // Test vector 4: Example mining input (header + nonce)
+    let mut input4 = [0u8; 96];
     // Header (32 bytes)
-    input3[..32].copy_from_slice(&[
+    input4[..32].copy_from_slice(&[
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
         26, 27, 28, 29, 30, 31, 32,
     ]);
     // Nonce (64 bytes) - start with simple pattern
     for i in 32..96 {
-        input3[i] = ((i - 32) % 256) as u8;
+        input4[i] = ((i - 32) % 256) as u8;
     }
-    let expected3 = qp_poseidon_core::hash_squeeze_twice(&input3);
-    test_vectors.push((input3, expected3));
+    let expected4 = qp_poseidon_core::hash_squeeze_twice(&input4);
+    test_vectors.push((input4, expected4));
     println!(
-        "Test vector 3 (mining): input={:?}, expected={:?}",
-        &input3[..8],
-        &expected3[..8]
+        "Test vector 4 (mining): input={:?}, expected={:?}",
+        &input4[..8],
+        &expected4[..8]
     );
 
     test_vectors
@@ -513,17 +540,37 @@ async fn test_gpu_with_vectors(
                 }
 
                 // Print debug information
-                println!("\n=== GPU DEBUG STATES ===");
+                println!("=== GPU DEBUG STATES ===");
                 println!("Initial state: {:?}", &debug_result[0..8]);
                 println!("Input felts: {:?}", &debug_result[24..32]);
-                println!("After 1st absorption: {:?}", &debug_result[48..56]);
-                println!("After 1st permutation: {:?}", &debug_result[72..80]);
-                println!("After 2nd absorption: {:?}", &debug_result[96..104]);
-                println!("After 2nd permutation: {:?}", &debug_result[120..128]);
-                println!("After 3rd absorption: {:?}", &debug_result[144..152]);
-                println!("After padding: {:?}", &debug_result[168..176]);
-                println!("After 3rd permutation: {:?}", &debug_result[192..200]);
-                println!("After 4th permutation: {:?}", &debug_result[216..224]);
+                println!(
+                    "bytes_to_field_elements returned: {:?}",
+                    &debug_result[150..174]
+                );
+
+                // Manual byte conversion verification
+                println!("=== MANUAL BYTE CONVERSION VERIFICATION ===");
+                println!("Simple 4-byte test [1,2,3,4]:");
+                println!("  GPU felt[0] = {} (should be 67305985)", debug_result[13]);
+                println!("  GPU felt[1] = {} (should be 1)", debug_result[14]);
+
+                println!("96-byte zeros test:");
+                println!("  GPU felt[23] = {} (should be 0)", debug_result[15]);
+                println!("  GPU felt[24] = {} (should be 1)", debug_result[16]);
+
+                println!(
+                    "After 1st chunk absorption+permutation: {:?}",
+                    &debug_result[48..56]
+                );
+                println!(
+                    "After 2nd chunk absorption+permutation: {:?}",
+                    &debug_result[72..80]
+                );
+                println!(
+                    "After final absorption (with padding=1): {:?}",
+                    &debug_result[96..104]
+                );
+                println!("After final permutation: {:?}", &debug_result[120..128]);
             }
         } else {
             println!("❌ Test vector {} FAILED - no result computed", i + 1);

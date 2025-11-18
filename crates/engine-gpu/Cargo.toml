@@ -22,7 +22,7 @@ primitive-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-qp-poseidon-core = { path = "../../../qp-poseidon/core" }
+qp-poseidon-core = { path = "../../../qp-poseidon/core", features = ["p2"] }
 qp-poseidon-constants = { path = "../../../qp-poseidon/constants" }
 qp-plonky2 = { path = "../../../qp-plonky2/plonky2" }
 qp-plonky2-field = { path = "../../../qp-plonky2/field" }

@@ -687,33 +687,47 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
     }
 }
 
-// Convert bytes to Goldilocks field elements (proper encoding)
-fn bytes_to_field_elements(input: array<u32, 24>) -> array<GoldilocksField, 12> {
-    var felts: array<GoldilocksField, 12>;
+// Convert bytes to Goldilocks field elements matching reference implementation
+// Reference uses 4 bytes per field element with injective padding, creating 25 field elements from 96 bytes
+fn bytes_to_field_elements(input: array<u32, 24>) -> array<GoldilocksField, 25> {
+    var felts: array<GoldilocksField, 25>;
 
-    // Debug: write raw input to debug buffer
-    for (var i = 0u; i < 8u; i++) {
-        debug_buffer[50u + i] = input[i];
+    // Convert u32 array to bytes (96 bytes total)
+    var bytes: array<u32, 96>;  // Using u32s to store bytes for easier processing
+    for (var i = 0u; i < 24u; i++) {
+        let val = input[i];
+        bytes[i * 4u + 0u] = val & 0xFFu;         // byte 0
+        bytes[i * 4u + 1u] = (val >> 8u) & 0xFFu;  // byte 1
+        bytes[i * 4u + 2u] = (val >> 16u) & 0xFFu; // byte 2
+        bytes[i * 4u + 3u] = (val >> 24u) & 0xFFu; // byte 3
     }
 
-    // Each field element gets 8 bytes = 2 u32s in little-endian format
-    for (var i = 0u; i < 12u; i++) {
-        let idx = i * 2u;
-        if (idx + 1u < 24u) {
-            // Little-endian: low bytes first
-            felts[i] = gf_from_u64_parts(input[idx], input[idx + 1u]);
-        } else if (idx < 24u) {
-            felts[i] = gf_from_u64_parts(input[idx], 0u);
-        } else {
-            felts[i] = gf_zero();
-        }
+    // Apply injective padding: add 1 byte, then pad with zeros to 4-byte alignment
+    var padded_len = 96u + 1u; // 96 bytes + 1 marker byte = 97
+    let padding_needed = (4u - (padded_len % 4u)) % 4u;
+    padded_len = padded_len + padding_needed; // Should be 100 bytes (25 u32s worth)
 
-        // Debug: write first 4 field elements
-        if (i < 4u) {
-            debug_buffer[60u + i * 2u] = felts[i].limb0 | (felts[i].limb1 << 16u);
-            debug_buffer[60u + i * 2u + 1u] = felts[i].limb2 | (felts[i].limb3 << 16u);
-        }
+    // Create padded byte array
+    var padded_bytes: array<u32, 100>;
+    for (var i = 0u; i < 96u; i++) {
+        padded_bytes[i] = bytes[i];
     }
+    padded_bytes[96] = 1u; // End marker
+    for (var i = 97u; i < 100u; i++) {
+        padded_bytes[i] = 0u; // Padding zeros
+    }
+
+    // Convert every 4 bytes to one field element (25 field elements total)
+    for (var i = 0u; i < 25u; i++) {
+        let byte_idx = i * 4u;
+        // Create u32 from 4 bytes in little-endian order
+        let val = padded_bytes[byte_idx] |
+                 (padded_bytes[byte_idx + 1u] << 8u) |
+                 (padded_bytes[byte_idx + 2u] << 16u) |
+                 (padded_bytes[byte_idx + 3u] << 24u);
+        felts[i] = gf_from_u32(val);
+    }
+
     return felts;
 }
 
@@ -737,43 +751,48 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     }
     // debug_write_state(0u, state); // Debug: initial state
 
-    // Convert input to field elements
+    // Convert input to field elements (25 total)
     let input_felts = bytes_to_field_elements(input);
 
     // Debug: write input felts to debug buffer
-    // for (var i = 0u; i < 8u; i++) {
-    //     debug_buffer[24u + i * 2u] = input_felts[i].limb0 | (input_felts[i].limb1 << 16u);
-    //     debug_buffer[24u + i * 2u + 1u] = input_felts[i].limb2 | (input_felts[i].limb3 << 16u);
-    // }
-
-    // Sponge absorption with rate = 4
-    // First chunk: absorb elements 0-3
-    for (var i = 0u; i < 4u; i++) {
-        state[i] = gf_add(state[i], input_felts[i]);
+    for (var i = 0u; i < 8u; i++) {
+        debug_buffer[24u + i * 2u] = input_felts[i].limb0 | (input_felts[i].limb1 << 16u);
+        debug_buffer[24u + i * 2u + 1u] = input_felts[i].limb2 | (input_felts[i].limb3 << 16u);
     }
-    // debug_write_state(48u, state); // Debug: after first absorption
-    poseidon2_permute(&state);
-    // debug_write_state(72u, state); // Debug: after first permutation
 
-    // Second chunk: absorb elements 4-7
-    for (var i = 0u; i < 4u; i++) {
-        state[i] = gf_add(state[i], input_felts[i + 4u]);
+    // Sponge construction matching CPU reference exactly:
+    // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=4
+
+    // Process first 24 elements (6 complete chunks of 4)
+    for (var chunk = 0u; chunk < 6u; chunk++) {
+        // Absorb 4 elements for this chunk
+        for (var i = 0u; i < 4u; i++) {
+            let felt_idx = chunk * 4u + i;
+            state[i] = gf_add(state[i], input_felts[felt_idx]);
+        }
+        // Permute after each complete chunk
+        poseidon2_permute(&state);
+
+        // Debug first few chunks
+        if (chunk == 0u) { debug_write_state(48u, state); }
+        else if (chunk == 1u) { debug_write_state(72u, state); }
     }
-    // debug_write_state(96u, state); // Debug: after second absorption
-    poseidon2_permute(&state);
-    // debug_write_state(120u, state); // Debug: after second permutation
 
-    // Third chunk: absorb elements 8-11
-    for (var i = 0u; i < 4u; i++) {
-        state[i] = gf_add(state[i], input_felts[i + 8u]);
-    }
-    // debug_write_state(144u, state); // Debug: after third absorption
+    // Now we have element 24 (the padding marker = 1) remaining
+    // This goes into buffer position 0, leaving buffer_len = 1
+    state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker
 
-    // Add padding (domain separation)
-    state[0] = gf_add(state[0], gf_one());
-    // debug_write_state(168u, state); // Debug: after padding
+    // CPU finalize_twice() adds another '1' (message-end marker)
+    // This goes into buffer position 1, leaving buffer_len = 2
+    state[1] = gf_add(state[1], gf_one()); // Add message-end '1'
+
+    // CPU then zero-pads remaining buffer positions (positions 2,3 get zeros)
+    // These are already zero in our state, so no action needed
+
+    // Final permutation
+    debug_write_state(96u, state); // Debug: after final absorption with padding
     poseidon2_permute(&state);
-    // debug_write_state(192u, state); // Debug: after third permutation
+    debug_write_state(120u, state); // Debug: after final permutation
 
     // First squeeze - get first 4 field elements
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
@@ -782,7 +801,7 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
 
     // Second squeeze
     poseidon2_permute(&state);
-    // debug_write_state(216u, state); // Debug: after fourth permutation
+    debug_write_state(216u, state); // Debug: after fourth permutation
     let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
@@ -896,7 +915,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         debug_buffer[100] = const_test_state[0].limb0 | (const_test_state[0].limb1 << 16u);
         debug_buffer[101] = const_test_state[0].limb2 | (const_test_state[0].limb3 << 16u);
 
-        // TEST: Full hash function now that multiplication works
+        // TEST: Manual byte-to-field conversion verification
+        // Test 1: Simple 4-byte input [1, 2, 3, 4]
+        var simple_input: array<u32, 24>;
+        for (var i = 0u; i < 24u; i++) {
+            simple_input[i] = 0u;
+        }
+        simple_input[0] = 0x04030201u; // [1, 2, 3, 4] as little-endian u32
+
+        let simple_felts = bytes_to_field_elements(simple_input);
+
+        // Manual calculation: 4 bytes + 1 padding = 5 bytes, padded to 8 bytes = 2 field elements
+        // Should be: [0x04030201, 0x00000001]
+        debug_buffer[13] = simple_felts[0].limb0 | (simple_felts[0].limb1 << 16u); // Should be 0x04030201
+        debug_buffer[14] = simple_felts[1].limb0 | (simple_felts[1].limb1 << 16u); // Should be 0x00000001
+
+        // Test 2: All zeros (current test)
         var test_input: array<u32, 24>;
         for (var i = 0u; i < 8u; i++) {
             test_input[i] = header[i];
@@ -904,6 +938,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         for (var i = 0u; i < 16u; i++) {
             test_input[8u + i] = start_nonce[i];
         }
+
+        let test_felts = bytes_to_field_elements(test_input);
+
+        // For 96 zero bytes: 96 + 1 = 97, padded to 100 = 25 field elements
+        // First 24 should be zero, last should be 1
+        debug_buffer[15] = test_felts[23].limb0 | (test_felts[23].limb1 << 16u); // Should be 0
+        debug_buffer[16] = test_felts[24].limb0 | (test_felts[24].limb1 << 16u); // Should be 1
 
         // Compute actual hash
         let test_hash = poseidon2_hash_squeeze_twice(test_input);
