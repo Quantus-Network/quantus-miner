@@ -11,172 +11,106 @@ struct GfMulTestCase {
     expected: GoldilocksField,
 }
 
-// Represents the GoldilocksField in a WGSL-compatible format (two u32s)
+// Represents the GoldilocksField in a WGSL-compatible format (four u16 limbs stored as u32s)
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct GfWgls {
-    low: u32,
-    high: u32,
+    limb0: u32,
+    limb1: u32,
+    limb2: u32,
+    limb3: u32,
 }
 
 impl From<GoldilocksField> for GfWgls {
     fn from(gf: GoldilocksField) -> Self {
         let val = gf.0;
         Self {
-            low: val as u32,
-            high: (val >> 32) as u32,
+            limb0: (val & 0xFFFF) as u32,
+            limb1: ((val >> 16) & 0xFFFF) as u32,
+            limb2: ((val >> 32) & 0xFFFF) as u32,
+            limb3: ((val >> 48) & 0xFFFF) as u32,
         }
     }
 }
 
 fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
-    println!("Generating gf_mul test vectors...");
+    println!("Generating comprehensive test vectors...");
     let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(12345);
 
-    // Basic edge cases
-    println!("Adding basic edge cases...");
+    // Add the specific failing cases from the log that we fixed
+    println!("Adding previously failing cases for regression testing...");
 
-    // Case 1: 0 * x = 0
-    let a1 = GoldilocksField::ZERO;
-    let b1 = GoldilocksField::from_canonical_u64(123456789);
+    // Test case 1: 0x19a071bdddc16e57 * 0x9f34cc3172d67f12
+    let a1 = GoldilocksField::from_noncanonical_u64(0x19a071bdddc16e57);
+    let b1 = GoldilocksField::from_noncanonical_u64(0x9f34cc3172d67f12);
     vectors.push(GfMulTestCase {
         a: a1,
         b: b1,
         expected: a1 * b1,
     });
 
-    // Case 2: 1 * x = x
-    let a2 = GoldilocksField::ONE;
-    let b2 = GoldilocksField::from_canonical_u64(987654321);
+    // Test case 2: 0x7e92900e25221b88 * 0x967d2999df3fa192
+    let a2 = GoldilocksField::from_noncanonical_u64(0x7e92900e25221b88);
+    let b2 = GoldilocksField::from_noncanonical_u64(0x967d2999df3fa192);
     vectors.push(GfMulTestCase {
         a: a2,
         b: b2,
         expected: a2 * b2,
     });
 
-    // Case 3: x * 1 = x (commutative check)
-    let a3 = GoldilocksField::from_noncanonical_u64(0xDEADBEEFCAFEBABE);
-    let b3 = GoldilocksField::ONE;
+    // Test case 3: 0xd258f723b9f7cbc2 * 0x5ddb844a50f2bd61
+    let a3 = GoldilocksField::from_noncanonical_u64(0xd258f723b9f7cbc2);
+    let b3 = GoldilocksField::from_noncanonical_u64(0x5ddb844a50f2bd61);
     vectors.push(GfMulTestCase {
         a: a3,
         b: b3,
         expected: a3 * b3,
     });
 
-    // Case 4: Small numbers (no overflow in u32*u32)
-    let a4 = GoldilocksField::from_canonical_u64(100);
-    let b4 = GoldilocksField::from_canonical_u64(200);
+    // Test case 4: 0x679ad356dc569f8a * 0x7a0ef9078a5b4fc5
+    let a4 = GoldilocksField::from_noncanonical_u64(0x679ad356dc569f8a);
+    let b4 = GoldilocksField::from_noncanonical_u64(0x7a0ef9078a5b4fc5);
     vectors.push(GfMulTestCase {
         a: a4,
         b: b4,
         expected: a4 * b4,
     });
 
-    // Boundary cases
-    println!("Adding boundary cases...");
+    // Add special cases
+    println!("Adding special cases...");
 
-    // Case 5: u32::MAX
-    let a5 = GoldilocksField::from_canonical_u64(u32::MAX as u64);
-    let b5 = GoldilocksField::from_canonical_u64(u32::MAX as u64);
+    // Zero cases
     vectors.push(GfMulTestCase {
-        a: a5,
-        b: b5,
-        expected: a5 * b5,
+        a: GoldilocksField::ZERO,
+        b: GoldilocksField::from_canonical_u64(123456789),
+        expected: GoldilocksField::ZERO,
     });
 
-    // Case 6: Just above u32::MAX
-    let a6 = GoldilocksField::from_canonical_u64(u32::MAX as u64 + 1);
-    let b6 = GoldilocksField::from_canonical_u64(2);
+    // One cases
+    let val = GoldilocksField::from_canonical_u64(987654321);
     vectors.push(GfMulTestCase {
-        a: a6,
-        b: b6,
-        expected: a6 * b6,
+        a: GoldilocksField::ONE,
+        b: val,
+        expected: val,
     });
 
-    // Case 7: Powers of 2
-    let a7 = GoldilocksField::from_canonical_u64(1u64 << 32);
-    let b7 = GoldilocksField::from_canonical_u64(1u64 << 31);
+    // Small values
+    let small_a = GoldilocksField::from_canonical_u64(u32::MAX as u64);
+    let small_b = GoldilocksField::from_canonical_u64(u32::MAX as u64);
     vectors.push(GfMulTestCase {
-        a: a7,
-        b: b7,
-        expected: a7 * b7,
+        a: small_a,
+        b: small_b,
+        expected: small_a * small_b,
     });
 
-    // Case 8: Large powers of 2
-    let a8 = GoldilocksField::from_canonical_u64(1u64 << 62);
-    let b8 = GoldilocksField::from_canonical_u64(1u64 << 1);
-    vectors.push(GfMulTestCase {
-        a: a8,
-        b: b8,
-        expected: a8 * b8,
-    });
-
-    // Field modulus edge cases
-    println!("Adding field modulus edge cases...");
-
-    // Case 9: Field modulus - 1
-    let a9 = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - 1);
-    let b9 = GoldilocksField::from_canonical_u64(2);
-    vectors.push(GfMulTestCase {
-        a: a9,
-        b: b9,
-        expected: a9 * b9,
-    });
-
-    // Case 10: Field modulus - 1 squared
-    let a10 = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - 1);
-    let b10 = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - 1);
-    vectors.push(GfMulTestCase {
-        a: a10,
-        b: b10,
-        expected: a10 * b10,
-    });
-
-    // Case 11: Large numbers that will cause reduction
-    let a11 = GoldilocksField::from_noncanonical_u64(0xABCDEF1234567890);
-    let b11 = GoldilocksField::from_noncanonical_u64(0x1122334455667788);
-    vectors.push(GfMulTestCase {
-        a: a11,
-        b: b11,
-        expected: a11 * b11,
-    });
-
-    // Mixed size cases
-    println!("Adding mixed size cases...");
-
-    // Case 12: Small * Large
-    let a12 = GoldilocksField::from_canonical_u64(3);
-    let b12 = GoldilocksField::from_noncanonical_u64(0xFFFFFFFFFFFFFFF0);
-    vectors.push(GfMulTestCase {
-        a: a12,
-        b: b12,
-        expected: a12 * b12,
-    });
-
-    // Case 13: Large * Small
-    let a13 = GoldilocksField::from_noncanonical_u64(0xFFFFFFFFFFFFFFF0);
-    let b13 = GoldilocksField::from_canonical_u64(7);
-    vectors.push(GfMulTestCase {
-        a: a13,
-        b: b13,
-        expected: a13 * b13,
-    });
-
-    // Random test cases
+    // Add random test cases
     println!("Adding random test cases...");
 
-    // Use a fixed seed for reproducible tests
-    let mut rng = ChaCha8Rng::seed_from_u64(0x123456789ABCDEF0);
-
-    // Generate 50 random test cases
-    for _ in 0..50 {
-        // Use from_noncanonical_u64 to handle any u64 value safely
-        let a_val = rng.gen::<u64>();
-        let b_val = rng.gen::<u64>();
-
-        let a = GoldilocksField::from_noncanonical_u64(a_val);
-        let b = GoldilocksField::from_noncanonical_u64(b_val);
-
+    // Random small values (both operands < 2^32)
+    for _ in 0..20 {
+        let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        let b = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -184,18 +118,33 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
         });
     }
 
-    // Special random cases focusing on problematic ranges
-    println!("Adding focused random cases...");
+    // Random mixed cases (one small, one large)
+    for _ in 0..20 {
+        let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
+        vectors.push(GfMulTestCase {
+            a,
+            b,
+            expected: a * b,
+        });
+    }
 
-    // Cases where one operand has high=0, other has high!=0
+    // Random large values (both operands >= 2^32)
+    for _ in 0..30 {
+        let a = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        vectors.push(GfMulTestCase {
+            a,
+            b,
+            expected: a * b,
+        });
+    }
+
+    // Random values near the field modulus
     for _ in 0..10 {
-        let small_val = rng.gen::<u32>() as u64;
-        // Generate a large value and use from_noncanonical_u64 to handle safely
-        let large_val = rng.gen_range((1u64 << 32)..u64::MAX);
-
-        let a = GoldilocksField::from_canonical_u64(small_val);
-        let b = GoldilocksField::from_noncanonical_u64(large_val);
-
+        let offset = rng.gen::<u32>() as u64;
+        let a = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
+        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -203,38 +152,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
         });
     }
 
-    // Cases where both operands are large (both high!=0)
-    for _ in 0..10 {
-        let a_val = rng.gen_range((1u64 << 32)..u64::MAX);
-        let b_val = rng.gen_range((1u64 << 32)..u64::MAX);
-
-        let a = GoldilocksField::from_noncanonical_u64(a_val);
-        let b = GoldilocksField::from_noncanonical_u64(b_val);
-
-        vectors.push(GfMulTestCase {
-            a,
-            b,
-            expected: a * b,
-        });
-    }
-
-    // Cases near field boundaries
-    for _ in 0..5 {
-        let offset = rng.gen_range(1..1000);
-        let near_max = GoldilocksField::ORDER - offset;
-        let other = rng.gen_range(2..100);
-
-        let a = GoldilocksField::from_canonical_u64(near_max);
-        let b = GoldilocksField::from_canonical_u64(other);
-
-        vectors.push(GfMulTestCase {
-            a,
-            b,
-            expected: a * b,
-        });
-    }
-
-    println!("Generated {} total test vectors.", vectors.len());
+    println!("Generated {} comprehensive test vectors.", vectors.len());
     vectors
 }
 
@@ -351,52 +269,91 @@ pub async fn test_gf_mul(
         drop(data);
         staging_buffer.unmap();
 
-        let gpu_result_u64 = (result_wgls.high as u64) << 32 | (result_wgls.low as u64);
+        let gpu_result_u64 = (result_wgls.limb0 as u64)
+            | ((result_wgls.limb1 as u64) << 16)
+            | ((result_wgls.limb2 as u64) << 32)
+            | ((result_wgls.limb3 as u64) << 48);
         let gpu_result = GoldilocksField(gpu_result_u64);
 
         let expected_wgls: GfWgls = vector.expected.into();
 
-        // Progress indicator every 10 tests
-        if i % 10 == 0 || i < 20 {
-            println!(
-                "Progress: {}/{} ({:.1}%)",
-                i + 1,
-                total_tests,
-                (i + 1) as f32 / total_tests as f32 * 100.0
-            );
-        }
+        // Show detailed comparison for every test case
+        println!(
+            "\nTest case {}: 0x{:016x} * 0x{:016x}",
+            i + 1,
+            vector.a.0,
+            vector.b.0
+        );
+
+        // Analyze the operands
+        let a_limbs = [
+            (vector.a.0 & 0xFFFF) as u32,
+            ((vector.a.0 >> 16) & 0xFFFF) as u32,
+            ((vector.a.0 >> 32) & 0xFFFF) as u32,
+            ((vector.a.0 >> 48) & 0xFFFF) as u32,
+        ];
+        let b_limbs = [
+            (vector.b.0 & 0xFFFF) as u32,
+            ((vector.b.0 >> 16) & 0xFFFF) as u32,
+            ((vector.b.0 >> 32) & 0xFFFF) as u32,
+            ((vector.b.0 >> 48) & 0xFFFF) as u32,
+        ];
+
+        println!(
+            "  a: [{}, {}, {}, {}]",
+            a_limbs[0], a_limbs[1], a_limbs[2], a_limbs[3]
+        );
+        println!(
+            "  b: [{}, {}, {}, {}]",
+            b_limbs[0], b_limbs[1], b_limbs[2], b_limbs[3]
+        );
+
+        // Determine which multiplication path this should take
+        let a_high_nonzero = a_limbs[2] != 0 || a_limbs[3] != 0;
+        let b_high_nonzero = b_limbs[2] != 0 || b_limbs[3] != 0;
+        let path = if !a_high_nonzero && !b_high_nonzero {
+            "Step 1: Both small (high limbs=0)"
+        } else if !a_high_nonzero || !b_high_nonzero {
+            "Step 2: Mixed case (one has high limbs=0)"
+        } else {
+            "Step 3: Both large (both have high limbs≠0)"
+        };
+        println!("  Expected path: {}", path);
+
+        println!(
+            "  CPU expected: 0x{:016x} [{}, {}, {}, {}]",
+            vector.expected.0,
+            expected_wgls.limb0,
+            expected_wgls.limb1,
+            expected_wgls.limb2,
+            expected_wgls.limb3
+        );
+        println!(
+            "  GPU result:   0x{:016x} [{}, {}, {}, {}]",
+            gpu_result.0,
+            result_wgls.limb0,
+            result_wgls.limb1,
+            result_wgls.limb2,
+            result_wgls.limb3
+        );
+
+        // Show the exact differences
+        let diff_limb0 = result_wgls.limb0 as i64 - expected_wgls.limb0 as i64;
+        let diff_limb1 = result_wgls.limb1 as i64 - expected_wgls.limb1 as i64;
+        let diff_limb2 = result_wgls.limb2 as i64 - expected_wgls.limb2 as i64;
+        let diff_limb3 = result_wgls.limb3 as i64 - expected_wgls.limb3 as i64;
+        println!(
+            "  Differences: limb0={:+}, limb1={:+}, limb2={:+}, limb3={:+}",
+            diff_limb0, diff_limb1, diff_limb2, diff_limb3
+        );
 
         // The GPU result might not be canonical, so we need to canonicalize it before comparing.
         if gpu_result.to_canonical_u64() == vector.expected.to_canonical_u64() {
             passed_tests += 1;
-
-            // Only show details for first few tests or if verbose mode
-            if i < 5 {
-                println!("Test case {} ✅ PASSED", i + 1);
-                println!(
-                    "  a: 0x{:016x}, b: 0x{:016x} = 0x{:016x}",
-                    vector.a.0, vector.b.0, vector.expected.0
-                );
-            }
+            println!("  Status: ✅ PASSED");
         } else {
             failed_tests.push(i + 1);
-            println!("Test case {} ❌ FAILED", i + 1);
-            println!(
-                "  a: 0x{:016x} ({}, {})",
-                vector.a.0, a_wgls.low, a_wgls.high
-            );
-            println!(
-                "  b: 0x{:016x} ({}, {})",
-                vector.b.0, b_wgls.low, b_wgls.high
-            );
-            println!(
-                "  CPU expected: 0x{:016x} ({}, {})",
-                vector.expected.0, expected_wgls.low, expected_wgls.high
-            );
-            println!(
-                "  GPU result:   0x{:016x} ({}, {})",
-                gpu_result.0, result_wgls.low, result_wgls.high
-            );
+            println!("  Status: ❌ FAILED");
         }
     }
 
