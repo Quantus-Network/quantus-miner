@@ -169,8 +169,24 @@ pub async fn test_gf_mul(
 
     println!("Running {} test cases...", total_tests);
 
-    // Load the full mining shader code
-    let shader_source = include_str!("gf_mul_test.wgsl");
+    // Use the mining shader but create a simple test wrapper
+    let shader_source = format!(
+        "
+{}
+
+// Simple test entry point that just multiplies two field elements
+@group(0) @binding(0) var<storage, read> input_a: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read> input_b: array<GoldilocksField>;
+@group(0) @binding(2) var<storage, read_write> output: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn gf_mul_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let i = global_id.x;
+    output[i] = gf_mul(input_a[i], input_b[i]);
+}}
+",
+        include_str!("mining.wgsl")
+    );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gf_mul test shader"),
@@ -277,83 +293,81 @@ pub async fn test_gf_mul(
 
         let expected_wgls: GfWgls = vector.expected.into();
 
-        // Show detailed comparison for every test case
-        println!(
-            "\nTest case {}: 0x{:016x} * 0x{:016x}",
-            i + 1,
-            vector.a.0,
-            vector.b.0
-        );
-
-        // Analyze the operands
-        let a_limbs = [
-            (vector.a.0 & 0xFFFF) as u32,
-            ((vector.a.0 >> 16) & 0xFFFF) as u32,
-            ((vector.a.0 >> 32) & 0xFFFF) as u32,
-            ((vector.a.0 >> 48) & 0xFFFF) as u32,
-        ];
-        let b_limbs = [
-            (vector.b.0 & 0xFFFF) as u32,
-            ((vector.b.0 >> 16) & 0xFFFF) as u32,
-            ((vector.b.0 >> 32) & 0xFFFF) as u32,
-            ((vector.b.0 >> 48) & 0xFFFF) as u32,
-        ];
-
-        println!(
-            "  a: [{}, {}, {}, {}]",
-            a_limbs[0], a_limbs[1], a_limbs[2], a_limbs[3]
-        );
-        println!(
-            "  b: [{}, {}, {}, {}]",
-            b_limbs[0], b_limbs[1], b_limbs[2], b_limbs[3]
-        );
-
-        // Determine which multiplication path this should take
-        let a_high_nonzero = a_limbs[2] != 0 || a_limbs[3] != 0;
-        let b_high_nonzero = b_limbs[2] != 0 || b_limbs[3] != 0;
-        let path = if !a_high_nonzero && !b_high_nonzero {
-            "Step 1: Both small (high limbs=0)"
-        } else if !a_high_nonzero || !b_high_nonzero {
-            "Step 2: Mixed case (one has high limbs=0)"
-        } else {
-            "Step 3: Both large (both have high limbs≠0)"
-        };
-        println!("  Expected path: {}", path);
-
-        println!(
-            "  CPU expected: 0x{:016x} [{}, {}, {}, {}]",
-            vector.expected.0,
-            expected_wgls.limb0,
-            expected_wgls.limb1,
-            expected_wgls.limb2,
-            expected_wgls.limb3
-        );
-        println!(
-            "  GPU result:   0x{:016x} [{}, {}, {}, {}]",
-            gpu_result.0,
-            result_wgls.limb0,
-            result_wgls.limb1,
-            result_wgls.limb2,
-            result_wgls.limb3
-        );
-
-        // Show the exact differences
-        let diff_limb0 = result_wgls.limb0 as i64 - expected_wgls.limb0 as i64;
-        let diff_limb1 = result_wgls.limb1 as i64 - expected_wgls.limb1 as i64;
-        let diff_limb2 = result_wgls.limb2 as i64 - expected_wgls.limb2 as i64;
-        let diff_limb3 = result_wgls.limb3 as i64 - expected_wgls.limb3 as i64;
-        println!(
-            "  Differences: limb0={:+}, limb1={:+}, limb2={:+}, limb3={:+}",
-            diff_limb0, diff_limb1, diff_limb2, diff_limb3
-        );
-
         // The GPU result might not be canonical, so we need to canonicalize it before comparing.
         if gpu_result.to_canonical_u64() == vector.expected.to_canonical_u64() {
             passed_tests += 1;
-            println!("  Status: ✅ PASSED");
         } else {
             failed_tests.push(i + 1);
-            println!("  Status: ❌ FAILED");
+
+            // Only show detailed output for failures
+            println!(
+                "\nTest case {} FAILED: 0x{:016x} * 0x{:016x}",
+                i + 1,
+                vector.a.0,
+                vector.b.0
+            );
+
+            // Analyze the operands
+            let a_limbs = [
+                (vector.a.0 & 0xFFFF) as u32,
+                ((vector.a.0 >> 16) & 0xFFFF) as u32,
+                ((vector.a.0 >> 32) & 0xFFFF) as u32,
+                ((vector.a.0 >> 48) & 0xFFFF) as u32,
+            ];
+            let b_limbs = [
+                (vector.b.0 & 0xFFFF) as u32,
+                ((vector.b.0 >> 16) & 0xFFFF) as u32,
+                ((vector.b.0 >> 32) & 0xFFFF) as u32,
+                ((vector.b.0 >> 48) & 0xFFFF) as u32,
+            ];
+
+            println!(
+                "  a: [{}, {}, {}, {}]",
+                a_limbs[0], a_limbs[1], a_limbs[2], a_limbs[3]
+            );
+            println!(
+                "  b: [{}, {}, {}, {}]",
+                b_limbs[0], b_limbs[1], b_limbs[2], b_limbs[3]
+            );
+
+            // Determine which multiplication path this should take
+            let a_high_nonzero = a_limbs[2] != 0 || a_limbs[3] != 0;
+            let b_high_nonzero = b_limbs[2] != 0 || b_limbs[3] != 0;
+            let path = if !a_high_nonzero && !b_high_nonzero {
+                "Step 1: Both small (high limbs=0)"
+            } else if !a_high_nonzero || !b_high_nonzero {
+                "Step 2: Mixed case (one has high limbs=0)"
+            } else {
+                "Step 3: Both large (both have high limbs≠0)"
+            };
+            println!("  Expected path: {}", path);
+
+            println!(
+                "  CPU expected: 0x{:016x} [{}, {}, {}, {}]",
+                vector.expected.0,
+                expected_wgls.limb0,
+                expected_wgls.limb1,
+                expected_wgls.limb2,
+                expected_wgls.limb3
+            );
+            println!(
+                "  GPU result:   0x{:016x} [{}, {}, {}, {}]",
+                gpu_result.0,
+                result_wgls.limb0,
+                result_wgls.limb1,
+                result_wgls.limb2,
+                result_wgls.limb3
+            );
+
+            // Show the exact differences
+            let diff_limb0 = result_wgls.limb0 as i64 - expected_wgls.limb0 as i64;
+            let diff_limb1 = result_wgls.limb1 as i64 - expected_wgls.limb1 as i64;
+            let diff_limb2 = result_wgls.limb2 as i64 - expected_wgls.limb2 as i64;
+            let diff_limb3 = result_wgls.limb3 as i64 - expected_wgls.limb3 as i64;
+            println!(
+                "  Differences: limb0={:+}, limb1={:+}, limb2={:+}, limb3={:+}",
+                diff_limb0, diff_limb1, diff_limb2, diff_limb3
+            );
         }
     }
 
