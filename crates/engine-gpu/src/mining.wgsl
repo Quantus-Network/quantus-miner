@@ -260,12 +260,6 @@ fn gf_compare(a: GoldilocksField, b: GoldilocksField) -> u32 {
 
 // Goldilocks field addition
 fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // Debug: write inputs to buffer (convert to old format for debugging)
-    debug_buffer[20] = a.limb0 | (a.limb1 << 16u);
-    debug_buffer[21] = a.limb2 | (a.limb3 << 16u);
-    debug_buffer[22] = b.limb0 | (b.limb1 << 16u);
-    debug_buffer[23] = b.limb2 | (b.limb3 << 16u);
-
     // Add limb by limb with carry propagation
     let add0 = u16_add_with_carry(a.limb0, b.limb0, 0u);
     let add1 = u16_add_with_carry(a.limb1, b.limb1, add0.y);
@@ -294,11 +288,6 @@ fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
         let p_sub3 = u16_sub_with_borrow(result.limb3, P_LIMB3, p_sub2.y);
         result = GoldilocksField(p_sub0.x, p_sub1.x, p_sub2.x, p_sub3.x);
     }
-
-    // Debug: write results to buffer (convert to old format)
-    debug_buffer[24] = result.limb0 | (result.limb1 << 16u);
-    debug_buffer[25] = result.limb2 | (result.limb3 << 16u);
-    debug_buffer[26] = add3.y;
 
     return result;
 }
@@ -572,29 +561,6 @@ fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
 
 // Simple test function to verify basic field operations
 fn test_field_operations() -> bool {
-    // Write hardcoded values first to test if debug buffer works
-    debug_buffer[1] = 123u;
-    debug_buffer[2] = 456u;
-
-    // Test gf_zero
-    let zero = gf_zero();
-    debug_buffer[3] = zero.limb0 | (zero.limb1 << 16u);
-    debug_buffer[4] = zero.limb2 | (zero.limb3 << 16u);
-
-    // Test gf_one - write immediately after creation
-    let one = gf_one();
-    debug_buffer[5] = one.limb0 | (one.limb1 << 16u);
-    debug_buffer[6] = one.limb2 | (one.limb3 << 16u);
-
-    // Hardcode test: create GoldilocksField(1,0,0,0) manually
-    let manual_one = GoldilocksField(1u, 0u, 0u, 0u);
-    debug_buffer[7] = manual_one.limb0 | (manual_one.limb1 << 16u);
-    debug_buffer[8] = manual_one.limb2 | (manual_one.limb3 << 16u);
-
-    // Test if functions can return correct values
-    debug_buffer[11] = 777u;
-    debug_buffer[12] = 888u;
-
     return true;
 }
 
@@ -623,6 +589,8 @@ fn linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
         result[i] = gf_zero();
     }
 
+
+
     // Circulant matrix multiplication: result[i] = sum(matrix[i][j] * state[j])
     // For circulant matrix, matrix[i][j] = first_row[(j - i + WIDTH) % WIDTH]
     for (var i = 0u; i < 12u; i++) {
@@ -640,10 +608,23 @@ fn linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
         }
     }
 
+    // Debug: Write all 4 elements after linear layer calculation
+    debug_buffer[140] = result[0].limb0 | (result[0].limb1 << 16u);
+    debug_buffer[141] = result[0].limb2 | (result[0].limb3 << 16u);
+    debug_buffer[142] = result[1].limb0 | (result[1].limb1 << 16u);
+    debug_buffer[143] = result[1].limb2 | (result[1].limb3 << 16u);
+    debug_buffer[144] = result[2].limb0 | (result[2].limb1 << 16u);
+    debug_buffer[145] = result[2].limb2 | (result[2].limb3 << 16u);
+    debug_buffer[146] = result[3].limb0 | (result[3].limb1 << 16u);
+    debug_buffer[147] = result[3].limb2 | (result[3].limb3 << 16u);
+
     // Copy result back to state atomically
     for (var i = 0u; i < 12u; i++) {
         (*state)[i] = result[i];
     }
+
+    // Mark which linear layer call this is
+    debug_buffer[58] += 1u; // Increment call counter
 }
 
 // Fixed Poseidon2 permutation with proper structure
@@ -848,89 +829,29 @@ fn is_below_target(hash: array<u32, 16>, difficulty_tgt: array<u32, 16>) -> bool
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let thread_id = id.x;
 
-    // Simple debug test - write to debug buffer immediately
-    debug_buffer[0] = 9999u;  // Global marker that shader ran
-    debug_buffer[1] = thread_id;  // Which thread this is
-
     if (thread_id == 0u) {
-        // Thread 0 specific tests
-        debug_buffer[2] = 1111u;  // Thread 0 marker
-        debug_buffer[3] = 2u;      // Simple value
-        debug_buffer[4] = 1u + 1u; // Simple arithmetic
+        // SIMPLE LINEAR LAYER TEST
+        var test_state: array<GoldilocksField, 12>;
 
-        // Test field functions
-        let one = gf_one();
-        debug_buffer[5] = one.limb0 | (one.limb1 << 16u);
-        debug_buffer[6] = one.limb2 | (one.limb3 << 16u);
-
-        // Test field addition
-        let two = gf_add(one, one);
-        debug_buffer[7] = two.limb0 | (two.limb1 << 16u);
-        debug_buffer[8] = two.limb2 | (two.limb3 << 16u);
-
-        // Test S-box function directly
-        let test_val = gf_from_u32(2u);  // Test with 2
-        let sbox_result = sbox(test_val);
-        debug_buffer[9] = sbox_result.limb0 | (sbox_result.limb1 << 16u);
-        debug_buffer[10] = sbox_result.limb2 | (sbox_result.limb3 << 16u);
-
-        // Test with known value: sbox(1) = 1^7 = 1
-        let sbox_one = sbox(one);
-        debug_buffer[11] = sbox_one.limb0 | (sbox_one.limb1 << 16u);
-        debug_buffer[12] = sbox_one.limb2 | (sbox_one.limb3 << 16u);
-
-        // Test MDS matrix multiplication directly
-        var mds_test_state: array<GoldilocksField, 12>;
+        // Initialize with values [1,2,3,4,5,6,7,8,9,10,11,12]
         for (var i = 0u; i < 12u; i++) {
-            mds_test_state[i] = gf_zero();
-        }
-        mds_test_state[0] = one;  // Put 1 in first position
-
-        // Write MDS initial state
-        for (var i = 0u; i < 4u; i++) {
-            debug_buffer[80u + i * 2u] = mds_test_state[i].limb0 | (mds_test_state[i].limb1 << 16u);
-            debug_buffer[80u + i * 2u + 1u] = mds_test_state[i].limb2 | (mds_test_state[i].limb3 << 16u);
+            test_state[i] = gf_from_u32(i + 1u);
         }
 
-        // Apply ONLY linear layer (MDS matrix)
-        linear_layer(&mds_test_state);
-
-        // Write MDS result state
-        for (var i = 0u; i < 4u; i++) {
-            debug_buffer[90u + i * 2u] = mds_test_state[i].limb0 | (mds_test_state[i].limb1 << 16u);
-            debug_buffer[90u + i * 2u + 1u] = mds_test_state[i].limb2 | (mds_test_state[i].limb3 << 16u);
-        }
-
-        // Test simple addition of round constants
-        var const_test_state: array<GoldilocksField, 12>;
+        // Write input values
         for (var i = 0u; i < 12u; i++) {
-            const_test_state[i] = gf_zero();
+            debug_buffer[i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
         }
-        const_test_state[0] = one;
 
-        // Add first internal round constant to first element
-        const_test_state[0] = gf_add(const_test_state[0], gf_from_const(INTERNAL_CONSTANTS[0]));
+        // Apply linear layer
+        linear_layer(&test_state);
 
-        // Write constant addition result
-        debug_buffer[100] = const_test_state[0].limb0 | (const_test_state[0].limb1 << 16u);
-        debug_buffer[101] = const_test_state[0].limb2 | (const_test_state[0].limb3 << 16u);
-
-        // TEST: Manual byte-to-field conversion verification
-        // Test 1: Simple 4-byte input [1, 2, 3, 4]
-        var simple_input: array<u32, 24>;
-        for (var i = 0u; i < 24u; i++) {
-            simple_input[i] = 0u;
+        // Write output values
+        for (var i = 0u; i < 12u; i++) {
+            debug_buffer[12 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
         }
-        simple_input[0] = 0x04030201u; // [1, 2, 3, 4] as little-endian u32
 
-        let simple_felts = bytes_to_field_elements(simple_input);
-
-        // Manual calculation: 4 bytes + 1 padding = 5 bytes, padded to 8 bytes = 2 field elements
-        // Should be: [0x04030201, 0x00000001]
-        debug_buffer[13] = simple_felts[0].limb0 | (simple_felts[0].limb1 << 16u); // Should be 0x04030201
-        debug_buffer[14] = simple_felts[1].limb0 | (simple_felts[1].limb1 << 16u); // Should be 0x00000001
-
-        // Test 2: All zeros (current test)
+        // Run normal hash
         var test_input: array<u32, 24>;
         for (var i = 0u; i < 8u; i++) {
             test_input[i] = header[i];
@@ -939,23 +860,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             test_input[8u + i] = start_nonce[i];
         }
 
-        let test_felts = bytes_to_field_elements(test_input);
-
-        // For 96 zero bytes: 96 + 1 = 97, padded to 100 = 25 field elements
-        // First 24 should be zero, last should be 1
-        debug_buffer[15] = test_felts[23].limb0 | (test_felts[23].limb1 << 16u); // Should be 0
-        debug_buffer[16] = test_felts[24].limb0 | (test_felts[24].limb1 << 16u); // Should be 1
-
-        // Compute actual hash
         let test_hash = poseidon2_hash_squeeze_twice(test_input);
 
-        // Store result for testing
-        results[0] = 1u; // Force success flag to see debug output
+        results[0] = 1u;
         for (var i = 0u; i < 16u; i++) {
-            results[i + 1u] = start_nonce[i]; // Store nonce
-        }
-        for (var i = 0u; i < 16u; i++) {
-            results[i + 17u] = test_hash[i]; // Store actual hash
+            results[i + 1u] = start_nonce[i];
+            results[i + 17u] = test_hash[i];
         }
     }
 

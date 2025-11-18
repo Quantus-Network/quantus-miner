@@ -540,37 +540,36 @@ async fn test_gpu_with_vectors(
                 }
 
                 // Print debug information
-                println!("=== GPU DEBUG STATES ===");
-                println!("Initial state: {:?}", &debug_result[0..8]);
-                println!("Input felts: {:?}", &debug_result[24..32]);
-                println!(
-                    "bytes_to_field_elements returned: {:?}",
-                    &debug_result[150..174]
-                );
+                println!("=== LINEAR LAYER TEST ===");
+                println!("Input state [1,2,3,4,5,6,7,8,9,10,11,12]:");
+                for i in 0..12 {
+                    println!("  Element {}: {} (should be {})", i, debug_result[i], i + 1);
+                }
+                println!("Output after linear layer:");
+                for i in 0..12 {
+                    println!("  Element {}: {}", i, debug_result[12 + i]);
+                }
 
-                // Manual byte conversion verification
-                println!("=== MANUAL BYTE CONVERSION VERIFICATION ===");
-                println!("Simple 4-byte test [1,2,3,4]:");
-                println!("  GPU felt[0] = {} (should be 67305985)", debug_result[13]);
-                println!("  GPU felt[1] = {} (should be 1)", debug_result[14]);
+                // Check linear layer state tracking
+                println!("=== LINEAR LAYER STATE TRACKING ===");
+                println!("Linear layer calls: {}", debug_result[58]);
+                println!("Elements after linear layer (from current debug):");
+                for i in 0..4 {
+                    println!(
+                        "  Element {}: ({}, {})",
+                        i,
+                        debug_result[140 + i * 2],
+                        debug_result[140 + i * 2 + 1]
+                    );
+                }
 
-                println!("96-byte zeros test:");
-                println!("  GPU felt[23] = {} (should be 0)", debug_result[15]);
-                println!("  GPU felt[24] = {} (should be 1)", debug_result[16]);
-
-                println!(
-                    "After 1st chunk absorption+permutation: {:?}",
-                    &debug_result[48..56]
-                );
-                println!(
-                    "After 2nd chunk absorption+permutation: {:?}",
-                    &debug_result[72..80]
-                );
-                println!(
-                    "After final absorption (with padding=1): {:?}",
-                    &debug_result[96..104]
-                );
-                println!("After final permutation: {:?}", &debug_result[120..128]);
+                if (debug_result[144] == 0 && debug_result[145] == 0)
+                    || (debug_result[146] == 0 && debug_result[147] == 0)
+                {
+                    println!("❌ Elements 2 or 3 became zero in linear layer");
+                } else {
+                    println!("✅ Elements 2,3 stayed non-zero through linear layer");
+                }
             }
         } else {
             println!("❌ Test vector {} FAILED - no result computed", i + 1);
