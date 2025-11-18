@@ -1,5 +1,7 @@
 use bytemuck;
 use futures::executor::block_on;
+use qp_plonky2_field::goldilocks_field::GoldilocksField;
+use qp_plonky2_field::types::{Field, PrimeField64};
 
 use wgpu::{self, util::DeviceExt};
 
@@ -117,10 +119,10 @@ fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
 
     // Test vector 1: All zeros
     let input1 = [0u8; 96];
-    println!("=== CPU DEBUG for Test Vector 1 (all zeros) ===");
+    println!("=== CPU SPONGE DEBUG for Test Vector 1 (all zeros) ===");
     println!("Input bytes: {:?}", &input1[..24]);
 
-    // Manual CPU implementation to see what it produces
+    // Manual CPU implementation with sponge debugging
     let expected1 = qp_poseidon_core::hash_squeeze_twice(&input1);
 
     // Also get debug version to see intermediate states
@@ -131,6 +133,36 @@ fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
     for (i, felt) in felts.iter().enumerate() {
         println!("  CPU felt[{}] = {} (0x{:016x})", i, felt.0, felt.0);
     }
+
+    // DIRECT PERMUTATION COMPARISON
+    println!("=== CPU vs GPU PERMUTATION COMPARISON ===");
+
+    // Test case 1: All zeros (same as first sponge permutation)
+    let zeros_input = [0u64; 12];
+    let cpu_zeros_result = qp_poseidon_core::test_single_permutation(&zeros_input);
+    println!("CPU permutation([0,0,0,0,0,0,0,0,0,0,0,0]):");
+    println!(
+        "  Result: [{}, {}, {}, {}]",
+        cpu_zeros_result[0], cpu_zeros_result[1], cpu_zeros_result[2], cpu_zeros_result[3]
+    );
+
+    // Test case 2: Sequential values
+    let seq_input = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    let cpu_seq_result = qp_poseidon_core::test_single_permutation(&seq_input);
+    println!("CPU permutation([1,2,3,4,5,6,7,8,9,10,11,12]):");
+    println!(
+        "  Result: [{}, {}, {}, {}]",
+        cpu_seq_result[0], cpu_seq_result[1], cpu_seq_result[2], cpu_seq_result[3]
+    );
+
+    // Test case 3: First element 1, rest zeros
+    let first_one_input = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let cpu_first_result = qp_poseidon_core::test_single_permutation(&first_one_input);
+    println!("CPU permutation([1,0,0,0,0,0,0,0,0,0,0,0]):");
+    println!(
+        "  Result: [{}, {}, {}, {}]",
+        cpu_first_result[0], cpu_first_result[1], cpu_first_result[2], cpu_first_result[3]
+    );
 
     test_vectors.push((input1, expected1));
     println!("CPU Test vector 1 (zeros): expected={:?}", &expected1[..8]);
@@ -158,11 +190,6 @@ fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
     }
     let expected3 = qp_poseidon_core::hash_squeeze_twice(&input3);
     test_vectors.push((input3, expected3));
-    println!(
-        "Test vector 3 (incremental): input={:?}, expected={:?}",
-        &input3[..8],
-        &expected3[..8]
-    );
 
     // Test vector 4: Example mining input (header + nonce)
     let mut input4 = [0u8; 96];
@@ -177,11 +204,6 @@ fn generate_test_vectors() -> Vec<([u8; 96], [u8; 64])> {
     }
     let expected4 = qp_poseidon_core::hash_squeeze_twice(&input4);
     test_vectors.push((input4, expected4));
-    println!(
-        "Test vector 4 (mining): input={:?}, expected={:?}",
-        &input4[..8],
-        &expected4[..8]
-    );
 
     test_vectors
 }
@@ -539,28 +561,233 @@ async fn test_gpu_with_vectors(
                     );
                 }
 
-                // Print debug information
+                // Print debug information - this section is now moved below
+
+                // Check S-box test results
+                println!("=== S-BOX TEST ===");
+                println!("sbox(0) = {} (should be 0)", debug_result[0]);
+                println!("sbox(1) = {} (should be 1)", debug_result[1]);
+                println!("sbox(2) = {} (should be 128)", debug_result[2]);
+
+                // Check detailed constants verification
+                println!("=== DETAILED ROUND CONSTANTS VERIFICATION ===");
+                if debug_result.len() > 225 {
+                    println!(
+                        "Raw INTERNAL_CONSTANTS[0]: low={}, high={}",
+                        debug_result[200], debug_result[201]
+                    );
+                    println!(
+                        "Raw INTERNAL_CONSTANTS[1]: low={}, high={}",
+                        debug_result[202], debug_result[203]
+                    );
+                    println!(
+                        "Raw INTERNAL_CONSTANTS[21]: low={}, high={}",
+                        debug_result[204], debug_result[205]
+                    );
+
+                    println!(
+                        "Converted INTERNAL_CONSTANTS[0]: ({}, {})",
+                        debug_result[210], debug_result[211]
+                    );
+                    println!(
+                        "Converted INTERNAL_CONSTANTS[1]: ({}, {})",
+                        debug_result[212], debug_result[213]
+                    );
+                    println!(
+                        "Converted INTERNAL_CONSTANTS[21]: ({}, {})",
+                        debug_result[214], debug_result[215]
+                    );
+
+                    println!(
+                        "Raw INITIAL_EXTERNAL_CONSTANTS[0][0]: low={}, high={}",
+                        debug_result[220], debug_result[221]
+                    );
+                    println!(
+                        "Converted INITIAL_EXTERNAL_CONSTANTS[0][0]: ({}, {})",
+                        debug_result[222], debug_result[223]
+                    );
+
+                    // Compare with expected values from constants
+                    let expected_const0 =
+                        qp_poseidon_constants::POSEIDON2_INTERNAL_CONSTANTS_RAW[0];
+                    println!(
+                        "Expected INTERNAL_CONSTANTS[0]: 0x{:016x} = ({}, {})",
+                        expected_const0,
+                        (expected_const0 & 0xFFFFFFFF) as u32,
+                        (expected_const0 >> 32) as u32
+                    );
+
+                    let expected_const21 =
+                        qp_poseidon_constants::POSEIDON2_INTERNAL_CONSTANTS_RAW[21];
+                    println!(
+                        "Expected INTERNAL_CONSTANTS[21]: 0x{:016x} = ({}, {})",
+                        expected_const21,
+                        (expected_const21 & 0xFFFFFFFF) as u32,
+                        (expected_const21 >> 32) as u32
+                    );
+
+                    let expected_ext_const0 =
+                        qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0][0];
+                    println!(
+                        "Expected INITIAL_EXTERNAL_CONSTANTS[0][0]: 0x{:016x} = ({}, {})",
+                        expected_ext_const0,
+                        (expected_ext_const0 & 0xFFFFFFFF) as u32,
+                        (expected_ext_const0 >> 32) as u32
+                    );
+
+                    // Check literal constants test
+                    if debug_result.len() > 54 {
+                        println!(
+                            "Literal constants test: [{}, {}, {}, {}]",
+                            debug_result[50], debug_result[51], debug_result[52], debug_result[53]
+                        );
+                        println!("Should be: [2018170979, 2549578122, 794875120, 3520249608]");
+                    }
+
+                    // Check field multiplication test for S-box debugging
+                    if debug_result.len() > 241 {
+                        println!("=== FIELD MULTIPLICATION TEST ===");
+                        println!("2: {}", debug_result[230]);
+                        println!("2^2: {} (should be 4)", debug_result[231]);
+                        println!("2^3: {} (should be 8)", debug_result[232]);
+                        println!("2^4: {} (should be 16)", debug_result[233]);
+                        println!("2^6: {} (should be 64)", debug_result[234]);
+                        println!("2^7: {} (should be 128, S-box(2))", debug_result[235]);
+                        println!("2^7 high limbs: {}", debug_result[240]);
+                    }
+
+                    // Debug: show buffer length
+                    println!("Debug buffer length: {}", debug_result.len());
+
+                    // Check comprehensive S-box test vectors
+                    if debug_result.len() >= 250 {
+                        println!("=== COMPREHENSIVE S-BOX TEST RESULTS ===");
+
+                        // Test vectors (matching what we put in WGSL)
+                        let test_values = vec![
+                            0u64, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256,
+                            511, 512, 1023, 1024,
+                        ];
+
+                        // Calculate expected CPU results
+                        let mut expected_results = Vec::new();
+                        for &val in &test_values {
+                            let x = GoldilocksField::from_canonical_u64(val);
+                            let result = x.exp_u64(7);
+                            expected_results.push(result.to_canonical_u64());
+                        }
+
+                        println!("Comparing first 22 S-box test vectors:");
+                        let mut all_match = true;
+                        for i in 0..test_values.len().min(22) {
+                            let gpu_low = debug_result[180 + i * 2];
+                            let gpu_high = debug_result[180 + i * 2 + 1];
+                            let gpu_result = gpu_low as u64 | ((gpu_high as u64) << 32);
+                            let expected = expected_results[i];
+                            let matches = gpu_result == expected;
+                            all_match = all_match && matches;
+
+                            if !matches || i < 5 {
+                                // Show first 5 and any mismatches
+                                println!(
+                                    "  S-box(0x{:016x}): GPU=0x{:016x}, CPU=0x{:016x} {}",
+                                    test_values[i],
+                                    gpu_result,
+                                    expected,
+                                    if matches { "✓" } else { "✗" }
+                                );
+                            }
+                        }
+
+                        if all_match {
+                            println!("🎉 All S-box test vectors PASSED!");
+                        } else {
+                            println!("❌ Some S-box test vectors FAILED!");
+                        }
+                    }
+                }
+
+                // Check GPU permutation detailed round tracing
+                println!("=== GPU PERMUTATION ROUND TRACING ===");
+                println!("Permutation calls: {}", debug_result[160]);
+                println!("First external round trace:");
+                println!("  Before constants: {}", debug_result[161]);
+                println!("  After constants:  {}", debug_result[162]);
+                println!("  After S-box:      {}", debug_result[163]);
+                println!(
+                    "  After linear layer: [{}, {}, {}, {}]",
+                    debug_result[164], debug_result[165], debug_result[166], debug_result[167]
+                );
+
+                // Check S-box failure test results
+                println!("=== S-BOX FAILURE TEST ===");
+                println!(
+                    "Failing value 1 S-box result: ({}, {})",
+                    debug_result[170], debug_result[171]
+                );
+                println!(
+                    "Failing value 2 S-box result: ({}, {})",
+                    debug_result[172], debug_result[173]
+                );
+
+                // Check GPU permutation test results and compare with CPU
+                println!("=== GPU vs CPU PERMUTATION COMPARISON ===");
+
+                // Convert GPU 32-bit pairs back to 64-bit values for comparison
+                let gpu_zeros: Vec<u64> = (0..4)
+                    .map(|i| {
+                        let low = debug_result[120 + i * 2] as u64;
+                        let high = debug_result[120 + i * 2 + 1] as u64;
+                        low | (high << 32)
+                    })
+                    .collect();
+                println!(
+                    "GPU Test Vector 1 (all zeros): [{}, {}, {}, {}]",
+                    gpu_zeros[0], gpu_zeros[1], gpu_zeros[2], gpu_zeros[3]
+                );
+                println!("  ↑ Should match CPU result above");
+
+                let gpu_seq: Vec<u64> = (0..4)
+                    .map(|i| {
+                        let low = debug_result[130 + i * 2] as u64;
+                        let high = debug_result[130 + i * 2 + 1] as u64;
+                        low | (high << 32)
+                    })
+                    .collect();
+                println!(
+                    "GPU Test Vector 2 (sequential): [{}, {}, {}, {}]",
+                    gpu_seq[0], gpu_seq[1], gpu_seq[2], gpu_seq[3]
+                );
+                println!("  ↑ Should match CPU result above");
+
+                let gpu_first: Vec<u64> = (0..4)
+                    .map(|i| {
+                        let low = debug_result[140 + i * 2] as u64;
+                        let high = debug_result[140 + i * 2 + 1] as u64;
+                        low | (high << 32)
+                    })
+                    .collect();
+                println!(
+                    "GPU Test Vector 3 (first=1, rest=0): [{}, {}, {}, {}]",
+                    gpu_first[0], gpu_first[1], gpu_first[2], gpu_first[3]
+                );
+                println!("  ↑ Should match CPU result above");
+
+                // Check linear layer state tracking
                 println!("=== LINEAR LAYER TEST ===");
+                println!("Linear layer calls: {}", debug_result[58]);
                 println!("Input state [1,2,3,4,5,6,7,8,9,10,11,12]:");
                 for i in 0..12 {
-                    println!("  Element {}: {} (should be {})", i, debug_result[i], i + 1);
+                    println!(
+                        "  Element {}: {} (should be {})",
+                        i,
+                        debug_result[10 + i],
+                        i + 1
+                    );
                 }
                 println!("Output after linear layer:");
                 for i in 0..12 {
-                    println!("  Element {}: {}", i, debug_result[12 + i]);
-                }
-
-                // Check linear layer state tracking
-                println!("=== LINEAR LAYER STATE TRACKING ===");
-                println!("Linear layer calls: {}", debug_result[58]);
-                println!("Elements after linear layer (from current debug):");
-                for i in 0..4 {
-                    println!(
-                        "  Element {}: ({}, {})",
-                        i,
-                        debug_result[140 + i * 2],
-                        debug_result[140 + i * 2 + 1]
-                    );
+                    println!("  Element {}: {}", i, debug_result[25 + i]);
                 }
 
                 if (debug_result[144] == 0 && debug_result[145] == 0)

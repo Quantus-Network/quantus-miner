@@ -13,6 +13,12 @@ const RATE: u32 = 4u;
 const EXTERNAL_ROUNDS: u32 = 4u;
 const INTERNAL_ROUNDS: u32 = 22u;
 
+// Individual constants for testing
+const INTERNAL_CONST_0_LOW: u32 = 2018170979u;
+const INTERNAL_CONST_0_HIGH: u32 = 2549578122u;
+const INTERNAL_CONST_1_LOW: u32 = 794875120u;
+const INTERNAL_CONST_1_HIGH: u32 = 3520249608u;
+
 // Real Poseidon2 constants extracted from qp-poseidon-constants
 // Internal round constants (22 values)
 const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(
@@ -166,7 +172,22 @@ fn gf_from_const(val: array<u32, 2>) -> GoldilocksField {
 }
 
 // MDS matrix constants for width 12 - circulant matrix first row
-const MDS_MATRIX_FIRST_ROW: array<i32, 12> = array<i32, 12>(1, 1, 2, 1, 8, 9, 10, 7, 5, 9, 4, 10);
+// MDS matrix diagonal for width 12 Goldilocks (from p3_goldilocks constants)
+// Each element is stored as [low32, high32] pairs
+const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
+    array<u32, 2>(0x23ba9300u, 0xc3b6c08eu), // 0xc3b6c08e23ba9300u
+    array<u32, 2>(0x4a324fb6u, 0xd84b5de9u), // 0xd84b5de94a324fb6u
+    array<u32, 2>(0x5b35b84fu, 0x0d0c371cu), // 0x0d0c371c5b35b84fu
+    array<u32, 2>(0xe7188037u, 0x7964f570u), // 0x7964f570e7188037u
+    array<u32, 2>(0xd996604bu, 0x5daf18bbu), // 0x5daf18bbd996604bu
+    array<u32, 2>(0xb9595257u, 0x6743bc47u), // 0x6743bc47b9595257u
+    array<u32, 2>(0x2c59bb70u, 0x5528b936u), // 0x5528b9362c59bb70u
+    array<u32, 2>(0x7127b68bu, 0xac45e25bu), // 0xac45e25b7127b68bu
+    array<u32, 2>(0xfbb606b5u, 0xa2077d7du), // 0xa2077d7dfbb606b5u
+    array<u32, 2>(0xaee378aeu, 0xf3faac6fu), // 0xf3faac6faee378aeu
+    array<u32, 2>(0x1545e883u, 0x0c6388b5u), // 0x0c6388b51545e883u
+    array<u32, 2>(0x44917b60u, 0xd27dbb69u)  // 0xd27dbb6944917b60u
+);
 
 // Storage buffers
 @group(0) @binding(0) var<storage, read_write> results: array<u32>;
@@ -191,7 +212,7 @@ const P_LIMB1: u32 = 0u;
 const P_LIMB2: u32 = 0u;
 const P_LIMB3: u32 = 0xFFFFu;
 
-// EPSILON = 2^32 - 1 = 0xFFFFFFFF
+// EPSILON = 2^32 - 1 = 0x00000000FFFFFFFF
 // In u16 limbs: EPSILON = [0xFFFF, 0xFFFF, 0, 0]
 const EPSILON_LIMB0: u32 = 0xFFFFu;
 const EPSILON_LIMB1: u32 = 0xFFFFu;
@@ -217,12 +238,19 @@ fn gf_from_u32(val: u32) -> GoldilocksField {
 
 // Convert a 64-bit value (as two u32s) to GoldilocksField
 fn gf_from_u64_parts(low: u32, high: u32) -> GoldilocksField {
-    return GoldilocksField(
+    var result = GoldilocksField(
         low & 0xFFFFu,         // bits 0-15
         (low >> 16u) & 0xFFFFu, // bits 16-31
         high & 0xFFFFu,        // bits 32-47
         (high >> 16u) & 0xFFFFu // bits 48-63
     );
+
+    // Reduce if >= P
+    if (gf_compare(result, gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3)) != 2u) {
+        result = gf_sub(result, gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3));
+    }
+
+    return result;
 }
 
 // Addition with carry for u16 values (stored in u32)
@@ -268,51 +296,64 @@ fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
 
     var result = GoldilocksField(add0.x, add1.x, add2.x, add3.x);
 
-    // If there's overflow (carry out of most significant limb), add EPSILON manually
+    // Handle overflow: if carry out, we've computed a + b = result + 2^64
+    // In Goldilocks: 2^64 ≡ 2^32 - 1 (mod P)
     if (add3.y != 0u) {
-        // result += EPSILON = [0xFFFF, 0xFFFF, 0, 0]
+        // Add 2^32 - 1 = 0xFFFFFFFF = [0xFFFF, 0xFFFF, 0, 0]
         let eps_add0 = u16_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
         let eps_add1 = u16_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
         let eps_add2 = u16_add_with_carry(result.limb2, EPSILON_LIMB2, eps_add1.y);
         let eps_add3 = u16_add_with_carry(result.limb3, EPSILON_LIMB3, eps_add2.y);
         result = GoldilocksField(eps_add0.x, eps_add1.x, eps_add2.x, eps_add3.x);
+
+        // If adding EPSILON caused another overflow, add EPSILON again
+        if (eps_add3.y != 0u) {
+            let eps2_add0 = u16_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
+            let eps2_add1 = u16_add_with_carry(result.limb1, EPSILON_LIMB1, eps2_add0.y);
+            let eps2_add2 = u16_add_with_carry(result.limb2, EPSILON_LIMB2, eps2_add1.y);
+            let eps2_add3 = u16_add_with_carry(result.limb3, EPSILON_LIMB3, eps2_add2.y);
+            result = GoldilocksField(eps2_add0.x, eps2_add1.x, eps2_add2.x, eps2_add3.x);
+        }
     }
 
-    // Reduce if result >= P manually
+    // Final reduction if result >= P
     let p = gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3);
     if (gf_compare(result, p) != 2u) { // if result >= P
-        // result -= P = [1, 0, 0, 0xFFFF]
-        let p_sub0 = u16_sub_with_borrow(result.limb0, P_LIMB0, 0u);
-        let p_sub1 = u16_sub_with_borrow(result.limb1, P_LIMB1, p_sub0.y);
-        let p_sub2 = u16_sub_with_borrow(result.limb2, P_LIMB2, p_sub1.y);
-        let p_sub3 = u16_sub_with_borrow(result.limb3, P_LIMB3, p_sub2.y);
-        result = GoldilocksField(p_sub0.x, p_sub1.x, p_sub2.x, p_sub3.x);
+        result = gf_sub_no_underflow(result, p);
     }
 
     return result;
 }
 
-// Goldilocks field subtraction
-fn gf_sub(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // Subtract limb by limb with borrow propagation
+// Helper for subtraction without underflow (assumes a >= b)
+fn gf_sub_no_underflow(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     let sub0 = u16_sub_with_borrow(a.limb0, b.limb0, 0u);
     let sub1 = u16_sub_with_borrow(a.limb1, b.limb1, sub0.y);
     let sub2 = u16_sub_with_borrow(a.limb2, b.limb2, sub1.y);
     let sub3 = u16_sub_with_borrow(a.limb3, b.limb3, sub2.y);
+    return GoldilocksField(sub0.x, sub1.x, sub2.x, sub3.x);
+}
 
-    var result = GoldilocksField(sub0.x, sub1.x, sub2.x, sub3.x);
-
-    // If there's underflow (borrow out of most significant limb), subtract EPSILON manually
-    if (sub3.y != 0u) {
-        // result -= EPSILON = [0xFFFF, 0xFFFF, 0, 0]
-        let eps_sub0 = u16_sub_with_borrow(result.limb0, EPSILON_LIMB0, 0u);
-        let eps_sub1 = u16_sub_with_borrow(result.limb1, EPSILON_LIMB1, eps_sub0.y);
-        let eps_sub2 = u16_sub_with_borrow(result.limb2, EPSILON_LIMB2, eps_sub1.y);
-        let eps_sub3 = u16_sub_with_borrow(result.limb3, EPSILON_LIMB3, eps_sub2.y);
-        result = GoldilocksField(eps_sub0.x, eps_sub1.x, eps_sub2.x, eps_sub3.x);
+// Goldilocks field subtraction
+fn gf_sub(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
+    // If a >= b, do direct subtraction
+    if (gf_compare(a, b) != 2u) {
+        return gf_sub_no_underflow(a, b);
     }
 
-    return result;
+    // Otherwise: a < b, so compute a - b + P
+    let p = gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3);
+    let a_plus_p = gf_add_no_reduction(a, p);
+    return gf_sub_no_underflow(a_plus_p, b);
+}
+
+// Addition without final modular reduction (used internally)
+fn gf_add_no_reduction(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
+    let add0 = u16_add_with_carry(a.limb0, b.limb0, 0u);
+    let add1 = u16_add_with_carry(a.limb1, b.limb1, add0.y);
+    let add2 = u16_add_with_carry(a.limb2, b.limb2, add1.y);
+    let add3 = u16_add_with_carry(a.limb3, b.limb3, add2.y);
+    return GoldilocksField(add0.x, add1.x, add2.x, add3.x);
 }
 
 // Proper Goldilocks field multiplication for all values
@@ -580,67 +621,133 @@ fn sbox(x: GoldilocksField) -> GoldilocksField {
     return gf_mul(x6, x);
 }
 
-// Fixed MDS matrix multiplication - circulant matrix for width 12
-fn linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
-    var result: array<GoldilocksField, 12>;
+// External linear layer for width 12 using correct 4x4 MDS matrix
+// Standard MDSMat4: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+fn external_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
+    // First apply the 4x4 MDS matrix to each consecutive 4 elements
+    for (var chunk = 0u; chunk < 3u; chunk++) {
+        let offset = chunk * 4u;
+        var chunk_state: array<GoldilocksField, 4>;
 
-    // Initialize result to zero
-    for (var i = 0u; i < 12u; i++) {
-        result[i] = gf_zero();
+        // Copy chunk
+        for (var i = 0u; i < 4u; i++) {
+            chunk_state[i] = (*state)[offset + i];
+        }
+
+        // Apply optimized 4x4 MDS matrix transformation
+        // Based on apply_mat4 from p3_poseidon2
+        let t01 = gf_add(chunk_state[0], chunk_state[1]);
+        let t23 = gf_add(chunk_state[2], chunk_state[3]);
+        let t0123 = gf_add(t01, t23);
+        let t01123 = gf_add(t0123, chunk_state[1]);
+        let t01233 = gf_add(t0123, chunk_state[3]);
+
+        // The order here is important - need to overwrite in correct sequence
+        let new_3 = gf_add(t01233, gf_add(chunk_state[0], chunk_state[0])); // 3*x[0] + x[1] + x[2] + 2*x[3]
+        let new_1 = gf_add(t01123, gf_add(chunk_state[2], chunk_state[2])); // x[0] + 2*x[1] + 3*x[2] + x[3]
+        let new_0 = gf_add(t01123, t01); // 2*x[0] + 3*x[1] + x[2] + x[3]
+        let new_2 = gf_add(t01233, t23); // x[0] + x[1] + 2*x[2] + 3*x[3]
+
+        // Copy back
+        (*state)[offset + 0u] = new_0;
+        (*state)[offset + 1u] = new_1;
+        (*state)[offset + 2u] = new_2;
+        (*state)[offset + 3u] = new_3;
     }
 
-
-
-    // Circulant matrix multiplication: result[i] = sum(matrix[i][j] * state[j])
-    // For circulant matrix, matrix[i][j] = first_row[(j - i + WIDTH) % WIDTH]
-    for (var i = 0u; i < 12u; i++) {
-        for (var j = 0u; j < 12u; j++) {
-            // Calculate circulant matrix entry - fixed modulo calculation
-            let matrix_idx = (j + 12u - i) % 12u;
-            let matrix_val = MDS_MATRIX_FIRST_ROW[matrix_idx];
-
-            // Convert matrix value to field element
-            let matrix_field = gf_from_u32(u32(matrix_val));
-
-            // Multiply and accumulate
-            let product = gf_mul(matrix_field, (*state)[j]);
-            result[i] = gf_add(result[i], product);
+    // Now apply the circulant matrix part
+    // Precompute the four sums of every four elements
+    var sums: array<GoldilocksField, 4>;
+    for (var k = 0u; k < 4u; k++) {
+        sums[k] = gf_zero();
+        for (var j = k; j < 12u; j += 4u) {
+            sums[k] = gf_add(sums[k], (*state)[j]);
         }
     }
 
-    // Debug: Write all 4 elements after linear layer calculation
-    debug_buffer[140] = result[0].limb0 | (result[0].limb1 << 16u);
-    debug_buffer[141] = result[0].limb2 | (result[0].limb3 << 16u);
-    debug_buffer[142] = result[1].limb0 | (result[1].limb1 << 16u);
-    debug_buffer[143] = result[1].limb2 | (result[1].limb3 << 16u);
-    debug_buffer[144] = result[2].limb0 | (result[2].limb1 << 16u);
-    debug_buffer[145] = result[2].limb2 | (result[2].limb3 << 16u);
-    debug_buffer[146] = result[3].limb0 | (result[3].limb1 << 16u);
-    debug_buffer[147] = result[3].limb2 | (result[3].limb3 << 16u);
+    // Add the appropriate sum to each element
+    for (var i = 0u; i < 12u; i++) {
+        (*state)[i] = gf_add((*state)[i], sums[i % 4u]);
+    }
+}
 
-    // Copy result back to state atomically
+// Internal linear layer using diagonal matrix for width 12
+fn internal_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
+    var result: array<GoldilocksField, 12>;
+
+    // Sum all elements
+    var sum = gf_zero();
+    for (var i = 0u; i < 12u; i++) {
+        sum = gf_add(sum, (*state)[i]);
+    }
+
+    // Apply diagonal matrix: result[i] = state[i] * diag[i] + sum
+    for (var i = 0u; i < 12u; i++) {
+        let diag_val = gf_from_u64_parts(
+            MDS_MATRIX_DIAG_12[i][0],  // low 32 bits
+            MDS_MATRIX_DIAG_12[i][1]   // high 32 bits
+        );
+        let scaled = gf_mul((*state)[i], diag_val);
+        result[i] = gf_add(scaled, sum);
+    }
+
+    // Copy result back to state
     for (var i = 0u; i < 12u; i++) {
         (*state)[i] = result[i];
     }
-
-    // Mark which linear layer call this is
-    debug_buffer[58] += 1u; // Increment call counter
 }
 
 // Fixed Poseidon2 permutation with proper structure
 fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
+    // Debug: Mark start of permutation
+    debug_buffer[160] += 1u; // Count permutation calls
+
+    // Check if this is the all-zeros permutation we want to trace
+    let is_zeros = ((*state)[0].limb0 == 0u && (*state)[0].limb1 == 0u && (*state)[0].limb2 == 0u && (*state)[0].limb3 == 0u) &&
+                   ((*state)[1].limb0 == 0u && (*state)[1].limb1 == 0u && (*state)[1].limb2 == 0u && (*state)[1].limb3 == 0u) &&
+                   ((*state)[2].limb0 == 0u && (*state)[2].limb1 == 0u && (*state)[2].limb2 == 0u && (*state)[2].limb3 == 0u) &&
+                   ((*state)[3].limb0 == 0u && (*state)[3].limb1 == 0u && (*state)[3].limb2 == 0u && (*state)[3].limb3 == 0u);
+
     // Initial external rounds (4 rounds)
+    // First apply MDS light permutation (as per p3_poseidon2 external_initial_permute_state)
+    external_linear_layer(state);
+
     for (var round = 0u; round < 4u; round++) {
+        // Debug: First initial external round only for zeros permutation
+        if (round == 0u && is_zeros) {
+            debug_buffer[161] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State before constants
+        }
+
         // Add round constants
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = gf_add((*state)[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
         }
+
+        // Debug: First round after constants
+        if (round == 0u && is_zeros) {
+            debug_buffer[162] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State after constants
+        }
+
         // S-box on all elements
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = sbox((*state)[i]);
         }
-        // Linear layer (MDS matrix)
-        linear_layer(state);
+
+        // Debug: First round after S-box
+        if (round == 0u && is_zeros) {
+            debug_buffer[163] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State after S-box
+        }
+
+        // External linear layer (4x4 MDS matrix)
+        external_linear_layer(state);
+
+        // Debug: First round after linear layer (full first 4 elements)
+        if (round == 0u && is_zeros) {
+            debug_buffer[164] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u);
+            debug_buffer[165] = (*state)[1].limb0 | ((*state)[1].limb1 << 16u);
+            debug_buffer[166] = (*state)[2].limb0 | ((*state)[2].limb1 << 16u);
+            debug_buffer[167] = (*state)[3].limb0 | ((*state)[3].limb1 << 16u);
+        }
     }
 
     // Internal rounds (22 rounds)
@@ -649,8 +756,8 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
         (*state)[0] = gf_add((*state)[0], gf_from_const(INTERNAL_CONSTANTS[round]));
         // S-box on first element only
         (*state)[0] = sbox((*state)[0]);
-        // Linear layer
-        linear_layer(state);
+        // Internal linear layer (diagonal matrix)
+        internal_linear_layer(state);
     }
 
     // Terminal external rounds (4 rounds)
@@ -663,8 +770,8 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = sbox((*state)[i]);
         }
-        // Linear layer
-        linear_layer(state);
+        // External linear layer (4x4 MDS matrix)
+        external_linear_layer(state);
     }
 }
 
@@ -730,59 +837,94 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     for (var i = 0u; i < 12u; i++) {
         state[i] = gf_zero();
     }
-    // debug_write_state(0u, state); // Debug: initial state
 
     // Convert input to field elements (25 total)
     let input_felts = bytes_to_field_elements(input);
 
-    // Debug: write input felts to debug buffer
-    for (var i = 0u; i < 8u; i++) {
-        debug_buffer[24u + i * 2u] = input_felts[i].limb0 | (input_felts[i].limb1 << 16u);
-        debug_buffer[24u + i * 2u + 1u] = input_felts[i].limb2 | (input_felts[i].limb3 << 16u);
-    }
+    // GPU SPONGE DEBUG - Write detailed step-by-step info
+    debug_buffer[60] = 999u; // Marker for GPU sponge debug
+    debug_buffer[61] = 25u;  // Total field elements
 
     // Sponge construction matching CPU reference exactly:
     // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=4
 
     // Process first 24 elements (6 complete chunks of 4)
     for (var chunk = 0u; chunk < 6u; chunk++) {
+        // Debug: Write chunk info
+        if (chunk < 4u) {
+            debug_buffer[70u + chunk] = chunk;  // Which chunk we're processing
+        }
+
         // Absorb 4 elements for this chunk
         for (var i = 0u; i < 4u; i++) {
             let felt_idx = chunk * 4u + i;
             state[i] = gf_add(state[i], input_felts[felt_idx]);
+
+            // Debug: Log absorption for first 2 chunks
+            if (chunk < 2u && i == 0u) {
+                debug_buffer[80u + chunk * 4u + i] = input_felts[felt_idx].limb0 | (input_felts[felt_idx].limb1 << 16u);
+            }
         }
+
+        // Debug: State before permutation for first chunk
+        if (chunk == 0u) {
+            debug_buffer[90] = state[0].limb0 | (state[0].limb1 << 16u);
+            debug_buffer[91] = state[1].limb0 | (state[1].limb1 << 16u);
+            debug_buffer[92] = state[2].limb0 | (state[2].limb1 << 16u);
+            debug_buffer[93] = state[3].limb0 | (state[3].limb1 << 16u);
+        }
+
         // Permute after each complete chunk
         poseidon2_permute(&state);
 
-        // Debug first few chunks
-        if (chunk == 0u) { debug_write_state(48u, state); }
-        else if (chunk == 1u) { debug_write_state(72u, state); }
+        // Debug: State after permutation for first chunk
+        if (chunk == 0u) {
+            debug_buffer[94] = state[0].limb0 | (state[0].limb1 << 16u);
+            debug_buffer[95] = state[1].limb0 | (state[1].limb1 << 16u);
+            debug_buffer[96] = state[2].limb0 | (state[2].limb1 << 16u);
+            debug_buffer[97] = state[3].limb0 | (state[3].limb1 << 16u);
+        }
     }
 
     // Now we have element 24 (the padding marker = 1) remaining
-    // This goes into buffer position 0, leaving buffer_len = 1
-    state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker
+    // This simulates CPU's finalize_twice adding ONE to buffer position 0
+    state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker (should be 1)
 
-    // CPU finalize_twice() adds another '1' (message-end marker)
-    // This goes into buffer position 1, leaving buffer_len = 2
-    state[1] = gf_add(state[1], gf_one()); // Add message-end '1'
+    // Debug: State after adding domain separator
+    debug_buffer[100] = state[0].limb0 | (state[0].limb1 << 16u);
+    debug_buffer[101] = state[1].limb0 | (state[1].limb1 << 16u);
+    debug_buffer[102] = state[2].limb0 | (state[2].limb1 << 16u);
+    debug_buffer[103] = state[3].limb0 | (state[3].limb1 << 16u);
 
-    // CPU then zero-pads remaining buffer positions (positions 2,3 get zeros)
-    // These are already zero in our state, so no action needed
-
-    // Final permutation
-    debug_write_state(96u, state); // Debug: after final absorption with padding
+    // Final permutation (CPU calls permute after completing the block)
     poseidon2_permute(&state);
-    debug_write_state(120u, state); // Debug: after final permutation
+
+    // Debug: Final state after permutation
+    debug_buffer[104] = state[0].limb0 | (state[0].limb1 << 16u);
+    debug_buffer[105] = state[1].limb0 | (state[1].limb1 << 16u);
+    debug_buffer[106] = state[2].limb0 | (state[2].limb1 << 16u);
+    debug_buffer[107] = state[3].limb0 | (state[3].limb1 << 16u);
 
     // First squeeze - get first 4 field elements
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
 
+    // Debug: First squeeze values
+    debug_buffer[108] = state[0].limb0 | (state[0].limb1 << 16u);
+    debug_buffer[109] = state[1].limb0 | (state[1].limb1 << 16u);
+    debug_buffer[110] = state[2].limb0 | (state[2].limb1 << 16u);
+    debug_buffer[111] = state[3].limb0 | (state[3].limb1 << 16u);
+
     // Second squeeze
     poseidon2_permute(&state);
-    debug_write_state(216u, state); // Debug: after fourth permutation
+
+    // Debug: Second squeeze values
+    debug_buffer[112] = state[0].limb0 | (state[0].limb1 << 16u);
+    debug_buffer[113] = state[1].limb0 | (state[1].limb1 << 16u);
+    debug_buffer[114] = state[2].limb0 | (state[2].limb1 << 16u);
+    debug_buffer[115] = state[3].limb0 | (state[3].limb1 << 16u);
+
     let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
@@ -830,6 +972,169 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let thread_id = id.x;
 
     if (thread_id == 0u) {
+        // DEBUG ASSIGNMENTS TO MATCH CPU EXPECTATIONS
+        // debug_result[2] = "Thread 0 marker (should be 1111)"
+        debug_buffer[2] = 1111u;
+
+        // debug_result[3] = "Simple value (should be 2)"
+        debug_buffer[3] = 2u;
+
+        // debug_result[4] = "Simple arithmetic 1+1 (should be 2)"
+        let one = gf_one();
+        let two = gf_add(one, one);
+        debug_buffer[4] = two.limb0 | (two.limb1 << 16u);
+
+        // debug_result[5], debug_result[6] = "gf_one() result"
+        debug_buffer[5] = one.limb0 | (one.limb1 << 16u);
+        debug_buffer[6] = one.limb2 | (one.limb3 << 16u);
+
+        // debug_result[7], debug_result[8] = "gf_add(one, one) result"
+        debug_buffer[7] = two.limb0 | (two.limb1 << 16u);
+        debug_buffer[8] = two.limb2 | (two.limb3 << 16u);
+
+        // SIMPLE S-BOX TEST
+        // Test known values: sbox(0) = 0, sbox(1) = 1, sbox(2) = 128
+        let test_zero = sbox(gf_zero());
+        let test_one = sbox(gf_one());
+        let test_two = sbox(gf_from_u32(2u));
+
+        debug_buffer[0] = test_zero.limb0 | (test_zero.limb1 << 16u); // Should be 0
+        debug_buffer[1] = test_one.limb0 | (test_one.limb1 << 16u);   // Should be 1
+
+        // debug_result[9], debug_result[10] = "S-box(2)" - should be 128
+        debug_buffer[9] = test_two.limb0 | (test_two.limb1 << 16u);
+        debug_buffer[10] = test_two.limb2 | (test_two.limb3 << 16u);
+
+        // debug_result[11], debug_result[12] = "S-box(1)" - should be 1
+        debug_buffer[11] = test_one.limb0 | (test_one.limb1 << 16u);
+        debug_buffer[12] = test_one.limb2 | (test_one.limb3 << 16u);
+
+        // DETAILED ROUND CONSTANTS VERIFICATION
+        // Test first few internal constants to see if they match reference
+        let const0 = gf_from_const(INTERNAL_CONSTANTS[0]);
+        let const1 = gf_from_const(INTERNAL_CONSTANTS[1]);
+        let const21 = gf_from_const(INTERNAL_CONSTANTS[21]); // Last internal constant
+
+        // Test with individual constants to isolate indexing issue (moved to safe range)
+        debug_buffer[200] = INTERNAL_CONST_0_LOW; // Individual constant low
+        debug_buffer[201] = INTERNAL_CONST_0_HIGH; // Individual constant high
+        debug_buffer[202] = INTERNAL_CONST_1_LOW; // Individual constant low
+        debug_buffer[203] = INTERNAL_CONST_1_HIGH; // Individual constant high
+        debug_buffer[204] = INTERNAL_CONSTANTS[21][0]; // Array access for comparison
+        debug_buffer[205] = INTERNAL_CONSTANTS[21][1]; // Array access for comparison
+
+        // Test with literal values to isolate the issue
+        debug_buffer[50] = 2018170979u; // Expected low bits of const0
+        debug_buffer[51] = 2549578122u; // Expected high bits of const0
+        debug_buffer[52] = 794875120u;  // Expected low bits of const1
+        debug_buffer[53] = 3520249608u; // Expected high bits of const1
+
+        // Store converted field element values (moved to safe range)
+        debug_buffer[210] = const0.limb0 | (const0.limb1 << 16u);
+        debug_buffer[211] = const0.limb2 | (const0.limb3 << 16u);
+        debug_buffer[212] = const1.limb0 | (const1.limb1 << 16u);
+        debug_buffer[213] = const1.limb2 | (const1.limb3 << 16u);
+        debug_buffer[214] = const21.limb0 | (const21.limb1 << 16u);
+        debug_buffer[215] = const21.limb2 | (const21.limb3 << 16u);
+
+        // Test external constants too (moved to safe range)
+        let ext_const0_0 = gf_from_const(INITIAL_EXTERNAL_CONSTANTS[0][0]);
+        debug_buffer[220] = INITIAL_EXTERNAL_CONSTANTS[0][0][0]; // Raw
+        debug_buffer[221] = INITIAL_EXTERNAL_CONSTANTS[0][0][1]; // Raw
+        debug_buffer[222] = ext_const0_0.limb0 | (ext_const0_0.limb1 << 16u); // Converted
+        debug_buffer[223] = ext_const0_0.limb2 | (ext_const0_0.limb3 << 16u); // Converted
+
+        // FIELD MULTIPLICATION TEST for S-box debugging
+        let test_2 = gf_from_u32(2u);
+        let test_2_squared = gf_mul(test_2, test_2); // Should be 4
+        let test_2_cubed = gf_mul(test_2_squared, test_2); // Should be 8
+        let test_2_to_4 = gf_mul(test_2_squared, test_2_squared); // Should be 16
+        let test_2_to_6 = gf_mul(test_2_to_4, test_2_squared); // Should be 64
+        let test_2_to_7 = gf_mul(test_2_to_6, test_2); // Should be 128 = S-box(2)
+
+        debug_buffer[230] = test_2.limb0 | (test_2.limb1 << 16u); // Should be 2
+        debug_buffer[231] = test_2_squared.limb0 | (test_2_squared.limb1 << 16u); // Should be 4
+        debug_buffer[232] = test_2_cubed.limb0 | (test_2_cubed.limb1 << 16u); // Should be 8
+        debug_buffer[233] = test_2_to_4.limb0 | (test_2_to_4.limb1 << 16u); // Should be 16
+        debug_buffer[234] = test_2_to_6.limb0 | (test_2_to_6.limb1 << 16u); // Should be 64
+        debug_buffer[235] = test_2_to_7.limb0 | (test_2_to_7.limb1 << 16u); // Should be 128
+
+        // Store higher limbs too for debugging
+        debug_buffer[240] = test_2_to_7.limb2 | (test_2_to_7.limb3 << 16u); // Higher limbs of 2^7
+
+        // COMPREHENSIVE S-BOX TEST VECTORS
+        let sbox_test_values = array<u32, 22>(
+            0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 15u, 16u, 31u, 32u,
+            63u, 64u, 127u, 128u, 255u, 256u, 511u, 512u, 1023u, 1024u
+        );
+
+        // Test each value and store results
+        for (var i = 0u; i < 22u; i++) {
+            let test_val = gf_from_u32(sbox_test_values[i]);
+            let sbox_result = sbox(test_val);
+
+            // Store as 64-bit value split into two 32-bit parts (moved to earlier indices)
+            debug_buffer[180 + i * 2] = sbox_result.limb0 | (sbox_result.limb1 << 16u); // Low 32 bits
+            debug_buffer[180 + i * 2 + 1] = sbox_result.limb2 | (sbox_result.limb3 << 16u); // High 32 bits
+        }
+
+        // S-BOX FAILURE TEST - Test the specific values that are failing
+        // Test value from debug: Element 2: (0, 4150273596)
+        let failing_val1 = gf_from_limbs(0u, 0u, 4150273596u & 0xFFFFu, (4150273596u >> 16u) & 0xFFFFu);
+        let sbox_result1 = sbox(failing_val1);
+        debug_buffer[170] = sbox_result1.limb0 | (sbox_result1.limb1 << 16u);
+        debug_buffer[171] = sbox_result1.limb2 | (sbox_result1.limb3 << 16u);
+
+        // Test value from debug: Element 3: (4286192744, 3427139821)
+        let failing_val2 = gf_from_limbs(4286192744u & 0xFFFFu, (4286192744u >> 16u) & 0xFFFFu,
+                                        3427139821u & 0xFFFFu, (3427139821u >> 16u) & 0xFFFFu);
+        let sbox_result2 = sbox(failing_val2);
+        debug_buffer[172] = sbox_result2.limb0 | (sbox_result2.limb1 << 16u);
+        debug_buffer[173] = sbox_result2.limb2 | (sbox_result2.limb3 << 16u);
+
+        // POSEIDON2 PERMUTATION TEST
+        // Test the same vectors as CPU to isolate permutation bugs
+
+        // Test Vector 1: All zeros
+        var perm_test_1: array<GoldilocksField, 12>;
+        for (var i = 0u; i < 12u; i++) {
+            perm_test_1[i] = gf_zero();
+        }
+        poseidon2_permute(&perm_test_1);
+
+        // Write Test Vector 1 results (full 64-bit values)
+        for (var i = 0u; i < 4u; i++) {
+            debug_buffer[120 + i * 2] = perm_test_1[i].limb0 | (perm_test_1[i].limb1 << 16u);
+            debug_buffer[120 + i * 2 + 1] = perm_test_1[i].limb2 | (perm_test_1[i].limb3 << 16u);
+        }
+
+        // Test Vector 2: Sequential [1,2,3,4,5,6,7,8,9,10,11,12]
+        var perm_test_2: array<GoldilocksField, 12>;
+        for (var i = 0u; i < 12u; i++) {
+            perm_test_2[i] = gf_from_u32(i + 1u);
+        }
+        poseidon2_permute(&perm_test_2);
+
+        // Write Test Vector 2 results (full 64-bit values)
+        for (var i = 0u; i < 4u; i++) {
+            debug_buffer[130 + i * 2] = perm_test_2[i].limb0 | (perm_test_2[i].limb1 << 16u);
+            debug_buffer[130 + i * 2 + 1] = perm_test_2[i].limb2 | (perm_test_2[i].limb3 << 16u);
+        }
+
+        // Test Vector 3: First element 1, rest zeros
+        var perm_test_3: array<GoldilocksField, 12>;
+        for (var i = 0u; i < 12u; i++) {
+            perm_test_3[i] = gf_zero();
+        }
+        perm_test_3[0] = gf_one();
+        poseidon2_permute(&perm_test_3);
+
+        // Write Test Vector 3 results (full 64-bit values)
+        for (var i = 0u; i < 4u; i++) {
+            debug_buffer[140 + i * 2] = perm_test_3[i].limb0 | (perm_test_3[i].limb1 << 16u);
+            debug_buffer[140 + i * 2 + 1] = perm_test_3[i].limb2 | (perm_test_3[i].limb3 << 16u);
+        }
+
         // SIMPLE LINEAR LAYER TEST
         var test_state: array<GoldilocksField, 12>;
 
@@ -840,15 +1145,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Write input values
         for (var i = 0u; i < 12u; i++) {
-            debug_buffer[i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
+            debug_buffer[10 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
         }
 
         // Apply linear layer
-        linear_layer(&test_state);
+        external_linear_layer(&test_state);
 
         // Write output values
         for (var i = 0u; i < 12u; i++) {
-            debug_buffer[12 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
+            debug_buffer[25 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
         }
 
         // Run normal hash
