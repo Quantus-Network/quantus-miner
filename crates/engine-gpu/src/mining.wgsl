@@ -749,14 +749,12 @@ fn debug_linear_layer_test() {
     }
 }
 
-// S-box: x^7 in Goldilocks field (iterative approach)
+// S-box: x^7 in Goldilocks field (efficient approach)
 fn sbox(x: GoldilocksField) -> GoldilocksField {
-    // Try iterative approach: x^7 = x * x * x * x * x * x * x
-    var result = x;
-    for (var i = 1u; i < 7u; i++) {
-        result = gf_mul(result, x);
-    }
-    return result;
+    let x2 = gf_mul(x, x);
+    let x4 = gf_mul(x2, x2);
+    let x6 = gf_mul(x4, x2);
+    return gf_mul(x6, x);
 }
 
 // External linear layer for width 12 using correct 4x4 MDS matrix
