@@ -767,12 +767,14 @@ fn debug_linear_layer_test() {
     }
 }
 
-// S-box: x^7 in Goldilocks field (simplified)
+// S-box: x^7 in Goldilocks field (iterative approach)
 fn sbox(x: GoldilocksField) -> GoldilocksField {
-    let x2 = gf_mul(x, x);
-    let x4 = gf_mul(x2, x2);
-    let x6 = gf_mul(x4, x2);
-    return gf_mul(x6, x);
+    // Try iterative approach: x^7 = x * x * x * x * x * x * x
+    var result = x;
+    for (var i = 1u; i < 7u; i++) {
+        result = gf_mul(result, x);
+    }
+    return result;
 }
 
 // External linear layer for width 12 using correct 4x4 MDS matrix
@@ -1170,7 +1172,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // debug_field_multiplication_tests();      // 87 test vectors - ALL PASS
         // debug_mds_matrix_tests();               // 126 test vectors - 92% pass
         // debug_poseidon2_permutation_tests();    // 3 test vectors
-        // debug_linear_layer_test();              // Basic linear layer test
+        debug_linear_layer_test();              // Basic linear layer test
 
         // Run actual hash for comparison
         var test_input: array<u32, 24>;

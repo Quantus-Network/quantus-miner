@@ -475,9 +475,29 @@ async fn test_gpu_with_vectors(
                     println!("  - debug_linear_layer_test()              // Basic test");
                 }
 
-                // Check if comprehensive tests are enabled (look for S-box test results at index 180+)
-                if debug_result.len() > 350 && debug_result[180] != 0 {
+                // Debug: Show raw buffer values around MDS test area
+                println!("=== DEBUG: Raw buffer values around index 300 ===");
+                if debug_result.len() > 310 {
+                    for i in 300..310 {
+                        println!("debug_buffer[{}] = {}", i, debug_result[i]);
+                    }
+                }
+
+                // Check if comprehensive tests are enabled (look for linear layer test results at index 10+)
+                if debug_result.len() > 36 && debug_result[10] != 0 {
+                    println!("=== COMPREHENSIVE TEST RESULTS (ENABLED) ===");
                     print_comprehensive_test_results(&debug_result);
+                } else {
+                    println!("=== LINEAR LAYER TESTS NOT DETECTED ===");
+                    println!(
+                        "Buffer length: {}, debug_result[10]: {}",
+                        debug_result.len(),
+                        if debug_result.len() > 10 {
+                            debug_result[10]
+                        } else {
+                            0
+                        }
+                    );
                 }
 
                 println!("=== FOCUSED DEBUGGING COMPLETE ===");
@@ -962,6 +982,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Run MDS matrix tests
     if let Err(e) = tests::test_mds_matrix(&device, &queue).await {
         eprintln!("MDS matrix tests failed: {}", e);
+    }
+
+    // Run S-box tests
+    if let Err(e) = tests::test_sbox(&device, &queue).await {
+        eprintln!("S-box tests failed: {}", e);
     }
 
     Ok(())

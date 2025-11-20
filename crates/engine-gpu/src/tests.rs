@@ -18,6 +18,13 @@ struct MdsTestCase {
     expected: [GoldilocksField; 4],
 }
 
+// A simple struct to hold a test case for sbox
+#[derive(Debug, Clone)]
+struct SboxTestCase {
+    input: GoldilocksField,
+    expected: GoldilocksField,
+}
+
 // Represents the GoldilocksField in a WGSL-compatible format (four u16 limbs stored as u32s)
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -37,6 +44,16 @@ impl From<GoldilocksField> for GfWgls {
             limb2: ((val >> 32) & 0xFFFF) as u32,
             limb3: ((val >> 48) & 0xFFFF) as u32,
         }
+    }
+}
+
+impl From<GfWgls> for GoldilocksField {
+    fn from(gf: GfWgls) -> Self {
+        let val = (gf.limb0 as u64)
+            | ((gf.limb1 as u64) << 16)
+            | ((gf.limb2 as u64) << 32)
+            | ((gf.limb3 as u64) << 48);
+        GoldilocksField::from_noncanonical_u64(val)
     }
 }
 
@@ -115,7 +132,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
     println!("Adding random test cases...");
 
     // Random small values (both operands < 2^32)
-    for _ in 0..20 {
+    for _ in 0..50 {
         let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         let b = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         vectors.push(GfMulTestCase {
@@ -126,7 +143,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
     }
 
     // Random mixed cases (one small, one large)
-    for _ in 0..20 {
+    for _ in 0..80 {
         let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
         vectors.push(GfMulTestCase {
@@ -137,7 +154,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
     }
 
     // Random large values (both operands >= 2^32)
-    for _ in 0..30 {
+    for _ in 0..100 {
         let a = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
         let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
         vectors.push(GfMulTestCase {
@@ -148,7 +165,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
     }
 
     // Random values near the field modulus
-    for _ in 0..10 {
+    for _ in 0..30 {
         let offset = rng.gen::<u32>() as u64;
         let a = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
         let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
@@ -159,7 +176,159 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
         });
     }
 
+    // Add more specific high-limb test cases to detect patterns
+    for i in 20..40 {
+        let val1 = 1u64 << i; // Powers of 2 from 2^20 to 2^39
+        let val2 = rng.gen::<u32>() as u64 | (1u64 << 32); // Random value with high bit set
+        let a = GoldilocksField::from_canonical_u64(val1);
+        let b = GoldilocksField::from_canonical_u64(val2);
+        vectors.push(GfMulTestCase {
+            a,
+            b,
+            expected: a * b,
+        });
+    }
+
+    // Test values with specific limb patterns
+    for _ in 0..20 {
+        let limb2_val = (rng.gen::<u16>() as u64) << 32;
+        let limb3_val = (rng.gen::<u16>() as u64) << 48;
+        let a = GoldilocksField::from_canonical_u64(limb2_val | limb3_val);
+        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        vectors.push(GfMulTestCase {
+            a,
+            b,
+            expected: a * b,
+        });
+    }
+
+    // Add failing S-box cases to test field multiplication with higher limbs
+    println!("Adding S-box failing cases to test higher limb multiplication...");
+    let failing_sbox_inputs = vec![
+        0x0000000000400000u64, // 2^22
+        0x0000000000800000u64, // 2^23
+        0x0000000001000000u64, // 2^24
+        0x0000000002000000u64, // 2^25
+        0x0000000004000000u64, // 2^26
+        0x0000000008000000u64, // 2^27
+        0x0000000010000000u64, // 2^28
+        0x0000000020000000u64, // 2^29
+        0x0000000040000000u64, // 2^30
+        0x0000000080000000u64, // 2^31
+    ];
+
+    for &input_val in &failing_sbox_inputs {
+        let x = GoldilocksField::from_canonical_u64(input_val);
+
+        // Test x * x (first step in S-box computation)
+        vectors.push(GfMulTestCase {
+            a: x,
+            b: x,
+            expected: x * x,
+        });
+
+        // Test intermediate S-box computations
+        let x2 = x * x;
+        let x4 = x2 * x2;
+
+        vectors.push(GfMulTestCase {
+            a: x2,
+            b: x2,
+            expected: x4,
+        });
+
+        vectors.push(GfMulTestCase {
+            a: x4,
+            b: x2,
+            expected: x4 * x2,
+        });
+    }
+
     println!("Generated {} comprehensive test vectors.", vectors.len());
+    vectors
+}
+
+fn generate_sbox_test_vectors() -> Vec<SboxTestCase> {
+    println!("Generating S-box test vectors...");
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(12345);
+
+    // Add special cases
+    println!("Adding S-box special cases...");
+
+    // Zero case
+    vectors.push(SboxTestCase {
+        input: GoldilocksField::ZERO,
+        expected: GoldilocksField::ZERO, // 0^7 = 0
+    });
+
+    // One case
+    vectors.push(SboxTestCase {
+        input: GoldilocksField::ONE,
+        expected: GoldilocksField::ONE, // 1^7 = 1
+    });
+
+    // Two case
+    let two = GoldilocksField::from_canonical_u64(2);
+    let two_to_7 = two.exp_u64(7); // 2^7 = 128
+    vectors.push(SboxTestCase {
+        input: two,
+        expected: two_to_7,
+    });
+
+    // Small powers of 2
+    for i in 0..8 {
+        let base = GoldilocksField::from_canonical_u64(1u64 << i);
+        let expected = base.exp_u64(7);
+        vectors.push(SboxTestCase {
+            input: base,
+            expected,
+        });
+    }
+
+    // Small consecutive values
+    for i in 3..32 {
+        let base = GoldilocksField::from_canonical_u64(i);
+        let expected = base.exp_u64(7);
+        vectors.push(SboxTestCase {
+            input: base,
+            expected,
+        });
+    }
+
+    // Larger powers of 2
+    for i in 8..32 {
+        let base = GoldilocksField::from_canonical_u64(1u64 << i);
+        let expected = base.exp_u64(7);
+        vectors.push(SboxTestCase {
+            input: base,
+            expected,
+        });
+    }
+
+    // Random small values (< 2^32)
+    for _ in 0..20 {
+        let input = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        let expected = input.exp_u64(7);
+        vectors.push(SboxTestCase { input, expected });
+    }
+
+    // Random large values (>= 2^32)
+    for _ in 0..30 {
+        let input = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        let expected = input.exp_u64(7);
+        vectors.push(SboxTestCase { input, expected });
+    }
+
+    // Values near the field modulus
+    for _ in 0..10 {
+        let offset = rng.gen::<u32>() as u64;
+        let input = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
+        let expected = input.exp_u64(7);
+        vectors.push(SboxTestCase { input, expected });
+    }
+
+    println!("Generated {} S-box test vectors.", vectors.len());
     vectors
 }
 
@@ -765,4 +934,222 @@ fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     Ok(())
+}
+
+pub async fn test_sbox(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n--- Running S-box tests ---");
+
+    let test_vectors = generate_sbox_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    const BATCH_SIZE: usize = 64;
+    let batches = test_vectors.chunks(BATCH_SIZE);
+
+    for (batch_idx, batch) in batches.enumerate() {
+        println!(
+            "Processing batch {} ({} tests)...",
+            batch_idx + 1,
+            batch.len()
+        );
+
+        // Convert test vectors to WGSL format
+        let input_data: Vec<GfWgls> = batch
+            .iter()
+            .map(|test_case| GfWgls::from(test_case.input))
+            .collect();
+
+        // Create compute shader for S-box testing by including mining.wgsl without main
+        let mining_wgsl = include_str!("mining.wgsl");
+        // Remove the main function from mining.wgsl
+        let mining_wgsl_without_main = mining_wgsl
+            .lines()
+            .take_while(|line| !line.contains("@compute @workgroup_size(64)"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let shader_source = format!(
+            r#"
+@group(0) @binding(0) var<storage, read> input_data: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_data: array<GoldilocksField>;
+
+{}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let index = global_id.x;
+    if (index >= {}u) {{
+        return;
+    }}
+
+    let input_val = input_data[index];
+    let result = sbox(input_val);
+    output_data[index] = result;
+}}
+"#,
+            mining_wgsl_without_main,
+            batch.len()
+        );
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("S-box Test Shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("S-box Test Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Create buffers
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: (batch.len() * std::mem::size_of::<GfWgls>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: (batch.len() * std::mem::size_of::<GfWgls>()) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Create bind group
+        let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Execute compute shader
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Compute Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&compute_pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(batch.len() as u32, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Read results
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+
+        device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        receiver.await??;
+
+        let data = buffer_slice.get_mapped_range();
+        let results: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Check results
+        for (i, (test_case, &gpu_result_raw)) in batch.iter().zip(results.iter()).enumerate() {
+            let gpu_result = GoldilocksField::from(gpu_result_raw);
+
+            if gpu_result == test_case.expected {
+                passed_tests += 1;
+            } else {
+                failed_tests.push((test_case.clone(), gpu_result));
+                if failed_tests.len() <= 10 {
+                    println!(
+                        "❌ FAILED: sbox(0x{:016x}) = 0x{:016x}, expected 0x{:016x}",
+                        test_case.input.to_canonical_u64(),
+                        gpu_result.to_canonical_u64(),
+                        test_case.expected.to_canonical_u64()
+                    );
+
+                    // Debug intermediate calculations for failing cases
+                    let x = test_case.input;
+                    let x2_cpu = x * x;
+                    let x4_cpu = x2_cpu * x2_cpu;
+                    let x6_cpu = x4_cpu * x2_cpu;
+                    let x7_cpu = x6_cpu * x;
+
+                    println!("  CPU step-by-step:");
+                    println!("    x   = 0x{:016x}", x.to_canonical_u64());
+                    println!("    x^2 = 0x{:016x}", x2_cpu.to_canonical_u64());
+                    println!("    x^4 = 0x{:016x}", x4_cpu.to_canonical_u64());
+                    println!("    x^6 = 0x{:016x}", x6_cpu.to_canonical_u64());
+                    println!("    x^7 = 0x{:016x}", x7_cpu.to_canonical_u64());
+
+                    // Check if GPU is returning input unchanged
+                    if gpu_result == test_case.input {
+                        println!(
+                            "  ⚠️  GPU returned input unchanged - possible multiplication bug"
+                        );
+                    }
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    println!("\n=== S-BOX TEST SUMMARY ===");
+    println!("Total tests: {}", total_tests);
+    println!(
+        "Passed: {} ({:.1}%)",
+        passed_tests,
+        (passed_tests as f64 / total_tests as f64) * 100.0
+    );
+
+    if failed_tests.is_empty() {
+        println!("🎉 All S-box tests PASSED!");
+    } else {
+        println!("❌ Failed: {} tests", failed_tests.len());
+        if failed_tests.len() > 10 {
+            println!("  (showing first 10 failures above)");
+        }
+    }
+
+    if failed_tests.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} out of {} S-box tests failed",
+            failed_tests.len(),
+            total_tests
+        )
+        .into())
+    }
 }
