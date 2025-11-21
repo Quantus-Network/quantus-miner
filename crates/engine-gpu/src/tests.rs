@@ -1,5 +1,5 @@
-use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2::field::types::{Field, Field64, PrimeField64};
+use qp_plonky2_field::goldilocks_field::GoldilocksField;
+use qp_plonky2_field::types::{Field, Field64, PrimeField64};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use wgpu::util::DeviceExt;
@@ -337,14 +337,12 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(54321);
 
-    // We'll compute the MDS matrix manually to match qp-poseidon's behavior
-
     // Add special cases first
     println!("Adding special cases...");
 
     // Zero vector
     let zero_input = [GoldilocksField::ZERO; 4];
-    let zero_expected = apply_external_linear_layer_to_chunk(&(), &zero_input);
+    let zero_expected = apply_external_linear_layer_to_chunk(&zero_input);
     vectors.push(MdsTestCase {
         input: zero_input,
         expected: zero_expected,
@@ -354,13 +352,13 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     for i in 0..4 {
         let mut input = [GoldilocksField::ZERO; 4];
         input[i] = GoldilocksField::ONE;
-        let expected = apply_external_linear_layer_to_chunk(&(), &input);
+        let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
     }
 
     // All ones vector
     let ones_input = [GoldilocksField::ONE; 4];
-    let ones_expected = apply_external_linear_layer_to_chunk(&(), &ones_input);
+    let ones_expected = apply_external_linear_layer_to_chunk(&ones_input);
     vectors.push(MdsTestCase {
         input: ones_input,
         expected: ones_expected,
@@ -374,7 +372,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
         for j in 0..4 {
             input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u16>() as u64);
         }
-        let expected = apply_external_linear_layer_to_chunk(&(), &input);
+        let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
     }
 
@@ -384,7 +382,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
         for j in 0..4 {
             input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         }
-        let expected = apply_external_linear_layer_to_chunk(&(), &input);
+        let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
     }
 
@@ -394,7 +392,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
         for j in 0..4 {
             input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
         }
-        let expected = apply_external_linear_layer_to_chunk(&(), &input);
+        let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
     }
 
@@ -405,7 +403,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
             let offset = rng.gen::<u32>() as u64;
             input[j] = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
         }
-        let expected = apply_external_linear_layer_to_chunk(&(), &input);
+        let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
     }
 
@@ -417,34 +415,31 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
 }
 
 // Helper function to apply the external linear layer to a 4-element chunk
-// We'll manually compute the MDS matrix but using the exact same values as qp-poseidon
-fn apply_external_linear_layer_to_chunk(
-    _poseidon: &(), // We'll compute manually for now
-    chunk: &[GoldilocksField; 4],
-) -> [GoldilocksField; 4] {
-    // Since we can't easily access the internal MDS implementation from qp-poseidon,
-    // let's use the test_single_permutation function to validate our approach
-    // For now, we'll implement the standard 4x4 MDS matrix that p3_poseidon2 uses:
-    // [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+// This implements the exact same MDS matrix as used in p3_poseidon2 for Goldilocks field
+fn apply_external_linear_layer_to_chunk(chunk: &[GoldilocksField; 4]) -> [GoldilocksField; 4] {
+    // MDS matrix multiplication implementation copied from p3_poseidon2
+    // The external matrix for Poseidon2 over Goldilocks is a 4x4 circulant matrix
+    // First row: [2, 3, 1, 1]
+    external_linear_layer(chunk)
+}
 
-    let input = chunk;
+// CPU reference that exactly matches the GPU matrix multiplication
+fn external_linear_layer(state: &[GoldilocksField; 4]) -> [GoldilocksField; 4] {
+    // Matrix: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+    // This matches exactly what the GPU shader computes
+
+    let two = GoldilocksField::from_canonical_u64(2);
+    let three = GoldilocksField::from_canonical_u64(3);
+
     [
-        input[0] * GoldilocksField::from_canonical_u64(2)
-            + input[1] * GoldilocksField::from_canonical_u64(3)
-            + input[2]
-            + input[3],
-        input[0]
-            + input[1] * GoldilocksField::from_canonical_u64(2)
-            + input[2] * GoldilocksField::from_canonical_u64(3)
-            + input[3],
-        input[0]
-            + input[1]
-            + input[2] * GoldilocksField::from_canonical_u64(2)
-            + input[3] * GoldilocksField::from_canonical_u64(3),
-        input[0] * GoldilocksField::from_canonical_u64(3)
-            + input[1]
-            + input[2]
-            + input[3] * GoldilocksField::from_canonical_u64(2),
+        // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
+        state[0] * two + state[1] * three + state[2] + state[3],
+        // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
+        state[0] + state[1] * two + state[2] * three + state[3],
+        // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
+        state[0] + state[1] + state[2] * two + state[3] * three,
+        // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
+        state[0] * three + state[1] + state[2] + state[3] * two,
     ]
 }
 
@@ -722,17 +717,37 @@ fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     chunk_state[2] = input_data[base_idx + 2u];
     chunk_state[3] = input_data[base_idx + 3u];
 
-    // Apply 4x4 MDS matrix transformation
-    let t01 = gf_add(chunk_state[0], chunk_state[1]);
-    let t23 = gf_add(chunk_state[2], chunk_state[3]);
-    let t0123 = gf_add(t01, t23);
-    let t01123 = gf_add(t0123, chunk_state[1]);
-    let t01233 = gf_add(t0123, chunk_state[3]);
+    // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+    let two = gf_from_limbs(2u, 0u, 0u, 0u);
+    let three = gf_from_limbs(3u, 0u, 0u, 0u);
 
-    let new_3 = gf_add(t01233, gf_add(chunk_state[0], chunk_state[0])); // 3*x[0] + x[1] + x[2] + 2*x[3]
-    let new_1 = gf_add(t01123, gf_add(chunk_state[2], chunk_state[2])); // x[0] + 2*x[1] + 3*x[2] + x[3]
-    let new_0 = gf_add(t01123, t01); // 2*x[0] + 3*x[1] + x[2] + x[3]
-    let new_2 = gf_add(t01233, t23); // x[0] + x[1] + 2*x[2] + 3*x[3]
+    // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
+    let new_0 = gf_add(gf_add(gf_add(
+        gf_mul(chunk_state[0], two),
+        gf_mul(chunk_state[1], three)),
+        chunk_state[2]),
+        chunk_state[3]);
+
+    // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
+    let new_1 = gf_add(gf_add(gf_add(
+        chunk_state[0],
+        gf_mul(chunk_state[1], two)),
+        gf_mul(chunk_state[2], three)),
+        chunk_state[3]);
+
+    // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
+    let new_2 = gf_add(gf_add(gf_add(
+        chunk_state[0],
+        chunk_state[1]),
+        gf_mul(chunk_state[2], two)),
+        gf_mul(chunk_state[3], three));
+
+    // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
+    let new_3 = gf_add(gf_add(gf_add(
+        gf_mul(chunk_state[0], three),
+        chunk_state[1]),
+        chunk_state[2]),
+        gf_mul(chunk_state[3], two));
 
     // Write results
     output_data[base_idx + 0u] = new_0;
@@ -853,28 +868,28 @@ fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         for (i, test_case) in chunk.iter().enumerate() {
             let gpu_result = [
                 GoldilocksField::from_noncanonical_u64(
-                    gpu_results[i * 4].limb0 as u64
-                        | ((gpu_results[i * 4].limb1 as u64) << 16)
-                        | ((gpu_results[i * 4].limb2 as u64) << 32)
-                        | ((gpu_results[i * 4].limb3 as u64) << 48),
+                    (gpu_results[i * 4].limb0 as u64 & 0xFFFF)
+                        | (((gpu_results[i * 4].limb1 as u64) & 0xFFFF) << 16)
+                        | (((gpu_results[i * 4].limb2 as u64) & 0xFFFF) << 32)
+                        | (((gpu_results[i * 4].limb3 as u64) & 0xFFFF) << 48),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    gpu_results[i * 4 + 1].limb0 as u64
-                        | ((gpu_results[i * 4 + 1].limb1 as u64) << 16)
-                        | ((gpu_results[i * 4 + 1].limb2 as u64) << 32)
-                        | ((gpu_results[i * 4 + 1].limb3 as u64) << 48),
+                    (gpu_results[i * 4 + 1].limb0 as u64 & 0xFFFF)
+                        | (((gpu_results[i * 4 + 1].limb1 as u64) & 0xFFFF) << 16)
+                        | (((gpu_results[i * 4 + 1].limb2 as u64) & 0xFFFF) << 32)
+                        | (((gpu_results[i * 4 + 1].limb3 as u64) & 0xFFFF) << 48),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    gpu_results[i * 4 + 2].limb0 as u64
-                        | ((gpu_results[i * 4 + 2].limb1 as u64) << 16)
-                        | ((gpu_results[i * 4 + 2].limb2 as u64) << 32)
-                        | ((gpu_results[i * 4 + 2].limb3 as u64) << 48),
+                    (gpu_results[i * 4 + 2].limb0 as u64 & 0xFFFF)
+                        | (((gpu_results[i * 4 + 2].limb1 as u64) & 0xFFFF) << 16)
+                        | (((gpu_results[i * 4 + 2].limb2 as u64) & 0xFFFF) << 32)
+                        | (((gpu_results[i * 4 + 2].limb3 as u64) & 0xFFFF) << 48),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    gpu_results[i * 4 + 3].limb0 as u64
-                        | ((gpu_results[i * 4 + 3].limb1 as u64) << 16)
-                        | ((gpu_results[i * 4 + 3].limb2 as u64) << 32)
-                        | ((gpu_results[i * 4 + 3].limb3 as u64) << 48),
+                    (gpu_results[i * 4 + 3].limb0 as u64 & 0xFFFF)
+                        | (((gpu_results[i * 4 + 3].limb1 as u64) & 0xFFFF) << 16)
+                        | (((gpu_results[i * 4 + 3].limb2 as u64) & 0xFFFF) << 32)
+                        | (((gpu_results[i * 4 + 3].limb3 as u64) & 0xFFFF) << 48),
                 ),
             ];
 

@@ -206,10 +206,10 @@ struct GoldilocksField {
 }
 
 // Field modulus P = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001
-// In u16 limbs: P = [1, 0, 0, 0xFFFF]
+// In u16 limbs: P = [1, 0, 0xFFFF, 0xFFFF]
 const P_LIMB0: u32 = 1u;
 const P_LIMB1: u32 = 0u;
-const P_LIMB2: u32 = 0u;
+const P_LIMB2: u32 = 0xFFFFu;
 const P_LIMB3: u32 = 0xFFFFu;
 
 // EPSILON = 2^32 - 1 = 0x00000000FFFFFFFF
