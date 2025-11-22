@@ -658,17 +658,37 @@ fn debug_mds_matrix_tests() {
             chunk_state[i] = gf_from_u32(mds_test_chunks[test_idx][i]);
         }
 
-        // Apply 4x4 MDS matrix transformation
-        let t01 = gf_add(chunk_state[0], chunk_state[1]);
-        let t23 = gf_add(chunk_state[2], chunk_state[3]);
-        let t0123 = gf_add(t01, t23);
-        let t01123 = gf_add(t0123, chunk_state[1]);
-        let t01233 = gf_add(t0123, chunk_state[3]);
+        // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+        let two = gf_from_limbs(2u, 0u, 0u, 0u);
+        let three = gf_from_limbs(3u, 0u, 0u, 0u);
 
-        let new_3 = gf_add(t01233, gf_add(chunk_state[0], chunk_state[0]));
-        let new_1 = gf_add(t01123, gf_add(chunk_state[2], chunk_state[2]));
-        let new_0 = gf_add(t01123, t01);
-        let new_2 = gf_add(t01233, t23);
+        // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
+        let new_0 = gf_add(gf_add(gf_add(
+            gf_mul(chunk_state[0], two),
+            gf_mul(chunk_state[1], three)),
+            chunk_state[2]),
+            chunk_state[3]);
+
+        // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
+        let new_1 = gf_add(gf_add(gf_add(
+            chunk_state[0],
+            gf_mul(chunk_state[1], two)),
+            gf_mul(chunk_state[2], three)),
+            chunk_state[3]);
+
+        // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
+        let new_2 = gf_add(gf_add(gf_add(
+            chunk_state[0],
+            chunk_state[1]),
+            gf_mul(chunk_state[2], two)),
+            gf_mul(chunk_state[3], three));
+
+        // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
+        let new_3 = gf_add(gf_add(gf_add(
+            gf_mul(chunk_state[0], three),
+            chunk_state[1]),
+            chunk_state[2]),
+            gf_mul(chunk_state[3], two));
 
         // Store results as 64-bit values
         let base_idx = 300u + test_idx * 8u;
@@ -770,19 +790,37 @@ fn external_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
             chunk_state[i] = (*state)[offset + i];
         }
 
-        // Apply optimized 4x4 MDS matrix transformation
-        // Based on apply_mat4 from p3_poseidon2
-        let t01 = gf_add(chunk_state[0], chunk_state[1]);
-        let t23 = gf_add(chunk_state[2], chunk_state[3]);
-        let t0123 = gf_add(t01, t23);
-        let t01123 = gf_add(t0123, chunk_state[1]);
-        let t01233 = gf_add(t0123, chunk_state[3]);
+        // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
+        let two = gf_from_limbs(2u, 0u, 0u, 0u);
+        let three = gf_from_limbs(3u, 0u, 0u, 0u);
 
-        // The order here is important - need to overwrite in correct sequence
-        let new_3 = gf_add(t01233, gf_add(chunk_state[0], chunk_state[0])); // 3*x[0] + x[1] + x[2] + 2*x[3]
-        let new_1 = gf_add(t01123, gf_add(chunk_state[2], chunk_state[2])); // x[0] + 2*x[1] + 3*x[2] + x[3]
-        let new_0 = gf_add(t01123, t01); // 2*x[0] + 3*x[1] + x[2] + x[3]
-        let new_2 = gf_add(t01233, t23); // x[0] + x[1] + 2*x[2] + 3*x[3]
+        // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
+        let new_0 = gf_add(gf_add(gf_add(
+            gf_mul(chunk_state[0], two),
+            gf_mul(chunk_state[1], three)),
+            chunk_state[2]),
+            chunk_state[3]);
+
+        // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
+        let new_1 = gf_add(gf_add(gf_add(
+            chunk_state[0],
+            gf_mul(chunk_state[1], two)),
+            gf_mul(chunk_state[2], three)),
+            chunk_state[3]);
+
+        // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
+        let new_2 = gf_add(gf_add(gf_add(
+            chunk_state[0],
+            chunk_state[1]),
+            gf_mul(chunk_state[2], two)),
+            gf_mul(chunk_state[3], three));
+
+        // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
+        let new_3 = gf_add(gf_add(gf_add(
+            gf_mul(chunk_state[0], three),
+            chunk_state[1]),
+            chunk_state[2]),
+            gf_mul(chunk_state[3], two));
 
         // Copy back
         (*state)[offset + 0u] = new_0;
@@ -845,9 +883,6 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
                    ((*state)[3].limb0 == 0u && (*state)[3].limb1 == 0u && (*state)[3].limb2 == 0u && (*state)[3].limb3 == 0u);
 
     // Initial external rounds (4 rounds)
-    // First apply MDS light permutation (as per p3_poseidon2 external_initial_permute_state)
-    external_linear_layer(state);
-
     for (var round = 0u; round < 4u; round++) {
         // Debug: First initial external round only for zeros permutation
         if (round == 0u && is_zeros) {
