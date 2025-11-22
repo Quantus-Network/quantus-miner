@@ -291,7 +291,6 @@ fn generate_sbox_test_vectors() -> Vec<SboxTestCase> {
 }
 
 fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestCase> {
-    println!("Generating external linear layer test vectors...");
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(67890);
 
@@ -342,10 +341,6 @@ fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestC
         vectors.push(ExternalLinearLayerTestCase { input, expected });
     }
 
-    println!(
-        "Generated {} external linear layer test vectors",
-        vectors.len()
-    );
     vectors
 }
 
@@ -669,6 +664,8 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
 }
 
 fn generate_internal_rounds_test_vectors() -> Vec<InternalRoundsTestCase> {
+    // This function generates test vectors for the FULL PERMUTATION
+    // For use by test_poseidon2_full_permutation
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(98765);
 
@@ -730,6 +727,258 @@ fn generate_internal_rounds_test_vectors() -> Vec<InternalRoundsTestCase> {
     vectors
 }
 
+// Standardized test reporting functions
+struct TestResults {
+    name: String,
+    passed: usize,
+    failed: Vec<usize>,
+    total: usize,
+}
+
+impl TestResults {
+    fn new(name: String, total: usize) -> Self {
+        Self {
+            name,
+            passed: 0,
+            failed: Vec::new(),
+            total,
+        }
+    }
+
+    fn add_pass(&mut self) {
+        self.passed += 1;
+    }
+
+    fn add_failure(&mut self, test_index: usize) {
+        self.failed.push(test_index);
+    }
+
+    fn print_summary(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("\n=== {} TEST SUMMARY ===", self.name.to_uppercase());
+        println!("Total tests: {}", self.total);
+        println!(
+            "Passed: {} ({:.1}%)",
+            self.passed,
+            self.passed as f32 / self.total as f32 * 100.0
+        );
+
+        if self.failed.is_empty() {
+            println!("🎉 All {} tests PASSED!", self.name.to_lowercase());
+            Ok(())
+        } else {
+            println!(
+                "Failed: {} ({:.1}%)",
+                self.failed.len(),
+                self.failed.len() as f32 / self.total as f32 * 100.0
+            );
+            if self.failed.len() > 10 {
+                println!("  (showing first 10 failures above)");
+            }
+            Err(format!(
+                "{} out of {} {} tests failed",
+                self.failed.len(),
+                self.total,
+                self.name.to_lowercase()
+            )
+            .into())
+        }
+    }
+}
+
+fn print_test_failure<T: std::fmt::Display>(
+    test_name: &str,
+    test_index: usize,
+    expected: &[T],
+    actual: &[T],
+    max_elements: usize,
+) {
+    println!("\n{} test case {} FAILED:", test_name, test_index);
+    for j in 0..max_elements.min(expected.len()).min(actual.len()) {
+        println!("  Expected [{}]: {}", j, expected[j]);
+        println!("  GPU      [{}]: {}", j, actual[j]);
+    }
+}
+
+fn print_test_failure_hex(
+    test_name: &str,
+    test_index: usize,
+    expected: &[GoldilocksField],
+    actual: &[GoldilocksField],
+    max_elements: usize,
+) {
+    println!("\n{} test case {} FAILED:", test_name, test_index);
+    for j in 0..max_elements.min(expected.len()).min(actual.len()) {
+        println!(
+            "  Expected [{}]: 0x{:016x}",
+            j,
+            expected[j].to_canonical_u64()
+        );
+        println!(
+            "  GPU      [{}]: 0x{:016x}",
+            j,
+            actual[j].to_canonical_u64()
+        );
+    }
+}
+
+fn generate_comprehensive_debug_test_vectors() -> Vec<[GoldilocksField; 12]> {
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+
+    // Zero state
+    vectors.push([GoldilocksField::ZERO; 12]);
+
+    // Unit vectors (one element = 1, rest = 0)
+    for i in 0..12 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        input[i] = GoldilocksField::ONE;
+        vectors.push(input);
+    }
+
+    // All ones state
+    vectors.push([GoldilocksField::ONE; 12]);
+
+    // Sequential state [1,2,3,...,12]
+    let sequential_input: [GoldilocksField; 12] =
+        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
+    vectors.push(sequential_input);
+
+    // Random small values (all elements < 2^8)
+    for _ in 0..15 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u8>()) as u64;
+            input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        vectors.push(input);
+    }
+
+    // Random medium values (all elements < 2^16)
+    for _ in 0..10 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u16>()) as u64;
+            input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        vectors.push(input);
+    }
+
+    vectors
+}
+
+fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
+    // This function generates test vectors for INTERNAL ROUNDS ONLY
+    // Input: state after initial external rounds
+    // Expected: state after internal rounds (before terminal external)
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(54321);
+    use qp_poseidon_constants::{
+        POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW, POSEIDON2_INTERNAL_CONSTANTS_RAW,
+    };
+
+    // Helper to apply initial external rounds
+    let apply_initial_external = |mut state: [GoldilocksField; 12]| -> [GoldilocksField; 12] {
+        for round in 0..4 {
+            // Add constants
+            for i in 0..12 {
+                state[i] += GoldilocksField::from_canonical_u64(
+                    POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
+                );
+            }
+            // S-box all elements
+            for i in 0..12 {
+                state[i] = state[i].exp_u64(7);
+            }
+            // External linear layer
+            state = apply_full_external_linear_layer_to_state(&state);
+        }
+        state
+    };
+
+    // Helper to apply internal rounds only
+    let apply_internal_only = |mut state: [GoldilocksField; 12]| -> [GoldilocksField; 12] {
+        for round in 0..22 {
+            state[0] +=
+                GoldilocksField::from_canonical_u64(POSEIDON2_INTERNAL_CONSTANTS_RAW[round]);
+            state[0] = state[0].exp_u64(7);
+            state = apply_internal_linear_layer_to_state(&state);
+        }
+        state
+    };
+
+    // Zero state
+    let zero_input = [GoldilocksField::ZERO; 12];
+    let after_initial_external = apply_initial_external(zero_input);
+    let after_internal = apply_internal_only(after_initial_external);
+    vectors.push(InternalRoundsTestCase {
+        input: after_initial_external,
+        expected: after_internal,
+    });
+
+    // Unit vectors (one element = 1, rest = 0)
+    for i in 0..12 {
+        let mut unit_input = [GoldilocksField::ZERO; 12];
+        unit_input[i] = GoldilocksField::ONE;
+        let after_initial_external = apply_initial_external(unit_input);
+        let after_internal = apply_internal_only(after_initial_external);
+        vectors.push(InternalRoundsTestCase {
+            input: after_initial_external,
+            expected: after_internal,
+        });
+    }
+
+    // All ones
+    let ones_input = [GoldilocksField::ONE; 12];
+    let after_initial_external = apply_initial_external(ones_input);
+    let after_internal = apply_internal_only(after_initial_external);
+    vectors.push(InternalRoundsTestCase {
+        input: after_initial_external,
+        expected: after_internal,
+    });
+
+    // Sequential [1,2,3,...,12]
+    let sequential_input =
+        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
+    let after_initial_external = apply_initial_external(sequential_input);
+    let after_internal = apply_internal_only(after_initial_external);
+    vectors.push(InternalRoundsTestCase {
+        input: after_initial_external,
+        expected: after_internal,
+    });
+
+    // Random small values (all elements < 2^8)
+    for _ in 0..15 {
+        let mut random_input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u8>()) as u64;
+            random_input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        let after_initial_external = apply_initial_external(random_input);
+        let after_internal = apply_internal_only(after_initial_external);
+        vectors.push(InternalRoundsTestCase {
+            input: after_initial_external,
+            expected: after_internal,
+        });
+    }
+
+    // Random medium values (all elements < 2^16)
+    for _ in 0..10 {
+        let mut random_input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u16>()) as u64;
+            random_input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        let after_initial_external = apply_initial_external(random_input);
+        let after_internal = apply_internal_only(after_initial_external);
+        vectors.push(InternalRoundsTestCase {
+            input: after_initial_external,
+            expected: after_internal,
+        });
+    }
+
+    vectors
+}
+
 pub async fn test_poseidon2_permutation(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -738,6 +987,7 @@ pub async fn test_poseidon2_permutation(
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
+    let mut failure_details = Vec::new();
 
     // Use the same pattern as other successful tests - include mining.wgsl and define our own bindings
     let shader_source = format!(
@@ -790,7 +1040,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
     // Process tests in batches
     const BATCH_SIZE: usize = 16;
-    for chunk in test_vectors.chunks(BATCH_SIZE) {
+    for (batch_idx, chunk) in test_vectors.chunks(BATCH_SIZE).enumerate() {
         // Prepare input data (flatten 12-element arrays and convert to GfWgls)
         let mut input_data = Vec::new();
         for test_case in chunk {
@@ -891,8 +1141,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             if all_match {
                 passed_tests += 1;
             } else {
-                failed_tests.push((test_case.clone(), gpu_result));
-                if failed_tests.len() <= 3 {
+                failed_tests.push(batch_idx * BATCH_SIZE + i + 1);
+                failure_details.push((test_case.clone(), gpu_result));
+                if failure_details.len() <= 3 {
                     println!("❌ FAILED: Poseidon2 permutation test");
                     println!("Input state:");
                     for (j, &val) in test_case.input.iter().enumerate() {
@@ -924,30 +1175,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         staging_buffer.unmap();
     }
 
-    println!("\n=== POSEIDON2 PERMUTATION TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        100.0 * passed_tests as f64 / total_tests as f64
-    );
-
-    if !failed_tests.is_empty() {
-        println!("❌ {} tests FAILED", failed_tests.len());
-        if failed_tests.len() > 3 {
-            println!("   (showing only first 3 failures)");
-        }
-    } else {
-        println!("🎉 All tests PASSED!");
-    }
-
-    Ok(())
+    let mut results = TestResults::new("poseidon2 permutation".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_first_round_debug(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let test_vectors = generate_comprehensive_debug_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut results = TestResults::new("first round debug".to_string(), total_tests);
+
+    // Prepare input data
+    let input_data: Vec<GfWgls> = test_vectors
+        .iter()
+        .flat_map(|test_case| test_case.map(GfWgls::from))
+        .collect();
+
     // Create debug shader that applies only first external round
     let shader_source = format!(
         "
@@ -1080,7 +1327,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
+        compute_pass.dispatch_workgroups(test_vectors.len() as u32, 1, 1);
     }
 
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1141,38 +1388,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     staging_buffer.unmap();
 
     // Print clean summary like gf_mul/sbox tests
-    println!("\n=== FIRST ROUND DEBUG TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All first round debug tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} first round debug tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
+    let mut results = TestResults::new("first round debug".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_initial_external_rounds(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let test_vectors = generate_comprehensive_debug_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut results = TestResults::new("initial external rounds".to_string(), total_tests);
+
+    // Prepare input data
+    let input_data: Vec<GfWgls> = test_vectors
+        .iter()
+        .flat_map(|test_case| test_case.map(GfWgls::from))
+        .collect();
+
     // Create debug shader that applies only the 4 initial external rounds
     let shader_source = format!(
         "
@@ -1388,358 +1623,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     staging_buffer.unmap();
 
     // Print clean summary like gf_mul/sbox tests
-    println!("\n=== INITIAL EXTERNAL ROUNDS TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All initial external rounds tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} initial external rounds tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
+    let mut results = TestResults::new("initial external rounds".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
-pub async fn test_poseidon2_rounds_0_and_1_debug(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut passed_tests = 0;
-    let mut failed_tests: Vec<usize> = Vec::new();
-    let total_tests = 1; // Single rounds 0-1 debug test
-
-    // Create debug shader that tracks each step of rounds 0 and 1
-    let shader_source = format!(
-        "
-{}
-
-// Debug entry point for detailed round 0 and 1 tracking
-@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
-@group(0) @binding(1) var<storage, read_write> after_round_0: array<GoldilocksField>;
-@group(0) @binding(2) var<storage, read_write> after_round_1_constants: array<GoldilocksField>;
-@group(0) @binding(3) var<storage, read_write> after_round_1_sbox: array<GoldilocksField>;
-@group(0) @binding(4) var<storage, read_write> after_round_1_linear: array<GoldilocksField>;
-
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let test_id = global_id.x;
-    let offset = test_id * 12u;
-
-    // Copy input to local state
-    var state: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = input_state[offset + i];
-    }}
-
-    // ROUND 0 (we know this works)
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[0][i]));
-    }}
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = sbox(state[i]);
-    }}
-    external_linear_layer(&state);
-
-    // Save after round 0
-    for (var i = 0u; i < 12u; i++) {{
-        after_round_0[offset + i] = state[i];
-    }}
-
-    // ROUND 1 - step by step
-    // Step 1: Add round 1 constants
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[1][i]));
-        after_round_1_constants[offset + i] = state[i];
-    }}
-
-    // Step 2: S-box
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = sbox(state[i]);
-        after_round_1_sbox[offset + i] = state[i];
-    }}
-
-    // Step 3: Linear layer
-    external_linear_layer(&state);
-    for (var i = 0u; i < 12u; i++) {{
-        after_round_1_linear[offset + i] = state[i];
-    }}
-}}
-",
-        include_str!("mining.wgsl")
-    );
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Rounds 0-1 Debug Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Rounds 0-1 Debug Pipeline"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-    // Test with all zeros input
-    let zero_input = [GoldilocksField::ZERO; 12];
-    let mut input_data = Vec::new();
-    for &field_elem in &zero_input {
-        input_data.push(GfWgls::from(field_elem));
-    }
-
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Round Debug Input Buffer"),
-        contents: bytemuck::cast_slice(&input_data),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    // Create 4 output buffers for each debug stage
-    let after_round_0_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After Round 0 Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let after_r1_constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After R1 Constants Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let after_r1_sbox_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After R1 SBox Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let after_r1_linear_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After R1 Linear Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Round Debug Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: after_round_0_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: after_r1_constants_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: after_r1_sbox_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: after_r1_linear_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Round Debug Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Round Debug Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Round Debug Staging Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12 * 4) as u64, // 4 buffers
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Copy all buffers to staging
-    encoder.copy_buffer_to_buffer(
-        &after_round_0_buffer,
-        0,
-        &staging_buffer,
-        0,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &after_r1_constants_buffer,
-        0,
-        &staging_buffer,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &after_r1_sbox_buffer,
-        0,
-        &staging_buffer,
-        (std::mem::size_of::<GfWgls>() * 12 * 2) as u64,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &after_r1_linear_buffer,
-        0,
-        &staging_buffer,
-        (std::mem::size_of::<GfWgls>() * 12 * 3) as u64,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let buffer_slice = staging_buffer.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-
-    let data = buffer_slice.get_mapped_range();
-    let debug_data: &[GfWgls] = bytemuck::cast_slice(&data);
-
-    // Compute CPU reference step by step
-    let mut cpu_state = zero_input;
-    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
-
-    // Round 0 on CPU
-    for i in 0..12 {
-        cpu_state[i] +=
-            GoldilocksField::from_canonical_u64(POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0][i]);
-    }
-    for i in 0..12 {
-        cpu_state[i] = cpu_state[i].exp_u64(7);
-    }
-    // External linear layer for round 0
-    let two = GoldilocksField::from_canonical_u64(2);
-    let three = GoldilocksField::from_canonical_u64(3);
-    for chunk in 0..3 {
-        let offset = chunk * 4;
-        let mut chunk_state = [GoldilocksField::ZERO; 4];
-        for i in 0..4 {
-            chunk_state[i] = cpu_state[offset + i];
-        }
-        let new_0 = two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
-        let new_1 = chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
-        let new_2 = chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
-        let new_3 = three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
-        cpu_state[offset] = new_0;
-        cpu_state[offset + 1] = new_1;
-        cpu_state[offset + 2] = new_2;
-        cpu_state[offset + 3] = new_3;
-    }
-    let mut sums = [GoldilocksField::ZERO; 4];
-    for k in 0..4 {
-        for j in (k..12).step_by(4) {
-            sums[k] += cpu_state[j];
-        }
-    }
-    for i in 0..12 {
-        cpu_state[i] += sums[i % 4];
-    }
-
-    // Compare Round 0 results
-    let mut round0_matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[i].into();
-        if gpu_gf.to_canonical_u64() != cpu_state[i].to_canonical_u64() {
-            round0_matches = false;
-            break;
-        }
-    }
-
-    // Round 1 step 1: Add constants
-    let mut cpu_after_r1_constants = cpu_state;
-    for i in 0..12 {
-        cpu_after_r1_constants[i] +=
-            GoldilocksField::from_canonical_u64(POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[1][i]);
-    }
-
-    // Compare Round 1 constants results
-    let mut round1_matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[12 + i].into();
-        if gpu_gf.to_canonical_u64() != cpu_after_r1_constants[i].to_canonical_u64() {
-            round1_matches = false;
-            break;
-        }
-    }
-
-    let mut passed_tests = 0;
-    let mut failed_tests = Vec::new();
-    let total_tests = 1;
-
-    if round0_matches && round1_matches {
-        passed_tests += 1;
-    } else {
-        failed_tests.push(1);
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    // Print clean summary like gf_mul/sbox tests
-    println!("\n=== ROUNDS 0-1 DEBUG TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All rounds 0-1 debug tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} rounds 0-1 debug tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
-}
 
 pub async fn test_poseidon2_constants_verification(
     device: &wgpu::Device,
@@ -1868,52 +1757,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         }
     }
 
-    println!("🔍 Round 1 constants (checking for issues):");
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = gpu_constants[12 + i].into();
-        let expected = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[1][i];
-        if gpu_gf.to_canonical_u64() == expected {
-            println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
-        } else {
-            println!(
-                "  [{}] ❌ GPU=0x{:016x}, Expected=0x{:016x}",
-                i,
-                gpu_gf.to_canonical_u64(),
-                expected
-            );
-        }
-    }
-
     drop(data);
     staging_buffer.unmap();
 
     // Print final summary
-    println!("\n=== CONSTANTS VERIFICATION TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All constants match perfectly!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed constant indices: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} constants failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
+    let mut results = TestResults::new("constants verification".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_full_permutation(
@@ -2094,34 +1945,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print final summary
-    println!("\n=== FULL PERMUTATION TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All full permutation tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        if failed_tests.len() > 10 {
-            println!("  (showing first 10 failures above)");
-        }
-        return Err(format!(
-            "{} out of {} full permutation tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
+    let mut results = TestResults::new("full permutation".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_internal_rounds_only(
@@ -2129,38 +1956,14 @@ pub async fn test_poseidon2_internal_rounds_only(
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test ONLY the internal rounds (22 rounds) without initial/terminal external rounds
-    let test_vectors = generate_internal_rounds_test_vectors();
+    let test_vectors = generate_true_internal_only_test_vectors();
     let total_tests = test_vectors.len();
-    let mut passed_tests = 0;
-    let mut failed_tests = Vec::new();
-
-    // For this test, we need to manually apply initial external rounds on CPU
-    // then test only the internal rounds on GPU
-    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+    let mut results = TestResults::new("internal rounds only".to_string(), total_tests);
 
     for (test_idx, test_case) in test_vectors.iter().enumerate() {
-        // Apply initial external rounds on CPU to get the state before internal rounds
-        let mut cpu_state_before_internal = test_case.input;
-
-        // CPU: Apply 4 initial external rounds
-        for round in 0..4 {
-            // Add constants
-            for i in 0..12 {
-                cpu_state_before_internal[i] += GoldilocksField::from_canonical_u64(
-                    POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
-                );
-            }
-            // S-box all elements
-            for i in 0..12 {
-                cpu_state_before_internal[i] = cpu_state_before_internal[i].exp_u64(7);
-            }
-            // External linear layer (we'll use the reference implementation)
-            cpu_state_before_internal =
-                apply_full_external_linear_layer_to_state(&cpu_state_before_internal);
-        }
-
-        // Now test only the internal rounds on GPU
-        let input_data: Vec<GfWgls> = cpu_state_before_internal.map(GfWgls::from).to_vec();
+        // test_case.input is already the state after initial external rounds
+        // test_case.expected is the state after internal rounds only
+        let input_data: Vec<GfWgls> = test_case.input.map(GfWgls::from).to_vec();
 
         let shader_source = format!(
             "
@@ -2281,17 +2084,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         let data = buffer_slice.get_mapped_range();
         let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
 
-        // Apply internal rounds on CPU for comparison
-        let mut cpu_after_internal = cpu_state_before_internal;
-        use qp_poseidon_constants::POSEIDON2_INTERNAL_CONSTANTS_RAW;
-
-        // Apply 22 internal rounds on CPU
-        for round in 0..22 {
-            cpu_after_internal[0] +=
-                GoldilocksField::from_canonical_u64(POSEIDON2_INTERNAL_CONSTANTS_RAW[round]);
-            cpu_after_internal[0] = cpu_after_internal[0].exp_u64(7);
-            cpu_after_internal = apply_internal_linear_layer_to_state(&cpu_after_internal);
-        }
+        // The expected result is already computed in the test vector
+        let cpu_after_internal = test_case.expected;
 
         // Compare GPU vs CPU results
         let gpu_state: [GoldilocksField; 12] = core::array::from_fn(|j| {
@@ -2308,23 +2102,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         }
 
         if test_passed {
-            passed_tests += 1;
+            results.add_pass();
         } else {
-            failed_tests.push(test_idx + 1);
-            if failed_tests.len() <= 5 {
-                println!("\nInternal rounds only test case {} FAILED:", test_idx + 1);
-                for j in 0..3 {
-                    println!(
-                        "  Expected [{}]: 0x{:016x}",
-                        j,
-                        cpu_after_internal[j].to_canonical_u64()
-                    );
-                    println!(
-                        "  GPU      [{}]: 0x{:016x}",
-                        j,
-                        gpu_state[j].to_canonical_u64()
-                    );
-                }
+            results.add_failure(test_idx + 1);
+            if results.failed.len() <= 5 {
+                let expected_strings: Vec<String> = cpu_after_internal
+                    .iter()
+                    .take(3)
+                    .map(|x| format!("0x{:016x}", x.to_canonical_u64()))
+                    .collect();
+                let actual_strings: Vec<String> = gpu_state
+                    .iter()
+                    .take(3)
+                    .map(|x| format!("0x{:016x}", x.to_canonical_u64()))
+                    .collect();
+                print_test_failure(
+                    "Internal rounds only",
+                    test_idx + 1,
+                    &expected_strings,
+                    &actual_strings,
+                    3,
+                );
             }
         }
 
@@ -2333,31 +2131,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print final summary
-    println!("\n=== INTERNAL ROUNDS ONLY TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All internal rounds only tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        return Err(format!(
-            "{} out of {} internal rounds only tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_internal_constants_verification(
@@ -2472,1073 +2246,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         }
     }
 
-    println!("\n=== INTERNAL CONSTANTS TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All internal constants match perfectly!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed constant indices: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} internal constants failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    Ok(())
-}
-
-pub async fn test_poseidon2_internal_linear_layer_debug(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔍 Debugging internal linear layer...");
-
-    // Create shader that tests just the internal linear layer
-    let shader_source = format!(
-        "
-{}
-
-// Debug entry point for internal linear layer only
-@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
-@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
-
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let test_id = global_id.x;
-    let offset = test_id * 12u;
-
-    // Copy input to local state
-    var state: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = input_state[offset + i];
-    }}
-
-    // Apply only internal linear layer
-    internal_linear_layer(&state);
-
-    // Write result
-    for (var i = 0u; i < 12u; i++) {{
-        output_state[offset + i] = state[i];
-    }}
-}}
-",
-        include_str!("mining.wgsl")
-    );
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Internal Linear Layer Debug Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Internal Linear Layer Debug Pipeline"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-    // Test with the state after initial external rounds (known good state)
-    let test_input = [
-        GoldilocksField::from_canonical_u64(0xeafc65ec547d4e5b),
-        GoldilocksField::from_canonical_u64(0xbb6ff3df32c3d9be),
-        GoldilocksField::from_canonical_u64(0x2e93cceeb64b78f9),
-        GoldilocksField::from_canonical_u64(0xf825448333652967),
-        GoldilocksField::from_canonical_u64(0xb593c8a79af3bd64),
-        GoldilocksField::from_canonical_u64(0x39c0e65cc7bf9360),
-        GoldilocksField::from_canonical_u64(0xd8310e4fdd1d9b4f),
-        GoldilocksField::from_canonical_u64(0x35ed371c383492f4),
-        GoldilocksField::from_canonical_u64(0x42f851a9a946a114),
-        GoldilocksField::from_canonical_u64(0x0f3adf1db998dced),
-        GoldilocksField::from_canonical_u64(0x909ee3fe9e7e9d00),
-        GoldilocksField::from_canonical_u64(0xca051e0d28866e0a),
-    ];
-
-    let mut input_data = Vec::new();
-    for &field_elem in &test_input {
-        input_data.push(GfWgls::from(field_elem));
-    }
-
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Internal Linear Debug Input Buffer"),
-        contents: bytemuck::cast_slice(&input_data),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Internal Linear Debug Output Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Internal Linear Debug Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Internal Linear Debug Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Internal Linear Debug Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Internal Linear Debug Staging Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    encoder.copy_buffer_to_buffer(
-        &output_buffer,
-        0,
-        &staging_buffer,
-        0,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let buffer_slice = staging_buffer.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-
-    let data = buffer_slice.get_mapped_range();
-    let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
-
-    // Compute CPU reference for internal linear layer
-    let mut cpu_state = test_input;
-
-    // CPU internal linear layer implementation
-    let mut result = [GoldilocksField::ZERO; 12];
-
-    // Sum all elements
-    let mut sum = GoldilocksField::ZERO;
-    for i in 0..12 {
-        sum += cpu_state[i];
-    }
-
-    // Apply diagonal matrix: result[i] = state[i] * diag[i] + sum
-    // Use the reference diagonal values from Plonky3 MATRIX_DIAG_12_GOLDILOCKS
-    let diagonal_values = [
-        0xc3b6c08e23ba9300u64,
-        0xd84b5de94a324fb6u64,
-        0x0d0c371c5b35b84fu64,
-        0x7964f570e7188037u64,
-        0x5daf18bbd996604bu64,
-        0x6743bc47b9595257u64,
-        0x5528b9362c59bb70u64,
-        0xac45e25b7127b68bu64,
-        0xa2077d7dfbb606b5u64,
-        0xf3faac6faee378aeu64,
-        0x0c6388b51545e883u64,
-        0xd27dbb6944917b60u64,
-    ];
-    for i in 0..12 {
-        let diag_val = GoldilocksField::from_canonical_u64(diagonal_values[i]);
-        result[i] = cpu_state[i] * diag_val + sum;
-    }
-
-    // Compare results
-    let mut matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = gpu_result[i].into();
-        if gpu_gf.to_canonical_u64() != result[i].to_canonical_u64() {
-            matches = false;
-            break;
-        }
-    }
-
-    let mut passed_tests = 0;
-    let mut failed_tests = Vec::new();
-    let total_tests = 1;
-
-    if matches {
-        passed_tests += 1;
-    } else {
-        failed_tests.push(1);
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    // Print clean summary like gf_mul/sbox tests
-    println!("\n=== INTERNAL LINEAR LAYER DEBUG TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All internal linear layer debug tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} internal linear layer debug tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-pub async fn test_poseidon2_first_internal_rounds_debug(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔍 Debugging first 3 internal rounds step by step...");
-
-    // Create shader that applies initial external + first 3 internal rounds step by step
-    let shader_source = format!(
-        "
-{}
-
-// Debug entry point for first few internal rounds
-@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
-@group(0) @binding(1) var<storage, read_write> after_initial_external: array<GoldilocksField>;
-@group(0) @binding(2) var<storage, read_write> after_internal_0_const: array<GoldilocksField>;
-@group(0) @binding(3) var<storage, read_write> after_internal_0_sbox: array<GoldilocksField>;
-@group(0) @binding(4) var<storage, read_write> after_internal_0_linear: array<GoldilocksField>;
-@group(0) @binding(5) var<storage, read_write> after_internal_1_linear: array<GoldilocksField>;
-@group(0) @binding(6) var<storage, read_write> after_internal_2_linear: array<GoldilocksField>;
-
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let test_id = global_id.x;
-    let offset = test_id * 12u;
-
-    // Copy input to local state
-    var state: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = input_state[offset + i];
-    }}
-
-    // Apply initial 4 external rounds
-    for (var round = 0u; round < 4u; round++) {{
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
-        }}
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = sbox(state[i]);
-        }}
-        external_linear_layer(&state);
-    }}
-
-    // Save after initial external
-    for (var i = 0u; i < 12u; i++) {{
-        after_initial_external[offset + i] = state[i];
-    }}
-
-    // Internal round 0 - step by step
-    state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[0]));
-    for (var i = 0u; i < 12u; i++) {{
-        after_internal_0_const[offset + i] = state[i];
-    }}
-
-    state[0] = sbox(state[0]);
-    for (var i = 0u; i < 12u; i++) {{
-        after_internal_0_sbox[offset + i] = state[i];
-    }}
-
-    internal_linear_layer(&state);
-    for (var i = 0u; i < 12u; i++) {{
-        after_internal_0_linear[offset + i] = state[i];
-    }}
-
-    // Internal round 1
-    state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[1]));
-    state[0] = sbox(state[0]);
-    internal_linear_layer(&state);
-    for (var i = 0u; i < 12u; i++) {{
-        after_internal_1_linear[offset + i] = state[i];
-    }}
-
-    // Internal round 2
-    state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[2]));
-    state[0] = sbox(state[0]);
-    internal_linear_layer(&state);
-    for (var i = 0u; i < 12u; i++) {{
-        after_internal_2_linear[offset + i] = state[i];
-    }}
-}}
-",
-        include_str!("mining.wgsl")
-    );
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("First Internal Rounds Debug Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("First Internal Rounds Debug Pipeline"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-    // Test with all zeros input
-    let zero_input = [GoldilocksField::ZERO; 12];
-    let mut input_data = Vec::new();
-    for &field_elem in &zero_input {
-        input_data.push(GfWgls::from(field_elem));
-    }
-
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("First Internal Debug Input Buffer"),
-        contents: bytemuck::cast_slice(&input_data),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    // Create 6 output buffers for each debug stage
-    let buffers: Vec<_> = (0..6)
-        .map(|i| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Internal Debug Buffer {}", i)),
-                size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        })
-        .collect();
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("First Internal Debug Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: buffers[0].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: buffers[1].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: buffers[2].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: buffers[3].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: buffers[4].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: buffers[5].as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("First Internal Debug Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("First Internal Debug Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("First Internal Debug Staging Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12 * 6) as u64, // 6 buffers
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Copy all buffers to staging
-    for (i, buffer) in buffers.iter().enumerate() {
-        encoder.copy_buffer_to_buffer(
-            buffer,
-            0,
-            &staging_buffer,
-            (std::mem::size_of::<GfWgls>() * 12 * i) as u64,
-            (std::mem::size_of::<GfWgls>() * 12) as u64,
-        );
-    }
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let buffer_slice = staging_buffer.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-
-    let data = buffer_slice.get_mapped_range();
-    let debug_data: &[GfWgls] = bytemuck::cast_slice(&data);
-
-    // Compute CPU reference step by step
-    let mut cpu_state = zero_input;
-    use qp_poseidon_constants::{
-        POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW, POSEIDON2_INTERNAL_CONSTANTS_RAW,
-    };
-
-    // Apply initial external rounds on CPU
-    let two = GoldilocksField::from_canonical_u64(2);
-    let three = GoldilocksField::from_canonical_u64(3);
-
-    for round in 0..4 {
-        // Add constants
-        for i in 0..12 {
-            cpu_state[i] += GoldilocksField::from_canonical_u64(
-                POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
-            );
-        }
-        // S-box
-        for i in 0..12 {
-            cpu_state[i] = cpu_state[i].exp_u64(7);
-        }
-        // External linear layer
-        for chunk in 0..3 {
-            let offset = chunk * 4;
-            let mut chunk_state = [GoldilocksField::ZERO; 4];
-            for i in 0..4 {
-                chunk_state[i] = cpu_state[offset + i];
-            }
-            let new_0 =
-                two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
-            let new_1 =
-                chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
-            let new_2 =
-                chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
-            let new_3 =
-                three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
-            cpu_state[offset] = new_0;
-            cpu_state[offset + 1] = new_1;
-            cpu_state[offset + 2] = new_2;
-            cpu_state[offset + 3] = new_3;
-        }
-        let mut sums = [GoldilocksField::ZERO; 4];
-        for k in 0..4 {
-            for j in (k..12).step_by(4) {
-                sums[k] += cpu_state[j];
-            }
-        }
-        for i in 0..12 {
-            cpu_state[i] += sums[i % 4];
-        }
-    }
-
-    println!("✅ After initial external (matches previous test)");
-
-    // Internal round 0
-    let mut cpu_after_const = cpu_state;
-    cpu_after_const[0] += GoldilocksField::from_canonical_u64(POSEIDON2_INTERNAL_CONSTANTS_RAW[0]);
-
-    // Compare results
-    let mut matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[12 + i].into();
-        if gpu_gf.to_canonical_u64() != cpu_after_const[i].to_canonical_u64() {
-            matches = false;
-            break;
-        }
-    }
-
-    let mut passed_tests = 0;
-    let mut failed_tests = Vec::new();
-    let total_tests = 1;
-
-    if matches {
-        passed_tests += 1;
-    } else {
-        failed_tests.push(1);
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    // Print clean summary like gf_mul/sbox tests
-    println!("\n=== FIRST INTERNAL ROUNDS DEBUG TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All first internal rounds debug tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} first internal rounds debug tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-pub async fn test_poseidon2_terminal_external_rounds_debug(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create shader that applies everything except terminal external rounds
-    let shader_source = format!(
-        "
-{}
-
-// Debug entry point for testing without terminal external rounds
-@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
-@group(0) @binding(1) var<storage, read_write> after_initial_plus_internal: array<GoldilocksField>;
-@group(0) @binding(2) var<storage, read_write> after_complete_permutation: array<GoldilocksField>;
-
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let test_id = global_id.x;
-    let offset = test_id * 12u;
-
-    // Copy input to local state
-    var state: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = input_state[offset + i];
-    }}
-
-    // Apply initial 4 external rounds
-    for (var round = 0u; round < 4u; round++) {{
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
-        }}
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = sbox(state[i]);
-        }}
-        external_linear_layer(&state);
-    }}
-
-    // Apply all 22 internal rounds
-    for (var round = 0u; round < 22u; round++) {{
-        state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[round]));
-        state[0] = sbox(state[0]);
-        internal_linear_layer(&state);
-    }}
-
-    // Save state after initial external + internal
-    for (var i = 0u; i < 12u; i++) {{
-        after_initial_plus_internal[offset + i] = state[i];
-    }}
-
-    // Apply terminal 4 external rounds
-    for (var round = 0u; round < 4u; round++) {{
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = gf_add(state[i], gf_from_const(TERMINAL_EXTERNAL_CONSTANTS[round][i]));
-        }}
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = sbox(state[i]);
-        }}
-        external_linear_layer(&state);
-    }}
-
-    // Save final state
-    for (var i = 0u; i < 12u; i++) {{
-        after_complete_permutation[offset + i] = state[i];
-    }}
-}}
-",
-        include_str!("mining.wgsl")
-    );
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Terminal External Rounds Debug Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Terminal External Rounds Debug Pipeline"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-    // Test with all zeros input
-    let zero_input = [GoldilocksField::ZERO; 12];
-    let mut input_data = Vec::new();
-    for &field_elem in &zero_input {
-        input_data.push(GfWgls::from(field_elem));
-    }
-
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Terminal Debug Input Buffer"),
-        contents: bytemuck::cast_slice(&input_data),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    let after_initial_internal_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After Initial+Internal Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let after_complete_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("After Complete Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Terminal Debug Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: after_initial_internal_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: after_complete_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Terminal Debug Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Terminal Debug Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Terminal Debug Staging Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12 * 2) as u64, // 2 buffers
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    encoder.copy_buffer_to_buffer(
-        &after_initial_internal_buffer,
-        0,
-        &staging_buffer,
-        0,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &after_complete_buffer,
-        0,
-        &staging_buffer,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-        (std::mem::size_of::<GfWgls>() * 12) as u64,
-    );
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let buffer_slice = staging_buffer.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-
-    let data = buffer_slice.get_mapped_range();
-    let debug_data: &[GfWgls] = bytemuck::cast_slice(&data);
-
-    // Compare with CPU reference
-    use plonky2::hash::poseidon2::P2Permuter;
-    let full_expected = <GoldilocksField as P2Permuter>::permute(zero_input);
-
-    // Check if complete permutation matches
-    let mut final_matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[12 + i].into();
-        if gpu_gf.to_canonical_u64() != full_expected[i].to_canonical_u64() {
-            final_matches = false;
-            break;
-        }
-    }
-
-    let mut passed_tests = 0;
-    let mut failed_tests = Vec::new();
-    let total_tests = 1;
-
-    if final_matches {
-        passed_tests += 1;
-    } else {
-        failed_tests.push(1);
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    // Print clean summary like gf_mul/sbox tests
-    println!("\n=== TERMINAL EXTERNAL ROUNDS DEBUG TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All terminal external rounds debug tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} terminal external rounds debug tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-pub async fn test_poseidon2_sequential_step_by_step_debug(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔍 Step-by-step debugging sequential [1,2,3...12] input...");
-
-    // Create shader that applies sequential input step by step
-    let shader_source = format!(
-        "
-{}
-
-// Debug entry point for sequential input step by step
-@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
-@group(0) @binding(1) var<storage, read_write> after_initial_external: array<GoldilocksField>;
-@group(0) @binding(2) var<storage, read_write> after_first_internal_const: array<GoldilocksField>;
-@group(0) @binding(3) var<storage, read_write> after_first_internal_sbox: array<GoldilocksField>;
-@group(0) @binding(4) var<storage, read_write> after_first_internal_linear: array<GoldilocksField>;
-
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let test_id = global_id.x;
-    let offset = test_id * 12u;
-
-    // Copy input to local state
-    var state: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {{
-        state[i] = input_state[offset + i];
-    }}
-
-    // Apply initial 4 external rounds
-    for (var round = 0u; round < 4u; round++) {{
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
-        }}
-        for (var i = 0u; i < 12u; i++) {{
-            state[i] = sbox(state[i]);
-        }}
-        external_linear_layer(&state);
-    }}
-
-    // Save after initial external
-    for (var i = 0u; i < 12u; i++) {{
-        after_initial_external[offset + i] = state[i];
-    }}
-
-    // First internal round step by step
-    state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[0]));
-    for (var i = 0u; i < 12u; i++) {{
-        after_first_internal_const[offset + i] = state[i];
-    }}
-
-    state[0] = sbox(state[0]);
-    for (var i = 0u; i < 12u; i++) {{
-        after_first_internal_sbox[offset + i] = state[i];
-    }}
-
-    internal_linear_layer(&state);
-    for (var i = 0u; i < 12u; i++) {{
-        after_first_internal_linear[offset + i] = state[i];
-    }}
-}}
-",
-        include_str!("mining.wgsl")
-    );
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Sequential Step Debug Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Sequential Step Debug Pipeline"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-    // Sequential input [1,2,3,4,5,6,7,8,9,10,11,12]
-    let sequential_input: [GoldilocksField; 12] =
-        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
-
-    let mut input_data = Vec::new();
-    for &field_elem in &sequential_input {
-        input_data.push(GfWgls::from(field_elem));
-    }
-
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Sequential Step Input Buffer"),
-        contents: bytemuck::cast_slice(&input_data),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    // Create 4 output buffers for each debug stage
-    let buffers: Vec<_> = (0..4)
-        .map(|i| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Sequential Step Debug Buffer {}", i)),
-                size: (std::mem::size_of::<GfWgls>() * 12) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        })
-        .collect();
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Sequential Step Debug Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: buffers[0].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: buffers[1].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: buffers[2].as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: buffers[3].as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Sequential Step Debug Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Sequential Step Debug Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
-    }
-
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Sequential Step Debug Staging Buffer"),
-        size: (std::mem::size_of::<GfWgls>() * 12 * 4) as u64, // 4 buffers
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Copy all buffers to staging
-    for (i, buffer) in buffers.iter().enumerate() {
-        encoder.copy_buffer_to_buffer(
-            buffer,
-            0,
-            &staging_buffer,
-            (std::mem::size_of::<GfWgls>() * 12 * i) as u64,
-            (std::mem::size_of::<GfWgls>() * 12) as u64,
-        );
-    }
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let buffer_slice = staging_buffer.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-
-    let data = buffer_slice.get_mapped_range();
-    let debug_data: &[GfWgls] = bytemuck::cast_slice(&data);
-
-    // Compute CPU reference step by step
-    let mut cpu_state = sequential_input;
-    use qp_poseidon_constants::{
-        POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW, POSEIDON2_INTERNAL_CONSTANTS_RAW,
-    };
-
-    // Apply initial external rounds on CPU
-    let two = GoldilocksField::from_canonical_u64(2);
-    let three = GoldilocksField::from_canonical_u64(3);
-
-    for round in 0..4 {
-        // Add constants
-        for i in 0..12 {
-            cpu_state[i] += GoldilocksField::from_canonical_u64(
-                POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
-            );
-        }
-        // S-box
-        for i in 0..12 {
-            cpu_state[i] = cpu_state[i].exp_u64(7);
-        }
-        // External linear layer
-        for chunk in 0..3 {
-            let offset = chunk * 4;
-            let mut chunk_state = [GoldilocksField::ZERO; 4];
-            for i in 0..4 {
-                chunk_state[i] = cpu_state[offset + i];
-            }
-            let new_0 =
-                two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
-            let new_1 =
-                chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
-            let new_2 =
-                chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
-            let new_3 =
-                three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
-            cpu_state[offset] = new_0;
-            cpu_state[offset + 1] = new_1;
-            cpu_state[offset + 2] = new_2;
-            cpu_state[offset + 3] = new_3;
-        }
-        let mut sums = [GoldilocksField::ZERO; 4];
-        for k in 0..4 {
-            for j in (k..12).step_by(4) {
-                sums[k] += cpu_state[j];
-            }
-        }
-        for i in 0..12 {
-            cpu_state[i] += sums[i % 4];
-        }
-    }
-
-    println!("🔍 After initial external rounds (GPU vs CPU):");
-    let mut initial_external_matches = true;
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[i].into();
-        if gpu_gf.to_canonical_u64() == cpu_state[i].to_canonical_u64() {
-            if i == 0 {
-                println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
-            }
-        } else {
-            println!(
-                "  [{}] ❌ GPU=0x{:016x}, CPU=0x{:016x}",
-                i,
-                gpu_gf.to_canonical_u64(),
-                cpu_state[i].to_canonical_u64()
-            );
-            initial_external_matches = false;
-        }
-    }
-
-    if initial_external_matches {
-        println!("✅ Initial external rounds match for sequential input");
-    } else {
-        println!("❌ Initial external rounds fail for sequential input");
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    Ok(())
+    let mut results = TestResults::new("internal constants".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_sequential_cpu_vs_gpu_internal(
@@ -3818,35 +2529,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print clean summary
-    println!("\n=== SEQUENTIAL CPU VS GPU INTERNAL TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All sequential CPU vs GPU internal tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} sequential CPU vs GPU internal tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    Ok(())
+    let mut results = TestResults::new("sequential cpu vs gpu internal".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_poseidon2_terminal_external_rounds_issue(
@@ -4145,35 +2831,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print final summary
-    println!("\n=== TERMINAL EXTERNAL CONSTANTS TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All terminal external constants match perfectly!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed constant indices: {:?}", failed_tests);
-        return Err(format!(
-            "{} out of {} terminal external constants failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into());
-    }
-
-    drop(data);
-    staging_buffer.unmap();
-
-    Ok(())
+    let mut results = TestResults::new("terminal external constants".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_gf_mul(
@@ -4388,27 +3049,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print final summary
-    println!("\n=== GF_MUL TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        passed_tests as f32 / total_tests as f32 * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All tests PASSED!");
-    } else {
-        println!(
-            "Failed: {} ({:.1}%)",
-            failed_tests.len(),
-            failed_tests.len() as f32 / total_tests as f32 * 100.0
-        );
-        println!("Failed test cases: {:?}", failed_tests);
-        return Err(format!("{} out of {} tests failed", failed_tests.len(), total_tests).into());
-    }
-
-    Ok(())
+    let mut results = TestResults::new("gf_mul".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_mds_matrix(
@@ -4419,6 +3063,7 @@ pub async fn test_mds_matrix(
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
+    let mut failure_details = Vec::new();
 
     // Read the mining shader source and create a test wrapper
     let mining_shader_source = include_str!("mining.wgsl");
@@ -4656,8 +3301,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             if gpu_result == test_case.expected {
                 passed_tests += 1;
             } else {
-                failed_tests.push((test_case.clone(), gpu_result));
-                if failed_tests.len() <= 5 {
+                let test_index = i + 1;
+                failed_tests.push(test_index);
+                failure_details.push((test_case.clone(), gpu_result));
+                if failure_details.len() <= 5 {
                     println!(
                         "❌ FAILED: Input=[{}, {}, {}, {}], Expected=[{}, {}, {}, {}], Got=[{}, {}, {}, {}]",
                         test_case.input[0].to_canonical_u64(),
@@ -4681,24 +3328,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         staging_buffer.unmap();
     }
 
-    println!("\n=== MDS TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        (passed_tests as f64 / total_tests as f64) * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All tests PASSED!");
-    } else {
-        println!("❌ Failed: {} tests", failed_tests.len());
-        if failed_tests.len() > 5 {
-            println!("  (showing first 5 failures above)");
-        }
-    }
-
-    Ok(())
+    let mut results = TestResults::new("mds matrix".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_internal_linear_layer(
@@ -4709,6 +3342,7 @@ pub async fn test_internal_linear_layer(
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
+    let mut failure_details = Vec::new();
 
     // Read the mining shader source and create a test wrapper
     let mining_shader_source = include_str!("mining.wgsl");
@@ -4924,8 +3558,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             if all_match {
                 passed_tests += 1;
             } else {
-                failed_tests.push((test_case.clone(), gpu_result));
-                if failed_tests.len() <= 3 {
+                let test_index = i + 1;
+                failed_tests.push(test_index);
+                failure_details.push((test_case.clone(), gpu_result));
+                if failure_details.len() <= 3 {
                     println!("❌ FAILED: Internal linear layer test");
                     println!("Input state:");
                     for (j, &val) in test_case.input.iter().enumerate() {
@@ -4957,26 +3593,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         staging_buffer.unmap();
     }
 
-    println!(
-        "Internal Linear Layer Tests: {}/{} passed ({:.1}%)",
-        passed_tests,
-        total_tests,
-        100.0 * passed_tests as f64 / total_tests as f64
-    );
-
-    if !failed_tests.is_empty() {
-        println!(
-            "❌ {} internal linear layer tests failed",
-            failed_tests.len()
-        );
-        if failed_tests.len() > 3 {
-            println!("   (showing only first 3 failures)");
-        }
-    } else {
-        println!("✅ All internal linear layer tests passed!");
-    }
-
-    Ok(())
+    let mut results = TestResults::new("internal linear layer".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_external_linear_layer(
@@ -5141,7 +3761,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                 passed_tests += 1;
             } else {
                 let test_index = batch_start * BATCH_SIZE + i;
-                failed_tests.push((test_index, vector.clone()));
+                failed_tests.push(test_index);
             }
         }
 
@@ -5150,32 +3770,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print results summary
-    println!("=== EXTERNAL LINEAR LAYER TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        (passed_tests as f64 / total_tests as f64) * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("✅ All external linear layer tests passed!");
-        Ok(())
-    } else {
-        println!(
-            "❌ {} external linear layer tests failed",
-            failed_tests.len()
-        );
-
-        // Show detailed failure information for first few failures
-        let failures_to_show = std::cmp::min(3, failed_tests.len());
-        println!("   (showing only first {} failures)", failures_to_show);
-
-        // We'd need to re-run the GPU computation to get detailed failure info
-        // For now, just report the count
-
-        Err("External linear layer tests failed".into())
-    }
+    let mut results = TestResults::new("external linear layer".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }
 
 pub async fn test_sbox(
@@ -5186,11 +3784,12 @@ pub async fn test_sbox(
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
+    let mut failure_details = Vec::new();
 
     const BATCH_SIZE: usize = 64;
     let batches = test_vectors.chunks(BATCH_SIZE);
 
-    for (batch_idx, batch) in batches.enumerate() {
+    for (_batch_idx, batch) in batches.enumerate() {
         // Convert test vectors to WGSL format
         let input_data: Vec<GfWgls> = batch
             .iter()
@@ -5314,8 +3913,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             if gpu_result == test_case.expected {
                 passed_tests += 1;
             } else {
-                failed_tests.push((test_case.clone(), gpu_result));
-                if failed_tests.len() <= 10 {
+                let test_index = i + 1;
+                failed_tests.push(test_index);
+                failure_details.push((test_case.clone(), gpu_result));
+                if failure_details.len() <= 10 {
                     println!(
                         "❌ FAILED: sbox(0x{:016x}) = 0x{:016x}, expected 0x{:016x}",
                         test_case.input.to_canonical_u64(),
@@ -5351,31 +3952,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         staging_buffer.unmap();
     }
 
-    println!("\n=== S-BOX TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
-    println!(
-        "Passed: {} ({:.1}%)",
-        passed_tests,
-        (passed_tests as f64 / total_tests as f64) * 100.0
-    );
-
-    if failed_tests.is_empty() {
-        println!("🎉 All S-box tests PASSED!");
-    } else {
-        println!("❌ Failed: {} tests", failed_tests.len());
-        if failed_tests.len() > 10 {
-            println!("  (showing first 10 failures above)");
-        }
-    }
-
-    if failed_tests.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} out of {} S-box tests failed",
-            failed_tests.len(),
-            total_tests
-        )
-        .into())
-    }
+    let mut results = TestResults::new("s-box".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
 }

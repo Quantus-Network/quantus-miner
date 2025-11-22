@@ -80,24 +80,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Constants verification test failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_rounds_0_and_1_debug(&device, &queue).await {
-        eprintln!("❌ Rounds 0-1 debug test failed: {}", e);
-    }
-
     if let Err(e) = tests::test_poseidon2_internal_constants_verification(&device, &queue).await {
         eprintln!("❌ Internal constants verification test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_internal_linear_layer_debug(&device, &queue).await {
-        eprintln!("❌ Internal linear layer debug test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_first_internal_rounds_debug(&device, &queue).await {
-        eprintln!("❌ First internal rounds debug test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_terminal_external_rounds_debug(&device, &queue).await {
-        eprintln!("❌ Terminal external rounds debug test failed: {}", e);
     }
 
     if let Err(e) = tests::test_poseidon2_internal_rounds_only(&device, &queue).await {
@@ -119,10 +103,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "❌ Terminal external constants verification test failed: {}",
             e
         );
-    }
-
-    if let Err(e) = tests::test_poseidon2_sequential_step_by_step_debug(&device, &queue).await {
-        eprintln!("❌ Sequential step by step debug test failed: {}", e);
     }
 
     println!("🎯 Testing Poseidon2 permutation with proper conversion...");
