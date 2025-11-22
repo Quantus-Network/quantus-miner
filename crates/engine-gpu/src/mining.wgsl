@@ -45,7 +45,6 @@ const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(
     array<u32, 2>(2700752774u, 1052996327u),
     array<u32, 2>(4063512019u, 1429786100u)
 );
-
 // Initial external round constants (4 rounds x 12 elements)
 const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(
     array<array<u32, 2>, 12>(
@@ -64,105 +63,105 @@ const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<arr
     ),
     array<array<u32, 2>, 12>(
         array<u32, 2>(1987505445u, 2913073372u),
-        array<u32, 2>(630903574u, 655361351u),
-        array<u32, 2>(3412085911u, 1258046621u),
-        array<u32, 2>(1456979578u, 1461113191u),
-        array<u32, 2>(523722014u, 526769230u),
-        array<u32, 2>(925368168u, 922771817u),
-        array<u32, 2>(4074853328u, 3855135279u),
-        array<u32, 2>(273563309u, 4248797356u),
-        array<u32, 2>(1762266526u, 3450728622u),
-        array<u32, 2>(1115336254u, 1107677022u),
-        array<u32, 2>(4174699389u, 3986946237u),
-        array<u32, 2>(3534029317u, 3543582418u)
+        array<u32, 2>(1426707734u, 655469195u),
+        array<u32, 2>(3385403543u, 1256631504u),
+        array<u32, 2>(1381422714u, 1458257259u),
+        array<u32, 2>(2453402910u, 528129365u),
+        array<u32, 2>(964329320u, 905986685u),
+        array<u32, 2>(1534247888u, 3842469367u),
+        array<u32, 2>(744525997u, 4241857185u),
+        array<u32, 2>(1756723870u, 3448331916u),
+        array<u32, 2>(3610291774u, 1105166073u),
+        array<u32, 2>(2596181885u, 3997051784u),
+        array<u32, 2>(3199845381u, 3533420525u)
     ),
     array<array<u32, 2>, 12>(
-        array<u32, 2>(2101518210u, 2109009407u),
-        array<u32, 2>(2323647532u, 2311068777u),
-        array<u32, 2>(3016422935u, 3015476255u),
-        array<u32, 2>(1378256883u, 3683616468u),
-        array<u32, 2>(2029516952u, 2022063001u),
-        array<u32, 2>(644616330u, 642915770u),
-        array<u32, 2>(2580628271u, 2576506160u),
-        array<u32, 2>(1689124307u, 1689124307u),
-        array<u32, 2>(4016144568u, 4016127928u),
-        array<u32, 2>(1335766254u, 1335740398u),
-        array<u32, 2>(1465316391u, 1465316391u),
-        array<u32, 2>(4119764157u, 4119617533u)
+        array<u32, 2>(4127777666u, 2103183598u),
+        array<u32, 2>(2867888172u, 2309916828u),
+        array<u32, 2>(1831532055u, 3009056407u),
+        array<u32, 2>(2947502451u, 3675530062u),
+        array<u32, 2>(3565886616u, 2029012066u),
+        array<u32, 2>(3833391242u, 642945968u),
+        array<u32, 2>(1773785903u, 2577032347u),
+        array<u32, 2>(1770914259u, 1689297286u),
+        array<u32, 2>(3752758200u, 3993707216u),
+        array<u32, 2>(3389302766u, 1339375184u),
+        array<u32, 2>(2180141127u, 1466089441u),
+        array<u32, 2>(3199591357u, 4111832034u)
     ),
     array<array<u32, 2>, 12>(
-        array<u32, 2>(507988087u, 507988087u),
-        array<u32, 2>(1650295309u, 1650295309u),
-        array<u32, 2>(2867864750u, 2867864750u),
-        array<u32, 2>(1679868924u, 1679868924u),
-        array<u32, 2>(999842784u, 999842784u),
-        array<u32, 2>(603209949u, 603209949u),
-        array<u32, 2>(2869577370u, 2869577370u),
-        array<u32, 2>(3936230090u, 3936230090u),
-        array<u32, 2>(3435906572u, 3435906572u),
-        array<u32, 2>(2433830883u, 2433830883u),
-        array<u32, 2>(1537056815u, 1537056815u),
-        array<u32, 2>(3757386231u, 3757386231u)
+        array<u32, 2>(1625498743u, 509487959u),
+        array<u32, 2>(4188712685u, 1646551713u),
+        array<u32, 2>(3451003566u, 2854767422u),
+        array<u32, 2>(1412166652u, 1674110767u),
+        array<u32, 2>(3410212320u, 1000704202u),
+        array<u32, 2>(3381743837u, 602777331u),
+        array<u32, 2>(3131873882u, 2866003620u),
+        array<u32, 2>(2610174026u, 3923414377u),
+        array<u32, 2>(3644719692u, 3450945356u),
+        array<u32, 2>(1458984419u, 2418851081u),
+        array<u32, 2>(3344519983u, 1531855103u),
+        array<u32, 2>(2721413879u, 3732495392u)
     )
 );
 
 // Terminal external round constants (4 rounds x 12 elements)
 const TERMINAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(
     array<array<u32, 2>, 12>(
-        array<u32, 2>(2067639406u, 2067639406u),
-        array<u32, 2>(342838134u, 342838134u),
-        array<u32, 2>(2148923528u, 2148923528u),
-        array<u32, 2>(1836351170u, 1836351170u),
-        array<u32, 2>(2714619123u, 2714619123u),
-        array<u32, 2>(4142963247u, 4142963247u),
-        array<u32, 2>(884199780u, 884199780u),
-        array<u32, 2>(2970893770u, 2970893770u),
-        array<u32, 2>(1697177254u, 1697177254u),
-        array<u32, 2>(249070999u, 249070999u),
-        array<u32, 2>(485491595u, 485491595u),
-        array<u32, 2>(1718641338u, 1718641338u)
+        array<u32, 2>(3773451374u, 2071119161u),
+        array<u32, 2>(3805190518u, 340095962u),
+        array<u32, 2>(2402679944u, 2149591222u),
+        array<u32, 2>(743434178u, 1832305922u),
+        array<u32, 2>(2847530739u, 2718290175u),
+        array<u32, 2>(514243119u, 4142392203u),
+        array<u32, 2>(3844443492u, 888639642u),
+        array<u32, 2>(2008645578u, 2957397405u),
+        array<u32, 2>(3732799654u, 1692252629u),
+        array<u32, 2>(664231319u, 248567644u),
+        array<u32, 2>(287781771u, 482031345u),
+        array<u32, 2>(3486561978u, 1718871301u)
     ),
     array<array<u32, 2>, 12>(
-        array<u32, 2>(812285441u, 1616511558u),
-        array<u32, 2>(1074098767u, 1073693711u),
-        array<u32, 2>(3896701389u, 3896638389u),
-        array<u32, 2>(4169265998u, 4169265934u),
-        array<u32, 2>(4095009929u, 4095009865u),
-        array<u32, 2>(1835728118u, 1835728054u),
-        array<u32, 2>(4176537227u, 4176537163u),
-        array<u32, 2>(1478766714u, 1478766650u),
-        array<u32, 2>(376881709u, 376881645u),
-        array<u32, 2>(555692597u, 555692533u),
-        array<u32, 2>(2968574966u, 2968574902u),
-        array<u32, 2>(3635110935u, 3635110871u)
+        array<u32, 2>(814165505u, 1616875560u),
+        array<u32, 2>(2123759183u, 1070984082u),
+        array<u32, 2>(2722916813u, 3893372341u),
+        array<u32, 2>(3726899022u, 4157656693u),
+        array<u32, 2>(2824360073u, 4086907574u),
+        array<u32, 2>(4155973110u, 1837140488u),
+        array<u32, 2>(2297731723u, 4169165669u),
+        array<u32, 2>(707924090u, 1474243980u),
+        array<u32, 2>(1298483757u, 384287239u),
+        array<u32, 2>(4243798069u, 557703745u),
+        array<u32, 2>(1510569718u, 2968696976u),
+        array<u32, 2>(3174388759u, 3638808363u)
     ),
     array<array<u32, 2>, 12>(
-        array<u32, 2>(2545243919u, 3830388836u),
-        array<u32, 2>(1989298984u, 1989298920u),
-        array<u32, 2>(151916301u, 151916237u),
-        array<u32, 2>(2556322548u, 1995322484u),
-        array<u32, 2>(238805938u, 238805874u),
-        array<u32, 2>(2490398575u, 2490398511u),
-        array<u32, 2>(2566222314u, 2566222250u),
-        array<u32, 2>(814653888u, 3828870544u),
-        array<u32, 2>(522453199u, 522453135u),
-        array<u32, 2>(188424356u, 188424292u),
-        array<u32, 2>(1649066023u, 1649065959u),
-        array<u32, 2>(1595705478u, 1595705414u)
+        array<u32, 2>(2044277519u, 3835193622u),
+        array<u32, 2>(2743212840u, 1983595986u),
+        array<u32, 2>(3943309069u, 151568229u),
+        array<u32, 2>(424355060u, 1989274413u),
+        array<u32, 2>(867046322u, 239293714u),
+        array<u32, 2>(4230997871u, 2479068123u),
+        array<u32, 2>(1565052394u, 2566260552u),
+        array<u32, 2>(815274432u, 3822673712u),
+        array<u32, 2>(1051683535u, 519405993u),
+        array<u32, 2>(2687564964u, 186958263u),
+        array<u32, 2>(1450226471u, 1648586942u),
+        array<u32, 2>(1511122054u, 1595811937u)
     ),
     array<array<u32, 2>, 12>(
-        array<u32, 2>(2466398251u, 4275150062u),
-        array<u32, 2>(1928488963u, 1928488899u),
-        array<u32, 2>(3871900792u, 3871900728u),
-        array<u32, 2>(1463617809u, 1463617745u),
-        array<u32, 2>(4175880892u, 4175880828u),
-        array<u32, 2>(752107605u, 752107541u),
-        array<u32, 2>(2101968497u, 2101968433u),
-        array<u32, 2>(2239882257u, 2239882193u),
-        array<u32, 2>(1389589688u, 1389589624u),
-        array<u32, 2>(1344537748u, 1344537684u),
-        array<u32, 2>(3172231929u, 3172231865u),
-        array<u32, 2>(1780012361u, 3777952458u)
+        array<u32, 2>(2426274859u, 4261676319u),
+        array<u32, 2>(1207777283u, 1918363057u),
+        array<u32, 2>(3090099832u, 3870167883u),
+        array<u32, 2>(4101522705u, 1460796764u),
+        array<u32, 2>(201900220u, 4164567654u),
+        array<u32, 2>(2587682901u, 752404845u),
+        array<u32, 2>(2967564913u, 2100296475u),
+        array<u32, 2>(3404347409u, 2242778408u),
+        array<u32, 2>(3350048952u, 1386431957u),
+        array<u32, 2>(4093308564u, 1347177553u),
+        array<u32, 2>(2633812729u, 3169012324u),
+        array<u32, 2>(1727753673u, 3768793234u)
     )
 );
 
@@ -581,133 +580,6 @@ fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     return gf_reduce_8limb(unreduced);
 }
 
-// Simple test function to verify basic field operations
-fn test_field_operations() -> bool {
-    return true;
-}
-
-// Debug helper function to write state to debug buffer
-
-
-// COMPREHENSIVE TEST FUNCTIONS (disabled by default - can be called for validation)
-
-// S-box comprehensive test vectors - ALL PASSING (22 test vectors)
-fn debug_sbox_comprehensive_tests() {
-    let sbox_test_values = array<u32, 22>(
-        0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 15u, 16u, 31u, 32u,
-        63u, 64u, 127u, 128u, 255u, 256u, 511u, 512u, 1023u, 1024u
-    );
-
-    // Test each value and store results
-    for (var i = 0u; i < 22u; i++) {
-        let test_val = gf_from_u32(sbox_test_values[i]);
-        let sbox_result = sbox(test_val);
-
-        // S-box test results (debug_buffer removed)
-    }
-}
-
-// Field multiplication comprehensive tests - ALL PASSING (87 test vectors)
-fn debug_field_multiplication_tests() {
-    // FIELD MULTIPLICATION TEST for S-box debugging
-    let test_2 = gf_from_u32(2u);
-    let test_2_squared = gf_mul(test_2, test_2); // Should be 4
-    let test_2_cubed = gf_mul(test_2_squared, test_2); // Should be 8
-    let test_2_to_4 = gf_mul(test_2_squared, test_2_squared); // Should be 16
-    let test_2_to_6 = gf_mul(test_2_to_4, test_2_squared); // Should be 64
-    let test_2_to_7 = gf_mul(test_2_to_6, test_2); // Should be 128 = S-box(2)
-
-
-}
-
-// MDS matrix test vectors - 92% PASSING (need to debug edge cases)
-fn debug_mds_matrix_tests() {
-    let mds_test_chunks = array<array<u32, 4>, 8>(
-        array<u32, 4>(0u, 0u, 0u, 0u),      // [0,0,0,0]
-        array<u32, 4>(1u, 0u, 0u, 0u),      // [1,0,0,0]
-        array<u32, 4>(0u, 1u, 0u, 0u),      // [0,1,0,0]
-        array<u32, 4>(0u, 0u, 1u, 0u),      // [0,0,1,0]
-        array<u32, 4>(0u, 0u, 0u, 1u),      // [0,0,0,1]
-        array<u32, 4>(1u, 2u, 3u, 4u),      // [1,2,3,4]
-        array<u32, 4>(5u, 6u, 7u, 8u),      // [5,6,7,8]
-        array<u32, 4>(1u, 1u, 1u, 1u)       // [1,1,1,1]
-    );
-
-    // Test each 4-element chunk with the 4x4 MDS matrix
-    for (var test_idx = 0u; test_idx < 8u; test_idx++) {
-        var chunk_state: array<GoldilocksField, 4>;
-
-        // Convert to field elements
-        for (var i = 0u; i < 4u; i++) {
-            chunk_state[i] = gf_from_u32(mds_test_chunks[test_idx][i]);
-        }
-
-        // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
-        let two = gf_from_limbs(2u, 0u, 0u, 0u);
-        let three = gf_from_limbs(3u, 0u, 0u, 0u);
-
-        // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
-        let new_0 = gf_add(gf_add(gf_add(
-            gf_mul(chunk_state[0], two),
-            gf_mul(chunk_state[1], three)),
-            chunk_state[2]),
-            chunk_state[3]);
-
-        // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
-        let new_1 = gf_add(gf_add(gf_add(
-            chunk_state[0],
-            gf_mul(chunk_state[1], two)),
-            gf_mul(chunk_state[2], three)),
-            chunk_state[3]);
-
-        // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
-        let new_2 = gf_add(gf_add(gf_add(
-            chunk_state[0],
-            chunk_state[1]),
-            gf_mul(chunk_state[2], two)),
-            gf_mul(chunk_state[3], three));
-
-        // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
-        let new_3 = gf_add(gf_add(gf_add(
-            gf_mul(chunk_state[0], three),
-            chunk_state[1]),
-            chunk_state[2]),
-            gf_mul(chunk_state[3], two));
-
-
-    }
-}
-
-// Poseidon2 permutation test vectors
-fn debug_poseidon2_permutation_tests() {
-    // Test Vector 1: All zeros
-    var perm_test_1: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {
-        perm_test_1[i] = gf_zero();
-    }
-    poseidon2_permute(&perm_test_1);
-
-
-
-    // Test Vector 2: Sequential [1,2,3,4,5,6,7,8,9,10,11,12]
-    var perm_test_2: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {
-        perm_test_2[i] = gf_from_u32(i + 1u);
-    }
-    poseidon2_permute(&perm_test_2);
-
-
-
-    // Test Vector 3: First element 1, rest zeros
-    var perm_test_3: array<GoldilocksField, 12>;
-    for (var i = 0u; i < 12u; i++) {
-        perm_test_3[i] = gf_zero();
-    }
-    perm_test_3[0] = gf_one();
-    poseidon2_permute(&perm_test_3);
-
-
-}
 
 // S-box: x^7 in Goldilocks field (efficient approach)
 fn sbox(x: GoldilocksField) -> GoldilocksField {

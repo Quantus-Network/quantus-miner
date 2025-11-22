@@ -1145,6 +1145,683 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     Ok(())
 }
 
+pub async fn test_poseidon2_initial_external_rounds(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔍 Testing all 4 initial external rounds...");
+
+    // Create debug shader that applies only the 4 initial external rounds
+    let shader_source = format!(
+        "
+{}
+
+// Debug entry point for initial external rounds only
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // Apply ONLY the 4 initial external rounds
+    for (var round = 0u; round < 4u; round++) {{
+        // Add round constants
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
+        }}
+
+        // S-box on all elements
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = sbox(state[i]);
+        }}
+
+        // External linear layer
+        external_linear_layer(&state);
+    }}
+
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Initial External Rounds Debug Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Initial External Rounds Debug Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Test with all zeros input
+    let zero_input = [GoldilocksField::ZERO; 12];
+    let mut input_data = Vec::new();
+    for &field_elem in &zero_input {
+        input_data.push(GfWgls::from(field_elem));
+    }
+
+    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Initial Rounds Input Buffer"),
+        contents: bytemuck::cast_slice(&input_data),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Initial Rounds Output Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Initial Rounds Bind Group"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Initial Rounds Command Encoder"),
+    });
+
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Initial Rounds Compute Pass"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Initial Rounds Staging Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    encoder.copy_buffer_to_buffer(
+        &output_buffer,
+        0,
+        &staging_buffer,
+        0,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = staging_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+
+    let data = buffer_slice.get_mapped_range();
+    let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
+
+    println!("🔍 GPU result after 4 initial external rounds:");
+    for i in 0..12 {
+        let gf: GoldilocksField = gpu_result[i].into();
+        println!("  [{}] = 0x{:016x}", i, gf.to_canonical_u64());
+    }
+
+    // Compute CPU reference for 4 initial external rounds
+    let mut cpu_state = zero_input;
+    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+
+    for round in 0..4 {
+        // Add constants
+        for i in 0..12 {
+            let raw_constant = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i];
+            cpu_state[i] += GoldilocksField::from_canonical_u64(raw_constant);
+        }
+
+        // S-box
+        for i in 0..12 {
+            cpu_state[i] = cpu_state[i].exp_u64(7);
+        }
+
+        // External linear layer
+        let two = GoldilocksField::from_canonical_u64(2);
+        let three = GoldilocksField::from_canonical_u64(3);
+
+        // 4x4 MDS matrix on chunks
+        for chunk in 0..3 {
+            let offset = chunk * 4;
+            let mut chunk_state = [GoldilocksField::ZERO; 4];
+
+            for i in 0..4 {
+                chunk_state[i] = cpu_state[offset + i];
+            }
+
+            let new_0 =
+                two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
+            let new_1 =
+                chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
+            let new_2 =
+                chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
+            let new_3 =
+                three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
+
+            cpu_state[offset] = new_0;
+            cpu_state[offset + 1] = new_1;
+            cpu_state[offset + 2] = new_2;
+            cpu_state[offset + 3] = new_3;
+        }
+
+        // Circulant matrix
+        let mut sums = [GoldilocksField::ZERO; 4];
+        for k in 0..4 {
+            for j in (k..12).step_by(4) {
+                sums[k] += cpu_state[j];
+            }
+        }
+        for i in 0..12 {
+            cpu_state[i] += sums[i % 4];
+        }
+    }
+
+    println!("🔍 CPU reference after 4 initial external rounds:");
+    for i in 0..12 {
+        println!("  [{}] = 0x{:016x}", i, cpu_state[i].to_canonical_u64());
+    }
+
+    // Compare
+    let mut matches = true;
+    for i in 0..12 {
+        let gpu_gf: GoldilocksField = gpu_result[i].into();
+        if gpu_gf.to_canonical_u64() != cpu_state[i].to_canonical_u64() {
+            matches = false;
+            println!(
+                "❌ Mismatch at [{}]: GPU=0x{:016x}, CPU=0x{:016x}",
+                i,
+                gpu_gf.to_canonical_u64(),
+                cpu_state[i].to_canonical_u64()
+            );
+        }
+    }
+
+    if matches {
+        println!("✅ Initial 4 external rounds match perfectly!");
+    } else {
+        println!("❌ Initial external rounds have mismatches");
+    }
+
+    drop(data);
+    staging_buffer.unmap();
+
+    Ok(())
+}
+
+pub async fn test_poseidon2_rounds_0_and_1_debug(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔍 Step-by-step debug of rounds 0 and 1...");
+
+    // Create debug shader that tracks each step of rounds 0 and 1
+    let shader_source = format!(
+        "
+{}
+
+// Debug entry point for detailed round 0 and 1 tracking
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> after_round_0: array<GoldilocksField>;
+@group(0) @binding(2) var<storage, read_write> after_round_1_constants: array<GoldilocksField>;
+@group(0) @binding(3) var<storage, read_write> after_round_1_sbox: array<GoldilocksField>;
+@group(0) @binding(4) var<storage, read_write> after_round_1_linear: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // ROUND 0 (we know this works)
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[0][i]));
+    }}
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = sbox(state[i]);
+    }}
+    external_linear_layer(&state);
+
+    // Save after round 0
+    for (var i = 0u; i < 12u; i++) {{
+        after_round_0[offset + i] = state[i];
+    }}
+
+    // ROUND 1 - step by step
+    // Step 1: Add round 1 constants
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[1][i]));
+        after_round_1_constants[offset + i] = state[i];
+    }}
+
+    // Step 2: S-box
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = sbox(state[i]);
+        after_round_1_sbox[offset + i] = state[i];
+    }}
+
+    // Step 3: Linear layer
+    external_linear_layer(&state);
+    for (var i = 0u; i < 12u; i++) {{
+        after_round_1_linear[offset + i] = state[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Rounds 0-1 Debug Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Rounds 0-1 Debug Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Test with all zeros input
+    let zero_input = [GoldilocksField::ZERO; 12];
+    let mut input_data = Vec::new();
+    for &field_elem in &zero_input {
+        input_data.push(GfWgls::from(field_elem));
+    }
+
+    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Round Debug Input Buffer"),
+        contents: bytemuck::cast_slice(&input_data),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    // Create 4 output buffers for each debug stage
+    let after_round_0_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("After Round 0 Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let after_r1_constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("After R1 Constants Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let after_r1_sbox_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("After R1 SBox Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let after_r1_linear_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("After R1 Linear Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Round Debug Bind Group"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: after_round_0_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: after_r1_constants_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: after_r1_sbox_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: after_r1_linear_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Round Debug Command Encoder"),
+    });
+
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Round Debug Compute Pass"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Round Debug Staging Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 12 * 4) as u64, // 4 buffers
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Copy all buffers to staging
+    encoder.copy_buffer_to_buffer(
+        &after_round_0_buffer,
+        0,
+        &staging_buffer,
+        0,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &after_r1_constants_buffer,
+        0,
+        &staging_buffer,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &after_r1_sbox_buffer,
+        0,
+        &staging_buffer,
+        (std::mem::size_of::<GfWgls>() * 12 * 2) as u64,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &after_r1_linear_buffer,
+        0,
+        &staging_buffer,
+        (std::mem::size_of::<GfWgls>() * 12 * 3) as u64,
+        (std::mem::size_of::<GfWgls>() * 12) as u64,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = staging_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+
+    let data = buffer_slice.get_mapped_range();
+    let debug_data: &[GfWgls] = bytemuck::cast_slice(&data);
+
+    // Compute CPU reference step by step
+    let mut cpu_state = zero_input;
+    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+
+    // Round 0 on CPU
+    for i in 0..12 {
+        cpu_state[i] +=
+            GoldilocksField::from_canonical_u64(POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0][i]);
+    }
+    for i in 0..12 {
+        cpu_state[i] = cpu_state[i].exp_u64(7);
+    }
+    // External linear layer for round 0
+    let two = GoldilocksField::from_canonical_u64(2);
+    let three = GoldilocksField::from_canonical_u64(3);
+    for chunk in 0..3 {
+        let offset = chunk * 4;
+        let mut chunk_state = [GoldilocksField::ZERO; 4];
+        for i in 0..4 {
+            chunk_state[i] = cpu_state[offset + i];
+        }
+        let new_0 = two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
+        let new_1 = chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
+        let new_2 = chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
+        let new_3 = three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
+        cpu_state[offset] = new_0;
+        cpu_state[offset + 1] = new_1;
+        cpu_state[offset + 2] = new_2;
+        cpu_state[offset + 3] = new_3;
+    }
+    let mut sums = [GoldilocksField::ZERO; 4];
+    for k in 0..4 {
+        for j in (k..12).step_by(4) {
+            sums[k] += cpu_state[j];
+        }
+    }
+    for i in 0..12 {
+        cpu_state[i] += sums[i % 4];
+    }
+
+    println!("✅ After Round 0 (GPU vs CPU):");
+    for i in 0..12 {
+        let gpu_gf: GoldilocksField = debug_data[i].into();
+        if gpu_gf.to_canonical_u64() == cpu_state[i].to_canonical_u64() {
+            println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
+        } else {
+            println!(
+                "  [{}] ❌ GPU=0x{:016x}, CPU=0x{:016x}",
+                i,
+                gpu_gf.to_canonical_u64(),
+                cpu_state[i].to_canonical_u64()
+            );
+        }
+    }
+
+    // Round 1 step 1: Add constants
+    let mut cpu_after_r1_constants = cpu_state;
+    for i in 0..12 {
+        cpu_after_r1_constants[i] +=
+            GoldilocksField::from_canonical_u64(POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[1][i]);
+    }
+
+    println!("🔍 After Round 1 Constants (GPU vs CPU):");
+    for i in 0..12 {
+        let gpu_gf: GoldilocksField = debug_data[12 + i].into();
+        if gpu_gf.to_canonical_u64() == cpu_after_r1_constants[i].to_canonical_u64() {
+            println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
+        } else {
+            println!(
+                "  [{}] ❌ GPU=0x{:016x}, CPU=0x{:016x}",
+                i,
+                gpu_gf.to_canonical_u64(),
+                cpu_after_r1_constants[i].to_canonical_u64()
+            );
+        }
+    }
+
+    drop(data);
+    staging_buffer.unmap();
+
+    Ok(())
+}
+
+pub async fn test_poseidon2_constants_verification(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔍 Verifying WGSL constants match reference...");
+
+    // Create shader that just outputs the constants
+    let shader_source = format!(
+        "
+{}
+
+// Constants verification entry point
+@group(0) @binding(0) var<storage, read_write> output_constants: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    // Output first round constants (we know these work)
+    for (var i = 0u; i < 12u; i++) {{
+        output_constants[i] = gf_from_const(INITIAL_EXTERNAL_CONSTANTS[0][i]);
+    }}
+
+    // Output second round constants (these seem to have issues)
+    for (var i = 0u; i < 12u; i++) {{
+        output_constants[i + 12u] = gf_from_const(INITIAL_EXTERNAL_CONSTANTS[1][i]);
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Constants Verification Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Constants Verification Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Constants Output Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 24) as u64, // 2 rounds * 12 elements
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Constants Bind Group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output_buffer.as_entire_binding(),
+        }],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Constants Command Encoder"),
+    });
+
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Constants Compute Pass"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Constants Staging Buffer"),
+        size: (std::mem::size_of::<GfWgls>() * 24) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    encoder.copy_buffer_to_buffer(
+        &output_buffer,
+        0,
+        &staging_buffer,
+        0,
+        (std::mem::size_of::<GfWgls>() * 24) as u64,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = staging_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+
+    let data = buffer_slice.get_mapped_range();
+    let gpu_constants: &[GfWgls] = bytemuck::cast_slice(&data);
+
+    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+
+    println!("🔍 Round 0 constants (should match):");
+    for i in 0..12 {
+        let gpu_gf: GoldilocksField = gpu_constants[i].into();
+        let expected = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0][i];
+        if gpu_gf.to_canonical_u64() == expected {
+            println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
+        } else {
+            println!(
+                "  [{}] ❌ GPU=0x{:016x}, Expected=0x{:016x}",
+                i,
+                gpu_gf.to_canonical_u64(),
+                expected
+            );
+        }
+    }
+
+    println!("🔍 Round 1 constants (checking for issues):");
+    for i in 0..12 {
+        let gpu_gf: GoldilocksField = gpu_constants[12 + i].into();
+        let expected = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[1][i];
+        if gpu_gf.to_canonical_u64() == expected {
+            println!("  [{}] ✅ 0x{:016x}", i, gpu_gf.to_canonical_u64());
+        } else {
+            println!(
+                "  [{}] ❌ GPU=0x{:016x}, Expected=0x{:016x}",
+                i,
+                gpu_gf.to_canonical_u64(),
+                expected
+            );
+        }
+    }
+
+    drop(data);
+    staging_buffer.unmap();
+
+    Ok(())
+}
+
 pub async fn test_gf_mul(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

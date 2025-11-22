@@ -72,10 +72,75 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ First round debug failed: {}", e);
     }
 
+    // Generate correct WGSL constants
+    // generate_correct_wgsl_constants();
+
+    if let Err(e) = tests::test_poseidon2_initial_external_rounds(&device, &queue).await {
+        eprintln!("❌ Initial external rounds test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_constants_verification(&device, &queue).await {
+        eprintln!("❌ Constants verification test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_rounds_0_and_1_debug(&device, &queue).await {
+        eprintln!("❌ Rounds 0-1 debug test failed: {}", e);
+    }
+
     if let Err(e) = tests::test_poseidon2_permutation(&device, &queue).await {
         eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
     }
 
     println!("\nAll tests completed!");
     Ok(())
+}
+
+fn generate_correct_wgsl_constants() {
+    use qp_poseidon_constants::*;
+
+    println!("🔧 Generating correct WGSL constants...");
+
+    println!("// Initial external round constants (4 rounds x 12 elements)");
+    println!("const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
+
+    for (round_idx, round) in POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW.iter().enumerate() {
+        println!("    array<array<u32, 2>, 12>(");
+        for (elem_idx, &value) in round.iter().enumerate() {
+            let low = value as u32;
+            let high = (value >> 32) as u32;
+            if elem_idx == 11 {
+                println!("        array<u32, 2>({}u, {}u)", low, high);
+            } else {
+                println!("        array<u32, 2>({}u, {}u),", low, high);
+            }
+        }
+        if round_idx == 3 {
+            println!("    )");
+        } else {
+            println!("    ),");
+        }
+    }
+    println!(");");
+
+    println!("\n// Terminal external round constants (4 rounds x 12 elements)");
+    println!("const TERMINAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
+
+    for (round_idx, round) in POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW.iter().enumerate() {
+        println!("    array<array<u32, 2>, 12>(");
+        for (elem_idx, &value) in round.iter().enumerate() {
+            let low = value as u32;
+            let high = (value >> 32) as u32;
+            if elem_idx == 11 {
+                println!("        array<u32, 2>({}u, {}u)", low, high);
+            } else {
+                println!("        array<u32, 2>({}u, {}u),", low, high);
+            }
+        }
+        if round_idx == 3 {
+            println!("    )");
+        } else {
+            println!("    ),");
+        }
+    }
+    println!(");");
 }
