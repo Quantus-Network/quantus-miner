@@ -72,9 +72,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ First round debug failed: {}", e);
     }
 
-    // Generate correct WGSL constants
-    // generate_correct_wgsl_constants();
-
     if let Err(e) = tests::test_poseidon2_initial_external_rounds(&device, &queue).await {
         eprintln!("❌ Initial external rounds test failed: {}", e);
     }
@@ -86,6 +83,53 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = tests::test_poseidon2_rounds_0_and_1_debug(&device, &queue).await {
         eprintln!("❌ Rounds 0-1 debug test failed: {}", e);
     }
+
+    if let Err(e) = tests::test_poseidon2_internal_constants_verification(&device, &queue).await {
+        eprintln!("❌ Internal constants verification test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_internal_linear_layer_debug(&device, &queue).await {
+        eprintln!("❌ Internal linear layer debug test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_first_internal_rounds_debug(&device, &queue).await {
+        eprintln!("❌ First internal rounds debug test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_terminal_external_rounds_debug(&device, &queue).await {
+        eprintln!("❌ Terminal external rounds debug test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_internal_rounds(&device, &queue).await {
+        eprintln!("❌ Internal rounds test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_specific_inputs_debug(&device, &queue).await {
+        eprintln!("❌ Specific inputs debug test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_sequential_internal_rounds_debug(&device, &queue).await {
+        eprintln!("❌ Sequential internal rounds debug test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_sequential_cpu_vs_gpu_internal(&device, &queue).await {
+        eprintln!("❌ Sequential CPU vs GPU internal test failed: {}", e);
+    }
+
+    if let Err(e) =
+        tests::test_poseidon2_terminal_external_constants_verification(&device, &queue).await
+    {
+        eprintln!(
+            "❌ Terminal external constants verification test failed: {}",
+            e
+        );
+    }
+
+    if let Err(e) = tests::test_poseidon2_sequential_step_by_step_debug(&device, &queue).await {
+        eprintln!("❌ Sequential step by step debug test failed: {}", e);
+    }
+
+    println!("🎯 Testing Poseidon2 permutation with proper conversion...");
 
     if let Err(e) = tests::test_poseidon2_permutation(&device, &queue).await {
         eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
@@ -140,6 +184,19 @@ fn generate_correct_wgsl_constants() {
             println!("    )");
         } else {
             println!("    ),");
+        }
+    }
+    println!(");");
+
+    println!("\n// Internal round constants (22 values)");
+    println!("const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(");
+    for (idx, &value) in POSEIDON2_INTERNAL_CONSTANTS_RAW.iter().enumerate() {
+        let low = value as u32;
+        let high = (value >> 32) as u32;
+        if idx == 21 {
+            println!("    array<u32, 2>({}u, {}u)", low, high);
+        } else {
+            println!("    array<u32, 2>({}u, {}u),", low, high);
         }
     }
     println!(");");
