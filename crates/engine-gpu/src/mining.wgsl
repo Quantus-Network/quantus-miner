@@ -709,23 +709,6 @@ fn debug_poseidon2_permutation_tests() {
 
 }
 
-// Linear layer test
-fn debug_linear_layer_test() {
-    var test_state: array<GoldilocksField, 12>;
-
-    // Initialize with values [1,2,3,4,5,6,7,8,9,10,11,12]
-    for (var i = 0u; i < 12u; i++) {
-        test_state[i] = gf_from_u32(i + 1u);
-    }
-
-
-
-    // Apply linear layer
-    external_linear_layer(&test_state);
-
-
-}
-
 // S-box: x^7 in Goldilocks field (efficient approach)
 fn sbox(x: GoldilocksField) -> GoldilocksField {
     let x2 = gf_mul(x, x);
