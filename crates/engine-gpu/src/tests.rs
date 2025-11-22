@@ -34,6 +34,13 @@ struct InternalLinearLayerTestCase {
     expected: [GoldilocksField; 12],
 }
 
+// A simple struct to hold a test case for external linear layer
+#[derive(Debug, Clone)]
+struct ExternalLinearLayerTestCase {
+    input: [GoldilocksField; 12],
+    expected: [GoldilocksField; 12],
+}
+
 // Represents the GoldilocksField in a WGSL-compatible format (four u16 limbs stored as u32s)
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -283,6 +290,65 @@ fn generate_sbox_test_vectors() -> Vec<SboxTestCase> {
     vectors
 }
 
+fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestCase> {
+    println!("Generating external linear layer test vectors...");
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(67890);
+
+    // Zero state
+    let zero_input = [GoldilocksField::ZERO; 12];
+    let zero_expected = apply_full_external_linear_layer_to_state(&zero_input);
+    vectors.push(ExternalLinearLayerTestCase {
+        input: zero_input,
+        expected: zero_expected,
+    });
+
+    // Sequential values 1, 2, 3, ..., 12
+    let sequential_input: [GoldilocksField; 12] =
+        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
+    let sequential_expected = apply_full_external_linear_layer_to_state(&sequential_input);
+    vectors.push(ExternalLinearLayerTestCase {
+        input: sequential_input,
+        expected: sequential_expected,
+    });
+
+    // Unit vectors (one element is 1, rest are 0)
+    for i in 0..12 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        input[i] = GoldilocksField::ONE;
+        let expected = apply_full_external_linear_layer_to_state(&input);
+        vectors.push(ExternalLinearLayerTestCase { input, expected });
+    }
+
+    // Random small values (all elements < 2^16)
+    for _ in 0..15 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = rng.gen::<u16>() as u64;
+            input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        let expected = apply_full_external_linear_layer_to_state(&input);
+        vectors.push(ExternalLinearLayerTestCase { input, expected });
+    }
+
+    // Random medium values (all elements < 2^32)
+    for _ in 0..10 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = rng.gen::<u32>() as u64;
+            input[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        let expected = apply_full_external_linear_layer_to_state(&input);
+        vectors.push(ExternalLinearLayerTestCase { input, expected });
+    }
+
+    println!(
+        "Generated {} external linear layer test vectors",
+        vectors.len()
+    );
+    vectors
+}
+
 fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(67890);
@@ -404,6 +470,46 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
 
 // Helper function to apply the external linear layer to a 4-element chunk
 // This implements the exact same MDS matrix as used in p3_poseidon2 for Goldilocks field
+// Apply full external linear layer to a 12-element state (CPU reference implementation)
+fn apply_full_external_linear_layer_to_state(
+    state: &[GoldilocksField; 12],
+) -> [GoldilocksField; 12] {
+    let mut result = *state;
+
+    // First apply the 4x4 MDS matrix to each consecutive 4 elements
+    for chunk_idx in 0..3 {
+        let offset = chunk_idx * 4;
+        let chunk = [
+            result[offset],
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ];
+        let transformed_chunk = apply_external_linear_layer_to_chunk(&chunk);
+
+        result[offset] = transformed_chunk[0];
+        result[offset + 1] = transformed_chunk[1];
+        result[offset + 2] = transformed_chunk[2];
+        result[offset + 3] = transformed_chunk[3];
+    }
+
+    // Now apply the circulant matrix part
+    // Precompute the four sums of every four elements
+    let mut sums = [GoldilocksField::ZERO; 4];
+    for k in 0..4 {
+        for j in (k..12).step_by(4) {
+            sums[k] += result[j];
+        }
+    }
+
+    // Add the appropriate sum to each element
+    for i in 0..12 {
+        result[i] += sums[i % 4];
+    }
+
+    result
+}
+
 fn apply_external_linear_layer_to_chunk(chunk: &[GoldilocksField; 4]) -> [GoldilocksField; 4] {
     // Implement P3's apply_mat4 algorithm using plonky2's Goldilocks
     // This is the exact algorithm from Plonky3's poseidon2/src/external.rs apply_mat4
@@ -1645,6 +1751,205 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     Ok(())
+}
+
+pub async fn test_external_linear_layer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_vectors = generate_external_linear_layer_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    const BATCH_SIZE: usize = 20;
+
+    // Use the same pattern as other successful tests - include mining.wgsl and define our own bindings
+    let shader_source = format!(
+        "
+{}
+
+// Simple test entry point for external linear layer
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // Apply external linear layer
+    external_linear_layer(&state);
+
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("External Linear Layer Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    // Create pipeline
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("External Linear Layer Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Process tests in batches
+    for (batch_start, batch) in test_vectors.chunks(BATCH_SIZE).enumerate() {
+        let batch_size = batch.len();
+
+        // Prepare input data
+        let mut input_data = Vec::with_capacity(batch_size * 12);
+        for vector in batch {
+            for &element in &vector.input {
+                let gf_wgls: GfWgls = element.into();
+                input_data.push(gf_wgls);
+            }
+        }
+
+        // Create buffers
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("External Linear Layer Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("External Linear Layer Output Buffer"),
+            size: (batch_size * 12 * std::mem::size_of::<GfWgls>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("External Linear Layer Readback Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Create bind group
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("External Linear Layer Test Bind Group"),
+        });
+
+        // Execute
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("External Linear Layer Test Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("External Linear Layer Test Compute Pass"),
+                timestamp_writes: None,
+            });
+
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(batch_size as u32, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback_buffer, 0, output_buffer.size());
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Read results
+        let buffer_slice = readback_buffer.slice(..);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+        device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        receiver.await.unwrap().unwrap();
+
+        let data = buffer_slice.get_mapped_range();
+        let gpu_results: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Verify results
+        for (i, vector) in batch.iter().enumerate() {
+            let offset = i * 12;
+            let mut all_match = true;
+
+            for j in 0..12 {
+                let gpu_result: GoldilocksField = gpu_results[offset + j].into();
+                let expected = vector.expected[j];
+                if gpu_result != expected {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                passed_tests += 1;
+            } else {
+                let test_index = batch_start * BATCH_SIZE + i;
+                failed_tests.push((test_index, vector.clone()));
+            }
+        }
+
+        drop(data);
+        readback_buffer.unmap();
+    }
+
+    // Print results summary
+    println!("=== EXTERNAL LINEAR LAYER TEST SUMMARY ===");
+    println!("Total tests: {}", total_tests);
+    println!(
+        "Passed: {} ({:.1}%)",
+        passed_tests,
+        (passed_tests as f64 / total_tests as f64) * 100.0
+    );
+
+    if failed_tests.is_empty() {
+        println!("✅ All external linear layer tests passed!");
+        Ok(())
+    } else {
+        println!(
+            "❌ {} external linear layer tests failed",
+            failed_tests.len()
+        );
+
+        // Show detailed failure information for first few failures
+        let failures_to_show = std::cmp::min(3, failed_tests.len());
+        println!("   (showing only first {} failures)", failures_to_show);
+
+        // We'd need to re-run the GPU computation to get detailed failure info
+        // For now, just report the count
+
+        Err("External linear layer tests failed".into())
+    }
 }
 
 pub async fn test_sbox(

@@ -64,6 +64,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Internal linear layer tests failed: {}", e);
     }
 
+    if let Err(e) = tests::test_external_linear_layer(&device, &queue).await {
+        eprintln!("❌ External linear layer tests failed: {}", e);
+    }
+
     if let Err(e) = tests::test_poseidon2_permutation(&device, &queue).await {
         eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
     }
