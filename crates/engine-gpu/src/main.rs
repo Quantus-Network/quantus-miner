@@ -260,6 +260,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("S-box tests failed: {}", e);
     }
 
+    // Run internal linear layer tests
+    if let Err(e) = tests::test_internal_linear_layer(&device, &queue).await {
+        eprintln!("Internal linear layer tests failed: {}", e);
+    }
 
     Ok(())
 }

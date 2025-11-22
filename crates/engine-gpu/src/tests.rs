@@ -27,6 +27,13 @@ struct SboxTestCase {
     expected: GoldilocksField,
 }
 
+// A simple struct to hold a test case for internal linear layer
+#[derive(Debug, Clone)]
+struct InternalLinearLayerTestCase {
+    input: [GoldilocksField; 12],
+    expected: [GoldilocksField; 12],
+}
+
 // Represents the GoldilocksField in a WGSL-compatible format (four u16 limbs stored as u32s)
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -276,6 +283,53 @@ fn generate_sbox_test_vectors() -> Vec<SboxTestCase> {
     vectors
 }
 
+fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestCase> {
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(67890);
+
+    // Zero vector
+    let zero_input = [GoldilocksField::ZERO; 12];
+    let zero_expected = apply_internal_linear_layer_to_state(&zero_input);
+    vectors.push(InternalLinearLayerTestCase {
+        input: zero_input,
+        expected: zero_expected,
+    });
+
+    // Unit vectors (one element is 1, rest are 0)
+    for i in 0..12 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        input[i] = GoldilocksField::ONE;
+        let expected = apply_internal_linear_layer_to_state(&input);
+        vectors.push(InternalLinearLayerTestCase { input, expected });
+    }
+
+    // Small values
+    for _ in 0..10 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            input[j] = GoldilocksField::from_canonical_u64(rng.gen_range(0..100));
+        }
+        let expected = apply_internal_linear_layer_to_state(&input);
+        vectors.push(InternalLinearLayerTestCase { input, expected });
+    }
+
+    // Random large values
+    for _ in 0..20 {
+        let mut input = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            input[j] = GoldilocksField::from_noncanonical_u64(rng.gen());
+        }
+        let expected = apply_internal_linear_layer_to_state(&input);
+        vectors.push(InternalLinearLayerTestCase { input, expected });
+    }
+
+    println!(
+        "Generated {} internal linear layer test vectors",
+        vectors.len()
+    );
+    vectors
+}
+
 fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(54321);
@@ -393,6 +447,40 @@ fn apply_external_linear_layer_to_chunk(chunk: &[GoldilocksField; 4]) -> [Goldil
     x
 }
 
+// Apply internal linear layer to a 12-element state (CPU reference implementation)
+fn apply_internal_linear_layer_to_state(state: &[GoldilocksField; 12]) -> [GoldilocksField; 12] {
+    let mut result = *state;
+
+    // Compute sum of all elements first
+    let mut sum = GoldilocksField::ZERO;
+    for &element in state {
+        sum += element;
+    }
+
+    // Apply internal linear layer: result[i] = state[i] * diag[i] + sum
+    // Use the same diagonal constants as in WGSL (MATRIX_DIAG_12_GOLDILOCKS from Plonky3)
+    let diag_constants = [
+        0xc3b6c08e23ba9300u64,
+        0xd84b5de94a324fb6u64,
+        0x0d0c371c5b35b84fu64,
+        0x7964f570e7188037u64,
+        0x5daf18bbd996604bu64,
+        0x6743bc47b9595257u64,
+        0x5528b9362c59bb70u64,
+        0xac45e25b7127b68bu64,
+        0xa2077d7dfbb606b5u64,
+        0xf3faac6faee378aeu64,
+        0x0c6388b51545e883u64,
+        0xd27dbb6944917b60u64,
+    ];
+
+    for i in 0..12 {
+        let diag_value = GoldilocksField::from_noncanonical_u64(diag_constants[i]);
+        result[i] = state[i] * diag_value + sum;
+    }
+
+    result
+}
 
 #[derive(Debug, Clone)]
 struct Poseidon2TestCase {
@@ -913,7 +1001,6 @@ pub async fn test_gf_mul(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     let test_vectors = generate_gf_mul_test_vectors();
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
@@ -1435,11 +1522,288 @@ fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     Ok(())
 }
 
+pub async fn test_internal_linear_layer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_vectors = generate_internal_linear_layer_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    // Read the mining shader source and create a test wrapper
+    let mining_shader_source = include_str!("mining.wgsl");
+    let shader_source = format!(
+        "
+{}
+
+// Test entry point for internal linear layer
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn internal_linear_layer_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // Apply internal linear layer
+    internal_linear_layer(&state);
+
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
+    }}
+}}
+",
+        mining_shader_source
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Internal Linear Layer Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    // Create pipeline
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Internal Linear Layer Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("internal_linear_layer_test"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Process tests in batches
+    const BATCH_SIZE: usize = 32;
+    for chunk in test_vectors.chunks(BATCH_SIZE) {
+        // Prepare input data (flatten 12-element arrays and convert to GfWgls)
+        let mut input_data = Vec::new();
+        for test_case in chunk {
+            for &field_elem in &test_case.input {
+                input_data.push(GfWgls::from(field_elem));
+            }
+        }
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: (input_data.len() * std::mem::size_of::<GfWgls>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Test Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Command Encoder"),
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(chunk.len() as u32, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let data = slice.get_mapped_range();
+        let results: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Check results
+        for (i, test_case) in chunk.iter().enumerate() {
+            let gpu_result = [
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12].limb0 as u64)
+                        | ((results[i * 12].limb1 as u64) << 16)
+                        | ((results[i * 12].limb2 as u64) << 32)
+                        | ((results[i * 12].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 1].limb0 as u64)
+                        | ((results[i * 12 + 1].limb1 as u64) << 16)
+                        | ((results[i * 12 + 1].limb2 as u64) << 32)
+                        | ((results[i * 12 + 1].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 2].limb0 as u64)
+                        | ((results[i * 12 + 2].limb1 as u64) << 16)
+                        | ((results[i * 12 + 2].limb2 as u64) << 32)
+                        | ((results[i * 12 + 2].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 3].limb0 as u64)
+                        | ((results[i * 12 + 3].limb1 as u64) << 16)
+                        | ((results[i * 12 + 3].limb2 as u64) << 32)
+                        | ((results[i * 12 + 3].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 4].limb0 as u64)
+                        | ((results[i * 12 + 4].limb1 as u64) << 16)
+                        | ((results[i * 12 + 4].limb2 as u64) << 32)
+                        | ((results[i * 12 + 4].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 5].limb0 as u64)
+                        | ((results[i * 12 + 5].limb1 as u64) << 16)
+                        | ((results[i * 12 + 5].limb2 as u64) << 32)
+                        | ((results[i * 12 + 5].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 6].limb0 as u64)
+                        | ((results[i * 12 + 6].limb1 as u64) << 16)
+                        | ((results[i * 12 + 6].limb2 as u64) << 32)
+                        | ((results[i * 12 + 6].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 7].limb0 as u64)
+                        | ((results[i * 12 + 7].limb1 as u64) << 16)
+                        | ((results[i * 12 + 7].limb2 as u64) << 32)
+                        | ((results[i * 12 + 7].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 8].limb0 as u64)
+                        | ((results[i * 12 + 8].limb1 as u64) << 16)
+                        | ((results[i * 12 + 8].limb2 as u64) << 32)
+                        | ((results[i * 12 + 8].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 9].limb0 as u64)
+                        | ((results[i * 12 + 9].limb1 as u64) << 16)
+                        | ((results[i * 12 + 9].limb2 as u64) << 32)
+                        | ((results[i * 12 + 9].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 10].limb0 as u64)
+                        | ((results[i * 12 + 10].limb1 as u64) << 16)
+                        | ((results[i * 12 + 10].limb2 as u64) << 32)
+                        | ((results[i * 12 + 10].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 11].limb0 as u64)
+                        | ((results[i * 12 + 11].limb1 as u64) << 16)
+                        | ((results[i * 12 + 11].limb2 as u64) << 32)
+                        | ((results[i * 12 + 11].limb3 as u64) << 48),
+                ),
+            ];
+
+            // Compare all 12 elements
+            let mut all_match = true;
+            for j in 0..12 {
+                if gpu_result[j].to_canonical_u64() != test_case.expected[j].to_canonical_u64() {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                passed_tests += 1;
+            } else {
+                failed_tests.push((test_case.clone(), gpu_result));
+                if failed_tests.len() <= 3 {
+                    println!("❌ FAILED: Internal linear layer test");
+                    println!("Input state:");
+                    for (j, &val) in test_case.input.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("Expected state:");
+                    for (j, &val) in test_case.expected.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("GPU result:");
+                    for (j, &val) in gpu_result.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("Element-by-element comparison:");
+                    for j in 0..12 {
+                        let expected = test_case.expected[j].to_canonical_u64();
+                        let got = gpu_result[j].to_canonical_u64();
+                        let status = if expected == got { "✓" } else { "✗" };
+                        println!(
+                            "  [{}] {} Expected: 0x{:016x}, Got: 0x{:016x}",
+                            j, status, expected, got
+                        );
+                    }
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    println!(
+        "Internal Linear Layer Tests: {}/{} passed ({:.1}%)",
+        passed_tests,
+        total_tests,
+        100.0 * passed_tests as f64 / total_tests as f64
+    );
+
+    if !failed_tests.is_empty() {
+        println!(
+            "❌ {} internal linear layer tests failed",
+            failed_tests.len()
+        );
+        if failed_tests.len() > 3 {
+            println!("   (showing only first 3 failures)");
+        }
+    } else {
+        println!("✅ All internal linear layer tests passed!");
+    }
+
+    Ok(())
+}
+
 pub async fn test_sbox(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     let test_vectors = generate_sbox_test_vectors();
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
