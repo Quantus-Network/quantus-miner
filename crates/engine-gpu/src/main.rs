@@ -104,14 +104,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Internal rounds test failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_specific_inputs_debug(&device, &queue).await {
-        eprintln!("❌ Specific inputs debug test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_sequential_internal_rounds_debug(&device, &queue).await {
-        eprintln!("❌ Sequential internal rounds debug test failed: {}", e);
-    }
-
     if let Err(e) = tests::test_poseidon2_sequential_cpu_vs_gpu_internal(&device, &queue).await {
         eprintln!("❌ Sequential CPU vs GPU internal test failed: {}", e);
     }
