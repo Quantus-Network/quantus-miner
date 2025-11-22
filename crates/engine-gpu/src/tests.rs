@@ -1916,7 +1916,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     Ok(())
 }
 
-pub async fn test_poseidon2_internal_rounds(
+pub async fn test_poseidon2_full_permutation(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1972,12 +1972,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Internal Rounds Test Shader"),
+            label: Some("Full Permutation Test Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Internal Rounds Test Pipeline"),
+            label: Some("Full Permutation Test Pipeline"),
             layout: None,
             module: &shader,
             entry_point: Some("main"),
@@ -1988,20 +1988,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         let bind_group_layout = pipeline.get_bind_group_layout(0);
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Internal Rounds Input Buffer"),
+            label: Some("Full Permutation Input Buffer"),
             contents: bytemuck::cast_slice(&input_data),
             usage: wgpu::BufferUsages::STORAGE,
         });
 
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Internal Rounds Output Buffer"),
+            label: Some("Full Permutation Output Buffer"),
             size: (std::mem::size_of::<GfWgls>() * input_data.len()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Internal Rounds Bind Group"),
+            label: Some("Full Permutation Bind Group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2016,12 +2016,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Internal Rounds Command Encoder"),
+            label: Some("Full Permutation Command Encoder"),
         });
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Internal Rounds Compute Pass"),
+                label: Some("Full Permutation Compute Pass"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&pipeline);
@@ -2030,7 +2030,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         }
 
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Internal Rounds Staging Buffer"),
+            label: Some("Full Permutation Staging Buffer"),
             size: output_buffer.size(),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -2094,7 +2094,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     // Print final summary
-    println!("\n=== INTERNAL ROUNDS TEST SUMMARY ===");
+    println!("\n=== FULL PERMUTATION TEST SUMMARY ===");
     println!("Total tests: {}", total_tests);
     println!(
         "Passed: {} ({:.1}%)",
@@ -2103,7 +2103,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     );
 
     if failed_tests.is_empty() {
-        println!("🎉 All internal rounds tests PASSED!");
+        println!("🎉 All full permutation tests PASSED!");
     } else {
         println!(
             "Failed: {} ({:.1}%)",
@@ -2114,7 +2114,243 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             println!("  (showing first 10 failures above)");
         }
         return Err(format!(
-            "{} out of {} internal rounds tests failed",
+            "{} out of {} full permutation tests failed",
+            failed_tests.len(),
+            total_tests
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+pub async fn test_poseidon2_internal_rounds_only(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Test ONLY the internal rounds (22 rounds) without initial/terminal external rounds
+    let test_vectors = generate_internal_rounds_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    // For this test, we need to manually apply initial external rounds on CPU
+    // then test only the internal rounds on GPU
+    use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+
+    for (test_idx, test_case) in test_vectors.iter().enumerate() {
+        // Apply initial external rounds on CPU to get the state before internal rounds
+        let mut cpu_state_before_internal = test_case.input;
+
+        // CPU: Apply 4 initial external rounds
+        for round in 0..4 {
+            // Add constants
+            for i in 0..12 {
+                cpu_state_before_internal[i] += GoldilocksField::from_canonical_u64(
+                    POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
+                );
+            }
+            // S-box all elements
+            for i in 0..12 {
+                cpu_state_before_internal[i] = cpu_state_before_internal[i].exp_u64(7);
+            }
+            // External linear layer (we'll use the reference implementation)
+            cpu_state_before_internal =
+                apply_full_external_linear_layer_to_state(&cpu_state_before_internal);
+        }
+
+        // Now test only the internal rounds on GPU
+        let input_data: Vec<GfWgls> = cpu_state_before_internal.map(GfWgls::from).to_vec();
+
+        let shader_source = format!(
+            "
+{}
+
+@group(0) @binding(0) var<storage, read> input_data: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_data: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let index = global_id.x;
+    if (index >= 1u) {{
+        return;
+    }}
+
+    let base_idx = index * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_data[base_idx + i];
+    }}
+
+    // Apply ONLY internal rounds (22 rounds)
+    for (var round = 0u; round < 22u; round++) {{
+        // Add round constant to first element only
+        state[0] = gf_add(state[0], gf_from_const(INTERNAL_CONSTANTS[round]));
+        // S-box on first element only
+        state[0] = sbox(state[0]);
+        // Internal linear layer (diagonal matrix)
+        internal_linear_layer(&state);
+    }}
+
+    // Store result
+    for (var i = 0u; i < 12u; i++) {{
+        output_data[base_idx + i] = state[i];
+    }}
+}}
+",
+            include_str!("mining.wgsl")
+        );
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Internal Rounds Only Test Shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Internal Rounds Only Test Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Internal Rounds Only Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Internal Rounds Only Output Buffer"),
+            size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Internal Rounds Only Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Internal Rounds Only Command Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Internal Rounds Only Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Internal Rounds Only Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let buffer_slice = staging_buffer.slice(..);
+        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let data = buffer_slice.get_mapped_range();
+        let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Apply internal rounds on CPU for comparison
+        let mut cpu_after_internal = cpu_state_before_internal;
+        use qp_poseidon_constants::POSEIDON2_INTERNAL_CONSTANTS_RAW;
+
+        // Apply 22 internal rounds on CPU
+        for round in 0..22 {
+            cpu_after_internal[0] +=
+                GoldilocksField::from_canonical_u64(POSEIDON2_INTERNAL_CONSTANTS_RAW[round]);
+            cpu_after_internal[0] = cpu_after_internal[0].exp_u64(7);
+            cpu_after_internal = apply_internal_linear_layer_to_state(&cpu_after_internal);
+        }
+
+        // Compare GPU vs CPU results
+        let gpu_state: [GoldilocksField; 12] = core::array::from_fn(|j| {
+            let wgls_result = gpu_result[j];
+            GoldilocksField::from(wgls_result)
+        });
+
+        let mut test_passed = true;
+        for j in 0..12 {
+            if gpu_state[j].to_canonical_u64() != cpu_after_internal[j].to_canonical_u64() {
+                test_passed = false;
+                break;
+            }
+        }
+
+        if test_passed {
+            passed_tests += 1;
+        } else {
+            failed_tests.push(test_idx + 1);
+            if failed_tests.len() <= 5 {
+                println!("\nInternal rounds only test case {} FAILED:", test_idx + 1);
+                for j in 0..3 {
+                    println!(
+                        "  Expected [{}]: 0x{:016x}",
+                        j,
+                        cpu_after_internal[j].to_canonical_u64()
+                    );
+                    println!(
+                        "  GPU      [{}]: 0x{:016x}",
+                        j,
+                        gpu_state[j].to_canonical_u64()
+                    );
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    // Print final summary
+    println!("\n=== INTERNAL ROUNDS ONLY TEST SUMMARY ===");
+    println!("Total tests: {}", total_tests);
+    println!(
+        "Passed: {} ({:.1}%)",
+        passed_tests,
+        passed_tests as f32 / total_tests as f32 * 100.0
+    );
+
+    if failed_tests.is_empty() {
+        println!("🎉 All internal rounds only tests PASSED!");
+    } else {
+        println!(
+            "Failed: {} ({:.1}%)",
+            failed_tests.len(),
+            failed_tests.len() as f32 / total_tests as f32 * 100.0
+        );
+        return Err(format!(
+            "{} out of {} internal rounds only tests failed",
             failed_tests.len(),
             total_tests
         )
@@ -3564,7 +3800,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     // Compare internal rounds results with CPU
     let mut internal_matches = true;
     for i in 0..12 {
-        let gpu_gf: GoldilocksField = debug_data[24 + i].into();
+        let gpu_gf: GoldilocksField = debug_data[12 + i].into();
         if gpu_gf.to_canonical_u64() != cpu_state[i].to_canonical_u64() {
             internal_matches = false;
             break;

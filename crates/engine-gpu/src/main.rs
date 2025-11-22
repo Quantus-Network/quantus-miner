@@ -100,8 +100,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Terminal external rounds debug test failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_internal_rounds(&device, &queue).await {
-        eprintln!("❌ Internal rounds test failed: {}", e);
+    if let Err(e) = tests::test_poseidon2_internal_rounds_only(&device, &queue).await {
+        eprintln!("❌ Internal rounds only test failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_full_permutation(&device, &queue).await {
+        eprintln!("❌ Full permutation test failed: {}", e);
     }
 
     if let Err(e) = tests::test_poseidon2_sequential_cpu_vs_gpu_internal(&device, &queue).await {
