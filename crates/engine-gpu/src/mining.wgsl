@@ -194,7 +194,6 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
-@group(0) @binding(4) var<storage, read_write> debug_buffer: array<u32>;      // Debug output buffer
 
 // Goldilocks field element represented as [limb0, limb1, limb2, limb3]
 // where the value is limb0 + limb1*2^16 + limb2*2^32 + limb3*2^48
@@ -588,12 +587,7 @@ fn test_field_operations() -> bool {
 }
 
 // Debug helper function to write state to debug buffer
-fn debug_write_state(offset: u32, state: array<GoldilocksField, 12>) {
-    for (var i = 0u; i < 12u; i++) {
-        debug_buffer[offset + i * 2u] = state[i].limb0 | (state[i].limb1 << 16u);
-        debug_buffer[offset + i * 2u + 1u] = state[i].limb2 | (state[i].limb3 << 16u);
-    }
-}
+
 
 // COMPREHENSIVE TEST FUNCTIONS (disabled by default - can be called for validation)
 
@@ -609,9 +603,7 @@ fn debug_sbox_comprehensive_tests() {
         let test_val = gf_from_u32(sbox_test_values[i]);
         let sbox_result = sbox(test_val);
 
-        // Store as 64-bit value split into two 32-bit parts
-        debug_buffer[180 + i * 2] = sbox_result.limb0 | (sbox_result.limb1 << 16u);
-        debug_buffer[180 + i * 2 + 1] = sbox_result.limb2 | (sbox_result.limb3 << 16u);
+        // S-box test results (debug_buffer removed)
     }
 }
 
@@ -625,15 +617,7 @@ fn debug_field_multiplication_tests() {
     let test_2_to_6 = gf_mul(test_2_to_4, test_2_squared); // Should be 64
     let test_2_to_7 = gf_mul(test_2_to_6, test_2); // Should be 128 = S-box(2)
 
-    debug_buffer[230] = test_2.limb0 | (test_2.limb1 << 16u); // Should be 2
-    debug_buffer[231] = test_2_squared.limb0 | (test_2_squared.limb1 << 16u); // Should be 4
-    debug_buffer[232] = test_2_cubed.limb0 | (test_2_cubed.limb1 << 16u); // Should be 8
-    debug_buffer[233] = test_2_to_4.limb0 | (test_2_to_4.limb1 << 16u); // Should be 16
-    debug_buffer[234] = test_2_to_6.limb0 | (test_2_to_6.limb1 << 16u); // Should be 64
-    debug_buffer[235] = test_2_to_7.limb0 | (test_2_to_7.limb1 << 16u); // Should be 128
 
-    // Store higher limbs too for debugging
-    debug_buffer[240] = test_2_to_7.limb2 | (test_2_to_7.limb3 << 16u); // Higher limbs of 2^7
 }
 
 // MDS matrix test vectors - 92% PASSING (need to debug edge cases)
@@ -690,16 +674,7 @@ fn debug_mds_matrix_tests() {
             chunk_state[2]),
             gf_mul(chunk_state[3], two));
 
-        // Store results as 64-bit values
-        let base_idx = 300u + test_idx * 8u;
-        debug_buffer[base_idx + 0u] = new_0.limb0 | (new_0.limb1 << 16u);
-        debug_buffer[base_idx + 1u] = new_0.limb2 | (new_0.limb3 << 16u);
-        debug_buffer[base_idx + 2u] = new_1.limb0 | (new_1.limb1 << 16u);
-        debug_buffer[base_idx + 3u] = new_1.limb2 | (new_1.limb3 << 16u);
-        debug_buffer[base_idx + 4u] = new_2.limb0 | (new_2.limb1 << 16u);
-        debug_buffer[base_idx + 5u] = new_2.limb2 | (new_2.limb3 << 16u);
-        debug_buffer[base_idx + 6u] = new_3.limb0 | (new_3.limb1 << 16u);
-        debug_buffer[base_idx + 7u] = new_3.limb2 | (new_3.limb3 << 16u);
+
     }
 }
 
@@ -712,11 +687,7 @@ fn debug_poseidon2_permutation_tests() {
     }
     poseidon2_permute(&perm_test_1);
 
-    // Write Test Vector 1 results
-    for (var i = 0u; i < 4u; i++) {
-        debug_buffer[120 + i * 2] = perm_test_1[i].limb0 | (perm_test_1[i].limb1 << 16u);
-        debug_buffer[120 + i * 2 + 1] = perm_test_1[i].limb2 | (perm_test_1[i].limb3 << 16u);
-    }
+
 
     // Test Vector 2: Sequential [1,2,3,4,5,6,7,8,9,10,11,12]
     var perm_test_2: array<GoldilocksField, 12>;
@@ -725,11 +696,7 @@ fn debug_poseidon2_permutation_tests() {
     }
     poseidon2_permute(&perm_test_2);
 
-    // Write Test Vector 2 results
-    for (var i = 0u; i < 4u; i++) {
-        debug_buffer[130 + i * 2] = perm_test_2[i].limb0 | (perm_test_2[i].limb1 << 16u);
-        debug_buffer[130 + i * 2 + 1] = perm_test_2[i].limb2 | (perm_test_2[i].limb3 << 16u);
-    }
+
 
     // Test Vector 3: First element 1, rest zeros
     var perm_test_3: array<GoldilocksField, 12>;
@@ -739,11 +706,7 @@ fn debug_poseidon2_permutation_tests() {
     perm_test_3[0] = gf_one();
     poseidon2_permute(&perm_test_3);
 
-    // Write Test Vector 3 results
-    for (var i = 0u; i < 4u; i++) {
-        debug_buffer[140 + i * 2] = perm_test_3[i].limb0 | (perm_test_3[i].limb1 << 16u);
-        debug_buffer[140 + i * 2 + 1] = perm_test_3[i].limb2 | (perm_test_3[i].limb3 << 16u);
-    }
+
 }
 
 // Linear layer test
@@ -755,18 +718,12 @@ fn debug_linear_layer_test() {
         test_state[i] = gf_from_u32(i + 1u);
     }
 
-    // Write input values
-    for (var i = 0u; i < 12u; i++) {
-        debug_buffer[10 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
-    }
+
 
     // Apply linear layer
     external_linear_layer(&test_state);
 
-    // Write output values
-    for (var i = 0u; i < 12u; i++) {
-        debug_buffer[25 + i] = test_state[i].limb0 | (test_state[i].limb1 << 16u);
-    }
+
 }
 
 // S-box: x^7 in Goldilocks field (efficient approach)
@@ -873,30 +830,12 @@ fn internal_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
 
 // Fixed Poseidon2 permutation with proper structure
 fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
-    // Debug: Mark start of permutation
-    debug_buffer[160] += 1u; // Count permutation calls
-
-    // Check if this is the all-zeros permutation we want to trace
-    let is_zeros = ((*state)[0].limb0 == 0u && (*state)[0].limb1 == 0u && (*state)[0].limb2 == 0u && (*state)[0].limb3 == 0u) &&
-                   ((*state)[1].limb0 == 0u && (*state)[1].limb1 == 0u && (*state)[1].limb2 == 0u && (*state)[1].limb3 == 0u) &&
-                   ((*state)[2].limb0 == 0u && (*state)[2].limb1 == 0u && (*state)[2].limb2 == 0u && (*state)[2].limb3 == 0u) &&
-                   ((*state)[3].limb0 == 0u && (*state)[3].limb1 == 0u && (*state)[3].limb2 == 0u && (*state)[3].limb3 == 0u);
 
     // Initial external rounds (4 rounds)
     for (var round = 0u; round < 4u; round++) {
-        // Debug: First initial external round only for zeros permutation
-        if (round == 0u && is_zeros) {
-            debug_buffer[161] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State before constants
-        }
-
         // Add round constants
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = gf_add((*state)[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
-        }
-
-        // Debug: First round after constants
-        if (round == 0u && is_zeros) {
-            debug_buffer[162] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State after constants
         }
 
         // S-box on all elements
@@ -904,21 +843,9 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
             (*state)[i] = sbox((*state)[i]);
         }
 
-        // Debug: First round after S-box
-        if (round == 0u && is_zeros) {
-            debug_buffer[163] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u); // State after S-box
-        }
-
         // External linear layer (4x4 MDS matrix)
         external_linear_layer(state);
 
-        // Debug: First round after linear layer (full first 4 elements)
-        if (round == 0u && is_zeros) {
-            debug_buffer[164] = (*state)[0].limb0 | ((*state)[0].limb1 << 16u);
-            debug_buffer[165] = (*state)[1].limb0 | ((*state)[1].limb1 << 16u);
-            debug_buffer[166] = (*state)[2].limb0 | ((*state)[2].limb1 << 16u);
-            debug_buffer[167] = (*state)[3].limb0 | ((*state)[3].limb1 << 16u);
-        }
     }
 
     // Internal rounds (22 rounds)
@@ -1012,89 +939,41 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     // Convert input to field elements (25 total)
     let input_felts = bytes_to_field_elements(input);
 
-    // GPU SPONGE DEBUG - Write detailed step-by-step info
-    debug_buffer[60] = 999u; // Marker for GPU sponge debug
-    debug_buffer[61] = 25u;  // Total field elements
-
     // Sponge construction matching CPU reference exactly:
     // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=4
 
     // Process first 24 elements (6 complete chunks of 4)
     for (var chunk = 0u; chunk < 6u; chunk++) {
-        // Debug: Write chunk info
-        if (chunk < 4u) {
-            debug_buffer[70u + chunk] = chunk;  // Which chunk we're processing
-        }
-
         // Absorb 4 elements for this chunk
         for (var i = 0u; i < 4u; i++) {
             let felt_idx = chunk * 4u + i;
             state[i] = gf_add(state[i], input_felts[felt_idx]);
 
-            // Debug: Log absorption for first 2 chunks
-            if (chunk < 2u && i == 0u) {
-                debug_buffer[80u + chunk * 4u + i] = input_felts[felt_idx].limb0 | (input_felts[felt_idx].limb1 << 16u);
-            }
-        }
-
-        // Debug: State before permutation for first chunk
-        if (chunk == 0u) {
-            debug_buffer[90] = state[0].limb0 | (state[0].limb1 << 16u);
-            debug_buffer[91] = state[1].limb0 | (state[1].limb1 << 16u);
-            debug_buffer[92] = state[2].limb0 | (state[2].limb1 << 16u);
-            debug_buffer[93] = state[3].limb0 | (state[3].limb1 << 16u);
         }
 
         // Permute after each complete chunk
         poseidon2_permute(&state);
 
-        // Debug: State after permutation for first chunk
-        if (chunk == 0u) {
-            debug_buffer[94] = state[0].limb0 | (state[0].limb1 << 16u);
-            debug_buffer[95] = state[1].limb0 | (state[1].limb1 << 16u);
-            debug_buffer[96] = state[2].limb0 | (state[2].limb1 << 16u);
-            debug_buffer[97] = state[3].limb0 | (state[3].limb1 << 16u);
-        }
     }
 
     // Now we have element 24 (the padding marker = 1) remaining
     // This simulates CPU's finalize_twice adding ONE to buffer position 0
     state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker (should be 1)
 
-    // Debug: State after adding domain separator
-    debug_buffer[100] = state[0].limb0 | (state[0].limb1 << 16u);
-    debug_buffer[101] = state[1].limb0 | (state[1].limb1 << 16u);
-    debug_buffer[102] = state[2].limb0 | (state[2].limb1 << 16u);
-    debug_buffer[103] = state[3].limb0 | (state[3].limb1 << 16u);
-
     // Final permutation (CPU calls permute after completing the block)
     poseidon2_permute(&state);
-
-    // Debug: Final state after permutation
-    debug_buffer[104] = state[0].limb0 | (state[0].limb1 << 16u);
-    debug_buffer[105] = state[1].limb0 | (state[1].limb1 << 16u);
-    debug_buffer[106] = state[2].limb0 | (state[2].limb1 << 16u);
-    debug_buffer[107] = state[3].limb0 | (state[3].limb1 << 16u);
 
     // First squeeze - get first 4 field elements
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
 
-    // Debug: First squeeze values
-    debug_buffer[108] = state[0].limb0 | (state[0].limb1 << 16u);
-    debug_buffer[109] = state[1].limb0 | (state[1].limb1 << 16u);
-    debug_buffer[110] = state[2].limb0 | (state[2].limb1 << 16u);
-    debug_buffer[111] = state[3].limb0 | (state[3].limb1 << 16u);
+
 
     // Second squeeze
     poseidon2_permute(&state);
 
-    // Debug: Second squeeze values
-    debug_buffer[112] = state[0].limb0 | (state[0].limb1 << 16u);
-    debug_buffer[113] = state[1].limb0 | (state[1].limb1 << 16u);
-    debug_buffer[114] = state[2].limb0 | (state[2].limb1 << 16u);
-    debug_buffer[115] = state[3].limb0 | (state[3].limb1 << 16u);
+
 
     let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
@@ -1138,77 +1017,4 @@ fn is_below_target(hash: array<u32, 16>, difficulty_tgt: array<u32, 16>) -> bool
     return false; // Equal, not below
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let thread_id = id.x;
-
-    if (thread_id == 0u) {
-        // FOCUSED DEBUG - Only test critical failing components
-
-        // Basic functionality verification
-        debug_buffer[2] = 1111u; // Thread 0 marker
-        debug_buffer[3] = 2u;    // Simple value
-
-        let one = gf_one();
-        let two = gf_add(one, one);
-        debug_buffer[4] = two.limb0 | (two.limb1 << 16u);
-
-        // CRITICAL ISSUE: Round constants are corrupted
-        let const0 = gf_from_const(INTERNAL_CONSTANTS[0]);
-        let const1 = gf_from_const(INTERNAL_CONSTANTS[1]);
-        let const21 = gf_from_const(INTERNAL_CONSTANTS[21]);
-
-        // Raw constants verification
-        debug_buffer[200] = INTERNAL_CONST_0_LOW;
-        debug_buffer[201] = INTERNAL_CONST_0_HIGH;
-        debug_buffer[202] = INTERNAL_CONSTANTS[0][0];
-        debug_buffer[203] = INTERNAL_CONSTANTS[0][1];
-        debug_buffer[204] = INITIAL_EXTERNAL_CONSTANTS[0][0][0];
-        debug_buffer[205] = INITIAL_EXTERNAL_CONSTANTS[0][0][1];
-
-        // Converted field elements
-        debug_buffer[210] = const0.limb0 | (const0.limb1 << 16u);
-        debug_buffer[211] = const0.limb2 | (const0.limb3 << 16u);
-        debug_buffer[212] = const1.limb0 | (const1.limb1 << 16u);
-        debug_buffer[213] = const1.limb2 | (const1.limb3 << 16u);
-
-        // S-box basic tests (failing cases)
-        let test_zero = sbox(gf_zero());
-        let test_one = sbox(gf_one());
-        let test_two = sbox(gf_from_u32(2u));
-
-        debug_buffer[0] = test_zero.limb0 | (test_zero.limb1 << 16u);
-        debug_buffer[1] = test_one.limb0 | (test_one.limb1 << 16u);
-        debug_buffer[9] = test_two.limb0 | (test_two.limb1 << 16u);
-        debug_buffer[10] = test_two.limb2 | (test_two.limb3 << 16u);
-
-        // ENABLE COMPREHENSIVE TESTS (uncomment to run):
-        // debug_sbox_comprehensive_tests();        // 22 test vectors - ALL PASS
-        // debug_field_multiplication_tests();      // 87 test vectors - ALL PASS
-        // debug_mds_matrix_tests();               // 126 test vectors - 92% pass
-        // debug_poseidon2_permutation_tests();    // 3 test vectors
-        debug_linear_layer_test();              // Basic linear layer test
-
-        // Run actual hash for comparison
-        var test_input: array<u32, 24>;
-        for (var i = 0u; i < 8u; i++) {
-            test_input[i] = header[i];
-        }
-        for (var i = 0u; i < 16u; i++) {
-            test_input[8u + i] = start_nonce[i];
-        }
-
-        let test_hash = poseidon2_hash_squeeze_twice(test_input);
-
-        results[0] = 1u;
-        for (var i = 0u; i < 16u; i++) {
-            results[i + 1u] = start_nonce[i];
-            results[i + 17u] = test_hash[i];
-        }
-    }
-
-    // Skip normal mining for other threads during testing
-    if (thread_id != 0u) {
-        return;
-    }
-}
+// No main function - individual tests will create their own entry points

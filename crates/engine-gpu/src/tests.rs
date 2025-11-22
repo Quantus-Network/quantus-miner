@@ -566,432 +566,279 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
         "Generated {} comprehensive Poseidon2 test vectors using qp-poseidon.",
         vectors.len()
     );
-    // Focus on just the zero case to debug step by step
-    vectors.into_iter().take(1).collect()
+    vectors
 }
 
 pub async fn test_poseidon2_permutation(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n--- Running Poseidon2 permutation tests ---");
-
     let test_vectors = generate_poseidon2_test_vectors();
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
 
-    // CPU reference: what should happen when we add first round constants to zero state
-    let zero_input = [GoldilocksField::ZERO; 12];
-    println!("CPU reference - Zero state after first round constants:");
-    let expected_after_constants = [
-        GoldilocksField::from_canonical_u64(14536656643496110215u64), // First constant
-        GoldilocksField::from_canonical_u64(13514488879006334106u64), // Second constant
-        GoldilocksField::from_canonical_u64(8269306810203348633u64),  // etc...
-        GoldilocksField::from_canonical_u64(16620024733254697148u64),
-        GoldilocksField::from_canonical_u64(15437500654013853529u64),
-        GoldilocksField::from_canonical_u64(17130370965102755777u64),
-        GoldilocksField::from_canonical_u64(7737953962675256106u64),
-        GoldilocksField::from_canonical_u64(7741006386906997745u64),
-        GoldilocksField::from_canonical_u64(16560033798334227211u64),
-        GoldilocksField::from_canonical_u64(15574890113987092201u64),
-        GoldilocksField::from_canonical_u64(16870057884327338414u64),
-        GoldilocksField::from_canonical_u64(3102687419436130260u64),
-    ];
-
-    for i in 0..12 {
-        println!(
-            "  Element {}: {}",
-            i,
-            expected_after_constants[i].to_canonical_u64()
-        );
-    }
-
-    println!("Running {} test cases...", total_tests);
-
-    // Use mining.wgsl directly with proper binding structure
-    let mining_shader_source = include_str!("mining.wgsl");
+    // Use the same pattern as other successful tests - include mining.wgsl and define our own bindings
     let shader_source = format!(
         "
 {}
 
-// Poseidon2 test entry point - reuse existing mining shader bindings
+// Simple test entry point for Poseidon2 permutation
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
 @compute @workgroup_size(1)
-fn poseidon2_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-    let i = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
 
-    if (i == 0u) {{
-        // Read input from header buffer (8 u32 values)
-        // Convert to 12-element state
-        var state: array<GoldilocksField, 12>;
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
 
-        // Read actual input from header buffer (first 8 u32 values represent 2 GoldilocksField elements)
-        // Each GoldilocksField needs 4 limbs (64 bits), but header has 8 u32 values (256 bits)
-        // We can extract 4 GoldilocksField elements from 8 u32 values
-        for (var j = 0u; j < 4u && j * 2u + 1u < 8u; j++) {{
-            state[j] = GoldilocksField(
-                header[j * 2u] & 0xFFFFu,
-                (header[j * 2u] >> 16u) & 0xFFFFu,
-                header[j * 2u + 1u] & 0xFFFFu,
-                (header[j * 2u + 1u] >> 16u) & 0xFFFFu
-            );
-        }}
+    // Apply Poseidon2 permutation
+    poseidon2_permute(&state);
 
-        // Fill remaining elements with zeros for now
-        for (var j = 4u; j < 12u; j++) {{
-            state[j] = GoldilocksField(0u, 0u, 0u, 0u);
-        }}
-
-        // Apply actual Poseidon2 permutation from mining.wgsl
-        poseidon2_permute(&state);
-
-        // Write first 4 results to results buffer as u32 pairs
-        for (var j = 0u; j < 4u; j++) {{
-            results[j * 2u] = state[j].limb0 | (state[j].limb1 << 16u);
-            results[j * 2u + 1u] = state[j].limb2 | (state[j].limb3 << 16u);
-        }}
-
-        // Write remaining results to debug_buffer
-        for (var j = 4u; j < 12u; j++) {{
-            debug_buffer[100u + (j - 4u) * 2u] = state[j].limb0 | (state[j].limb1 << 16u);
-            debug_buffer[100u + (j - 4u) * 2u + 1u] = state[j].limb2 | (state[j].limb3 << 16u);
-        }}
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
     }}
 }}
 ",
-        mining_shader_source
+        include_str!("mining.wgsl")
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Poseidon2 test shader"),
+        label: Some("Poseidon2 Permutation Test Shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
 
-    // Create explicit bind group layout to match mining.wgsl's 5 bindings
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Poseidon2 Test Bind Group Layout"),
-        entries: &[
-            // binding 0: results buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // binding 1: header buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // binding 2: start_nonce buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // binding 3: difficulty_target buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // binding 4: debug_buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Poseidon2 Test Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    // Create compute pipeline with explicit layout
+    // Create pipeline
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Poseidon2 test pipeline"),
-        layout: Some(&pipeline_layout),
+        label: Some("Poseidon2 Permutation Test Pipeline"),
+        layout: None,
         module: &shader,
-        entry_point: Some("poseidon2_test"),
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
 
-    // Process tests in batches
-    const BATCH_SIZE: usize = 32;
-    for chunk in test_vectors.chunks(BATCH_SIZE) {
-        // Prepare input data - convert first test case to header buffer format
-        let test_input = &chunk[0].input; // Just use first test case
-        let mut header_data = vec![0u32; 8];
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
 
-        // Pack first 4 GoldilocksField elements into 8 u32 values for header buffer
-        for i in 0..4.min(test_input.len()) {
-            let val = test_input[i].to_canonical_u64();
-            header_data[i * 2] = (val & 0xFFFFFFFF) as u32;
-            header_data[i * 2 + 1] = ((val >> 32) & 0xFFFFFFFF) as u32;
+    // Process tests in batches
+    const BATCH_SIZE: usize = 16;
+    for chunk in test_vectors.chunks(BATCH_SIZE) {
+        // Prepare input data (flatten 12-element arrays and convert to GfWgls)
+        let mut input_data = Vec::new();
+        for test_case in chunk {
+            for &field_elem in &test_case.input {
+                input_data.push(GfWgls::from(field_elem));
+            }
         }
 
-        // Create buffers matching mining.wgsl binding layout
-        let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Results Buffer"),
-            size: 1024,
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: (input_data.len() * std::mem::size_of::<GfWgls>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        let header_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Header Buffer"),
-            contents: bytemuck::cast_slice(&header_data),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        let nonce_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Nonce Buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let target_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Target Buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Buffer"),
-            size: 4096,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        // Create bind group with explicit layout
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Poseidon2 Test Bind Group"),
+            label: Some("Test Bind Group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: results_buffer.as_entire_binding(),
+                    resource: input_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: header_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: nonce_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: target_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: debug_buffer.as_entire_binding(),
+                    resource: output_buffer.as_entire_binding(),
                 },
             ],
         });
 
-        // Run compute shader
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Poseidon2 Test Encoder"),
+            label: Some("Command Encoder"),
         });
 
         {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Poseidon2 Test Pass"),
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(&pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(chunk.len() as u32, 1, 1);
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(chunk.len() as u32, 1, 1);
         }
 
-        // Create staging buffers for both results and debug data
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Poseidon2 Staging Buffer"),
-            size: 1024,
+            label: Some("Staging Buffer"),
+            size: output_buffer.size(),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let debug_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Poseidon2 Debug Staging Buffer"),
-            size: debug_buffer.size(),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
 
-        encoder.copy_buffer_to_buffer(&results_buffer, 0, &staging_buffer, 0, 1024);
-        encoder.copy_buffer_to_buffer(
-            &debug_buffer,
-            0,
-            &debug_staging_buffer,
-            0,
-            debug_buffer.size(),
-        );
-        queue.submit(std::iter::once(encoder.finish()));
-
-        // Read results from results buffer
-        let buffer_slice = staging_buffer.slice(..);
-        let (sender, receiver) = futures::channel::oneshot::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-
-        device.poll(wgpu::PollType::Wait {
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
-        receiver.await??;
 
-        // Read results from debug buffer
-        let debug_buffer_slice = debug_staging_buffer.slice(..);
-        let (debug_sender, debug_receiver) = futures::channel::oneshot::channel();
-        debug_buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            debug_sender.send(result).unwrap();
-        });
+        let data = slice.get_mapped_range();
+        let results: &[GfWgls] = bytemuck::cast_slice(&data);
 
-        device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-        debug_receiver.await??;
-
-        let data = buffer_slice.get_mapped_range();
-        let debug_data = debug_buffer_slice.get_mapped_range();
-        let gpu_results: &[u32] = bytemuck::cast_slice(&data);
-        let debug_results: &[u32] = bytemuck::cast_slice(&debug_data);
-
-        // Check results - read all 12 elements from both buffers
+        // Check results
         for (i, test_case) in chunk.iter().enumerate() {
-            if i > 0 {
-                break;
-            } // Only process first test case for now
+            let gpu_result = [
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12].limb0 as u64)
+                        | ((results[i * 12].limb1 as u64) << 16)
+                        | ((results[i * 12].limb2 as u64) << 32)
+                        | ((results[i * 12].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 1].limb0 as u64)
+                        | ((results[i * 12 + 1].limb1 as u64) << 16)
+                        | ((results[i * 12 + 1].limb2 as u64) << 32)
+                        | ((results[i * 12 + 1].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 2].limb0 as u64)
+                        | ((results[i * 12 + 2].limb1 as u64) << 16)
+                        | ((results[i * 12 + 2].limb2 as u64) << 32)
+                        | ((results[i * 12 + 2].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 3].limb0 as u64)
+                        | ((results[i * 12 + 3].limb1 as u64) << 16)
+                        | ((results[i * 12 + 3].limb2 as u64) << 32)
+                        | ((results[i * 12 + 3].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 4].limb0 as u64)
+                        | ((results[i * 12 + 4].limb1 as u64) << 16)
+                        | ((results[i * 12 + 4].limb2 as u64) << 32)
+                        | ((results[i * 12 + 4].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 5].limb0 as u64)
+                        | ((results[i * 12 + 5].limb1 as u64) << 16)
+                        | ((results[i * 12 + 5].limb2 as u64) << 32)
+                        | ((results[i * 12 + 5].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 6].limb0 as u64)
+                        | ((results[i * 12 + 6].limb1 as u64) << 16)
+                        | ((results[i * 12 + 6].limb2 as u64) << 32)
+                        | ((results[i * 12 + 6].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 7].limb0 as u64)
+                        | ((results[i * 12 + 7].limb1 as u64) << 16)
+                        | ((results[i * 12 + 7].limb2 as u64) << 32)
+                        | ((results[i * 12 + 7].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 8].limb0 as u64)
+                        | ((results[i * 12 + 8].limb1 as u64) << 16)
+                        | ((results[i * 12 + 8].limb2 as u64) << 32)
+                        | ((results[i * 12 + 8].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 9].limb0 as u64)
+                        | ((results[i * 12 + 9].limb1 as u64) << 16)
+                        | ((results[i * 12 + 9].limb2 as u64) << 32)
+                        | ((results[i * 12 + 9].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 10].limb0 as u64)
+                        | ((results[i * 12 + 10].limb1 as u64) << 16)
+                        | ((results[i * 12 + 10].limb2 as u64) << 32)
+                        | ((results[i * 12 + 10].limb3 as u64) << 48),
+                ),
+                GoldilocksField::from_noncanonical_u64(
+                    (results[i * 12 + 11].limb0 as u64)
+                        | ((results[i * 12 + 11].limb1 as u64) << 16)
+                        | ((results[i * 12 + 11].limb2 as u64) << 32)
+                        | ((results[i * 12 + 11].limb3 as u64) << 48),
+                ),
+            ];
 
-            let mut gpu_result = [GoldilocksField::ZERO; 12];
-
-            // Read first 4 elements from results buffer (as u32 pairs)
-            for j in 0..4 {
-                let low = gpu_results[j * 2] as u64;
-                let high = gpu_results[j * 2 + 1] as u64;
-                gpu_result[j] = GoldilocksField::from_noncanonical_u64(
-                    (low & 0xFFFF)
-                        | (((low >> 16) & 0xFFFF) << 16)
-                        | ((high & 0xFFFF) << 32)
-                        | (((high >> 16) & 0xFFFF) << 48),
-                );
-            }
-
-            // Read remaining 8 elements from debug buffer (starting at index 100)
-            for j in 4..12 {
-                let debug_idx = 100 + (j - 4) * 2;
-                if debug_idx + 1 < debug_results.len() {
-                    let low = debug_results[debug_idx] as u64;
-                    let high = debug_results[debug_idx + 1] as u64;
-                    gpu_result[j] = GoldilocksField::from_noncanonical_u64(
-                        (low & 0xFFFF)
-                            | (((low >> 16) & 0xFFFF) << 16)
-                            | ((high & 0xFFFF) << 32)
-                            | (((high >> 16) & 0xFFFF) << 48),
-                    );
+            // Compare all 12 elements
+            let mut all_match = true;
+            for j in 0..12 {
+                if gpu_result[j].to_canonical_u64() != test_case.expected[j].to_canonical_u64() {
+                    all_match = false;
+                    break;
                 }
             }
 
-            // Compare all 12 elements
-            if gpu_result == test_case.expected {
+            if all_match {
                 passed_tests += 1;
             } else {
                 failed_tests.push((test_case.clone(), gpu_result));
                 if failed_tests.len() <= 3 {
                     println!("❌ FAILED: Poseidon2 permutation test");
-                    println!(
-                        "Input: {:?}",
-                        test_case
-                            .input
-                            .iter()
-                            .map(|x| x.to_canonical_u64())
-                            .collect::<Vec<_>>()
-                    );
-                    println!(
-                        "Expected: {:?}",
-                        test_case
-                            .expected
-                            .iter()
-                            .map(|x| x.to_canonical_u64())
-                            .collect::<Vec<_>>()
-                    );
-                    println!(
-                        "Got:      {:?}",
-                        gpu_result
-                            .iter()
-                            .map(|x| x.to_canonical_u64())
-                            .collect::<Vec<_>>()
-                    );
-
-                    // Show element-by-element comparison
-                    for i in 0..12 {
-                        let expected = test_case.expected[i].to_canonical_u64();
-                        let got = gpu_result[i].to_canonical_u64();
+                    println!("Input state:");
+                    for (j, &val) in test_case.input.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("Expected state:");
+                    for (j, &val) in test_case.expected.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("GPU result:");
+                    for (j, &val) in gpu_result.iter().enumerate() {
+                        println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
+                    }
+                    println!("Element-by-element comparison:");
+                    for j in 0..12 {
+                        let expected = test_case.expected[j].to_canonical_u64();
+                        let got = gpu_result[j].to_canonical_u64();
                         let status = if expected == got { "✓" } else { "✗" };
-                        println!("  [{}] {} Expected: {}, Got: {}", i, status, expected, got);
+                        println!(
+                            "  [{}] {} Expected: 0x{:016x}, Got: 0x{:016x}",
+                            j, status, expected, got
+                        );
                     }
                 }
             }
         }
 
         drop(data);
-        drop(debug_data);
         staging_buffer.unmap();
-        debug_staging_buffer.unmap();
     }
 
-    println!("\n=== TEST SUMMARY ===");
-    println!("Total tests: {}", total_tests);
     println!(
-        "Passed: {} ({:.1}%)",
+        "Poseidon2 Permutation Tests: {}/{} passed ({:.1}%)",
         passed_tests,
-        (passed_tests as f64 / total_tests as f64) * 100.0
+        total_tests,
+        100.0 * passed_tests as f64 / total_tests as f64
     );
 
-    if failed_tests.is_empty() {
-        println!("🎉 All tests PASSED!");
-    } else {
-        println!("❌ Failed: {} tests", failed_tests.len());
-        if failed_tests.len() > 5 {
-            println!("  (showing first 5 failures above)");
+    if !failed_tests.is_empty() {
+        println!(
+            "❌ {} Poseidon2 permutation tests failed",
+            failed_tests.len()
+        );
+        if failed_tests.len() > 3 {
+            println!("   (showing only first 3 failures)");
         }
-        return Err(format!("{} out of {} tests failed", failed_tests.len(), total_tests).into());
+    } else {
+        println!("✅ All Poseidon2 permutation tests passed!");
     }
 
     Ok(())
@@ -1017,7 +864,7 @@ pub async fn test_gf_mul(
 @group(0) @binding(2) var<storage, read_write> output: array<GoldilocksField>;
 
 @compute @workgroup_size(1)
-fn gf_mul_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let i = global_id.x;
     output[i] = gf_mul(input_a[i], input_b[i]);
 }}
@@ -1035,7 +882,7 @@ fn gf_mul_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         label: Some("gf_mul test pipeline"),
         layout: None, // Let wgpu infer the layout
         module: &shader,
-        entry_point: Some("gf_mul_test"),
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -1252,7 +1099,7 @@ pub async fn test_mds_matrix(
 @group(0) @binding(1) var<storage, read_write> output_data: array<GoldilocksField>;
 
 @compute @workgroup_size(1)
-fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let i = global_id.x;
     let base_idx = i * 4u;
 
@@ -1350,7 +1197,7 @@ fn mds_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         label: Some("MDS test pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: Some("mds_test"),
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -1542,7 +1389,7 @@ pub async fn test_internal_linear_layer(
 @group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
 
 @compute @workgroup_size(1)
-fn internal_linear_layer_test(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let test_id = global_id.x;
     let offset = test_id * 12u;
 
@@ -1574,7 +1421,7 @@ fn internal_linear_layer_test(@builtin(global_invocation_id) global_id: vec3<u32
         label: Some("Internal Linear Layer Test Pipeline"),
         layout: None,
         module: &shader,
-        entry_point: Some("internal_linear_layer_test"),
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -1819,21 +1666,13 @@ pub async fn test_sbox(
             .map(|test_case| GfWgls::from(test_case.input))
             .collect();
 
-        // Create compute shader for S-box testing by including mining.wgsl without main
-        let mining_wgsl = include_str!("mining.wgsl");
-        // Remove the main function from mining.wgsl
-        let mining_wgsl_without_main = mining_wgsl
-            .lines()
-            .take_while(|line| !line.contains("@compute @workgroup_size(64)"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
+        // Create compute shader for S-box testing using the same pattern as other tests
         let shader_source = format!(
-            r#"
+            "
+{}
+
 @group(0) @binding(0) var<storage, read> input_data: array<GoldilocksField>;
 @group(0) @binding(1) var<storage, read_write> output_data: array<GoldilocksField>;
-
-{}
 
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
@@ -1846,8 +1685,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let result = sbox(input_val);
     output_data[index] = result;
 }}
-"#,
-            mining_wgsl_without_main,
+",
+            include_str!("mining.wgsl"),
             batch.len()
         );
 
