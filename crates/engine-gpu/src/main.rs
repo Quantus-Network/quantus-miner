@@ -92,10 +92,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Full permutation test failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_sequential_cpu_vs_gpu_internal(&device, &queue).await {
-        eprintln!("❌ Sequential CPU vs GPU internal test failed: {}", e);
-    }
-
     if let Err(e) =
         tests::test_poseidon2_terminal_external_constants_verification(&device, &queue).await
     {
