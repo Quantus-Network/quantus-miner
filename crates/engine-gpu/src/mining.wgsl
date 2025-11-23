@@ -687,6 +687,9 @@ fn internal_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
 // Fixed Poseidon2 permutation with proper structure
 fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
 
+    // Initial MDS permutation (required by p3-poseidon2 spec)
+    external_linear_layer(state);
+
     // Initial external rounds (4 rounds)
     for (var round = 0u; round < 4u; round++) {
         // Add round constants
