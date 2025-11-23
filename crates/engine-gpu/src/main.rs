@@ -72,6 +72,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ External linear layer tests failed: {}", e);
     }
 
+    if let Err(e) = tests::test_poseidon2_initial_external_rounds(&device, &queue).await {
+        eprintln!("❌ Initial external rounds tests failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_terminal_external_rounds(&device, &queue).await {
+        eprintln!("❌ Terminal external rounds tests failed: {}", e);
+    }
+
     if let Err(e) = tests::test_poseidon2_constants_verification(&device, &queue).await {
         eprintln!("❌ Constants verification test failed: {}", e);
     }

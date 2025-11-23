@@ -1144,6 +1144,528 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     results.print_summary()
 }
 
+pub async fn test_poseidon2_initial_external_rounds(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Test just the initial 4 external rounds
+    let test_vectors = generate_gf_from_const_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    let shader_source = format!(
+        "
+{}
+
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // Apply ONLY the 4 initial external rounds
+    for (var round = 0u; round < 4u; round++) {{
+        // Add round constants
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = gf_add(state[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
+        }}
+        // S-box on all elements
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = sbox(state[i]);
+        }}
+        // External linear layer
+        external_linear_layer(&state);
+    }}
+
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Initial External Rounds Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Initial External Rounds Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Generate comprehensive test cases
+    let mut test_cases = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+
+    // Zero state
+    test_cases.push([GoldilocksField::ZERO; 12]);
+
+    // Unit vectors (one element = 1, rest = 0)
+    for i in 0..12 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        state[i] = GoldilocksField::ONE;
+        test_cases.push(state);
+    }
+
+    // All ones state
+    test_cases.push([GoldilocksField::ONE; 12]);
+
+    // Sequential state [1,2,3,...,12]
+    let sequential_state: [GoldilocksField; 12] =
+        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
+    test_cases.push(sequential_state);
+
+    // Random small values (all elements < 2^8)
+    for _ in 0..15 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u8>()) as u64;
+            state[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        test_cases.push(state);
+    }
+
+    // Random medium values (all elements < 2^16)
+    for _ in 0..10 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u16>()) as u64;
+            state[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        test_cases.push(state);
+    }
+
+    for (test_idx, input_state) in test_cases.iter().enumerate() {
+        let input_data: Vec<GfWgls> = input_state.iter().map(|&f| GfWgls::from(f)).collect();
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Initial External Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Initial External Output Buffer"),
+            size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Initial External Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Initial External Command Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Initial External Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Initial External Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let data = slice.get_mapped_range();
+        let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Compute CPU reference
+        let mut cpu_state = *input_state;
+        use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
+
+        for round in 0..4 {
+            // Add constants
+            for i in 0..12 {
+                let raw_constant = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i];
+                cpu_state[i] += GoldilocksField::from_canonical_u64(raw_constant);
+            }
+            // S-box
+            for i in 0..12 {
+                cpu_state[i] = cpu_state[i].exp_u64(7);
+            }
+            // External linear layer (simplified CPU version)
+            // This is a basic implementation - if this test fails we'll know it's here
+            let two = GoldilocksField::from_canonical_u64(2);
+            let three = GoldilocksField::from_canonical_u64(3);
+
+            // 4x4 MDS matrix on chunks
+            for chunk in 0..3 {
+                let offset = chunk * 4;
+                let mut chunk_state = [GoldilocksField::ZERO; 4];
+                for i in 0..4 {
+                    chunk_state[i] = cpu_state[offset + i];
+                }
+                let new_0 =
+                    two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
+                let new_1 =
+                    chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
+                let new_2 =
+                    chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
+                let new_3 =
+                    three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
+                cpu_state[offset] = new_0;
+                cpu_state[offset + 1] = new_1;
+                cpu_state[offset + 2] = new_2;
+                cpu_state[offset + 3] = new_3;
+            }
+            // Circulant matrix
+            let mut sums = [GoldilocksField::ZERO; 4];
+            for k in 0..4 {
+                for j in (k..12).step_by(4) {
+                    sums[k] += cpu_state[j];
+                }
+            }
+            for i in 0..12 {
+                cpu_state[i] += sums[i % 4];
+            }
+        }
+
+        // Compare
+        let mut test_passed = true;
+        for i in 0..12 {
+            let gpu_gf: GoldilocksField = gpu_result[i].into();
+            if gpu_gf.to_canonical_u64() != cpu_state[i].to_canonical_u64() {
+                test_passed = false;
+                if failed_tests.is_empty() {
+                    println!("❌ Initial external rounds test {} failed:", test_idx + 1);
+                    for j in 0..3 {
+                        println!(
+                            "  [{}] Expected: 0x{:016x}, Got: 0x{:016x}",
+                            j,
+                            cpu_state[j].to_canonical_u64(),
+                            gpu_gf.to_canonical_u64()
+                        );
+                    }
+                }
+                break;
+            }
+        }
+
+        if test_passed {
+            passed_tests += 1;
+        } else {
+            failed_tests.push(test_idx + 1);
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    let mut results = TestResults::new("initial external rounds".to_string(), test_cases.len());
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
+}
+
+pub async fn test_poseidon2_terminal_external_rounds(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Test just the terminal 4 external rounds
+    let total_tests = 2;
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    let shader_source = format!(
+        "
+{}
+
+@group(0) @binding(0) var<storage, read> input_state: array<GoldilocksField>;
+@group(0) @binding(1) var<storage, read_write> output_state: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let offset = test_id * 12u;
+
+    // Copy input to local state
+    var state: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {{
+        state[i] = input_state[offset + i];
+    }}
+
+    // Apply ONLY the 4 terminal external rounds
+    for (var round = 0u; round < 4u; round++) {{
+        // Add round constants
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = gf_add(state[i], gf_from_const(TERMINAL_EXTERNAL_CONSTANTS[round][i]));
+        }}
+        // S-box on all elements
+        for (var i = 0u; i < 12u; i++) {{
+            state[i] = sbox(state[i]);
+        }}
+        // External linear layer
+        external_linear_layer(&state);
+    }}
+
+    // Write result
+    for (var i = 0u; i < 12u; i++) {{
+        output_state[offset + i] = state[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Terminal External Rounds Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Terminal External Rounds Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Generate comprehensive test cases
+    let mut test_cases = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+
+    // Zero state
+    test_cases.push([GoldilocksField::ZERO; 12]);
+
+    // Unit vectors (one element = 1, rest = 0)
+    for i in 0..12 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        state[i] = GoldilocksField::ONE;
+        test_cases.push(state);
+    }
+
+    // All ones state
+    test_cases.push([GoldilocksField::ONE; 12]);
+
+    // Sequential state [1,2,3,...,12]
+    let sequential_state: [GoldilocksField; 12] =
+        core::array::from_fn(|i| GoldilocksField::from_canonical_u64((i + 1) as u64));
+    test_cases.push(sequential_state);
+
+    // Random small values (all elements < 2^8)
+    for _ in 0..15 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u8>()) as u64;
+            state[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        test_cases.push(state);
+    }
+
+    // Random medium values (all elements < 2^16)
+    for _ in 0..10 {
+        let mut state = [GoldilocksField::ZERO; 12];
+        for j in 0..12 {
+            let val = (rng.gen::<u16>()) as u64;
+            state[j] = GoldilocksField::from_canonical_u64(val);
+        }
+        test_cases.push(state);
+    }
+
+    for (test_idx, input_state) in test_cases.iter().enumerate() {
+        let input_data: Vec<GfWgls> = input_state.iter().map(|&f| GfWgls::from(f)).collect();
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Terminal External Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terminal External Output Buffer"),
+            size: (std::mem::size_of::<GfWgls>() * 12) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terminal External Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Terminal External Command Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Terminal External Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terminal External Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let data = slice.get_mapped_range();
+        let gpu_result: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        // Compute CPU reference
+        let mut cpu_state = *input_state;
+        use qp_poseidon_constants::POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW;
+
+        for round in 0..4 {
+            // Add constants
+            for i in 0..12 {
+                let raw_constant = POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW[round][i];
+                cpu_state[i] += GoldilocksField::from_canonical_u64(raw_constant);
+            }
+            // S-box
+            for i in 0..12 {
+                cpu_state[i] = cpu_state[i].exp_u64(7);
+            }
+            // External linear layer (same as initial external)
+            let two = GoldilocksField::from_canonical_u64(2);
+            let three = GoldilocksField::from_canonical_u64(3);
+
+            // 4x4 MDS matrix on chunks
+            for chunk in 0..3 {
+                let offset = chunk * 4;
+                let mut chunk_state = [GoldilocksField::ZERO; 4];
+                for i in 0..4 {
+                    chunk_state[i] = cpu_state[offset + i];
+                }
+                let new_0 =
+                    two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
+                let new_1 =
+                    chunk_state[0] + two * chunk_state[1] + three * chunk_state[2] + chunk_state[3];
+                let new_2 =
+                    chunk_state[0] + chunk_state[1] + two * chunk_state[2] + three * chunk_state[3];
+                let new_3 =
+                    three * chunk_state[0] + chunk_state[1] + chunk_state[2] + two * chunk_state[3];
+                cpu_state[offset] = new_0;
+                cpu_state[offset + 1] = new_1;
+                cpu_state[offset + 2] = new_2;
+                cpu_state[offset + 3] = new_3;
+            }
+            // Circulant matrix
+            let mut sums = [GoldilocksField::ZERO; 4];
+            for k in 0..4 {
+                for j in (k..12).step_by(4) {
+                    sums[k] += cpu_state[j];
+                }
+            }
+            for i in 0..12 {
+                cpu_state[i] += sums[i % 4];
+            }
+        }
+
+        // Compare
+        let mut test_passed = true;
+        for i in 0..12 {
+            let gpu_gf: GoldilocksField = gpu_result[i].into();
+            if gpu_gf.to_canonical_u64() != cpu_state[i].to_canonical_u64() {
+                test_passed = false;
+                if failed_tests.is_empty() {
+                    println!("❌ Terminal external rounds test {} failed:", test_idx + 1);
+                    for j in 0..3 {
+                        println!(
+                            "  [{}] Expected: 0x{:016x}, Got: 0x{:016x}",
+                            j,
+                            cpu_state[j].to_canonical_u64(),
+                            gpu_gf.to_canonical_u64()
+                        );
+                    }
+                }
+                break;
+            }
+        }
+
+        if test_passed {
+            passed_tests += 1;
+        } else {
+            failed_tests.push(test_idx + 1);
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    let mut results = TestResults::new("terminal external rounds".to_string(), test_cases.len());
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
+}
+
 pub async fn test_gf_from_const(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
