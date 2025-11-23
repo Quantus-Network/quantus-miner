@@ -15,6 +15,13 @@ struct GfMulTestCase {
 }
 
 #[derive(Debug, Clone)]
+struct GfFromConstTestCase {
+    a: u32, // low 32 bits
+    b: u32, // high 32 bits
+    expected: GoldilocksField,
+}
+
+#[derive(Debug, Clone)]
 struct MdsTestCase {
     input: [GoldilocksField; 4],
     expected: [GoldilocksField; 4],
@@ -71,6 +78,71 @@ impl From<GfWgls> for GoldilocksField {
             | ((gf.limb3 as u64) << 48);
         GoldilocksField::from_noncanonical_u64(val)
     }
+}
+
+fn generate_gf_from_const_test_vectors() -> Vec<GfFromConstTestCase> {
+    let mut vectors = Vec::new();
+
+    // Test zero
+    vectors.push(GfFromConstTestCase {
+        a: 0,
+        b: 0,
+        expected: GoldilocksField::from_canonical_u64(0),
+    });
+
+    // Test one
+    vectors.push(GfFromConstTestCase {
+        a: 1,
+        b: 0,
+        expected: GoldilocksField::from_canonical_u64(1),
+    });
+
+    // Test small values
+    for val in [2, 7, 42, 255, 1024, 65535] {
+        vectors.push(GfFromConstTestCase {
+            a: val,
+            b: 0,
+            expected: GoldilocksField::from_canonical_u64(val as u64),
+        });
+    }
+
+    // Test values that use high 32 bits
+    for high in [1, 2, 1000, 65535] {
+        let val = (high as u64) << 32;
+        vectors.push(GfFromConstTestCase {
+            a: 0,
+            b: high,
+            expected: GoldilocksField::from_canonical_u64(val),
+        });
+    }
+
+    // Test combined low and high bits
+    for (low, high) in [(123, 456), (65535, 32767), (4294967295, 65535)] {
+        let val = (high as u64) << 32 | (low as u64);
+        vectors.push(GfFromConstTestCase {
+            a: low,
+            b: high,
+            expected: GoldilocksField::from_canonical_u64(val),
+        });
+    }
+
+    // Test actual constants from INITIAL_EXTERNAL_CONSTANTS
+    let actual_constants = [
+        (2539329031u32, 3221415792u32),
+        (1633409695u32, 3565876427u32),
+        (2143952946u32, 1246797945u32),
+    ];
+
+    for (low, high) in actual_constants {
+        let val = (high as u64) << 32 | (low as u64);
+        vectors.push(GfFromConstTestCase {
+            a: low,
+            b: high,
+            expected: GoldilocksField::from_canonical_u64(val),
+        });
+    }
+
+    vectors
 }
 
 fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
@@ -1002,7 +1074,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         let data = slice.get_mapped_range();
         let results: &[GfWgls] = bytemuck::cast_slice(&data);
 
-        // Check results
+        // Check results for the chunk
         for (i, test_case) in chunk.iter().enumerate() {
             // Convert results back to GoldilocksField arrays using proper conversion
             let gpu_result: [GoldilocksField; 12] = [
@@ -1067,6 +1139,141 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     let mut results = TestResults::new("poseidon2 permutation".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
+}
+
+pub async fn test_gf_from_const(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Test the gf_from_const function that converts constant arrays to GoldilocksField
+    let test_vectors = generate_gf_from_const_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+
+    let shader_source = format!(
+        "
+{}
+
+@group(0) @binding(0) var<storage, read> input_constants: array<array<u32, 2>>;
+@group(0) @binding(1) var<storage, read_write> output_fields: array<GoldilocksField>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let index = global_id.x;
+    output_fields[index] = gf_from_const(input_constants[index]);
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gf_from_const Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("gf_from_const Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    const BATCH_SIZE: usize = 32;
+    for (batch_idx, chunk) in test_vectors.chunks(BATCH_SIZE).enumerate() {
+        let input_data: Vec<[u32; 2]> = chunk.iter().map(|tc| [tc.a, tc.b]).collect();
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gf_from_const Input Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gf_from_const Output Buffer"),
+            size: (std::mem::size_of::<GfWgls>() * chunk.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gf_from_const Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gf_from_const Command Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gf_from_const Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(chunk.len() as u32, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gf_from_const Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let data = slice.get_mapped_range();
+        let results: &[GfWgls] = bytemuck::cast_slice(&data);
+
+        for (i, test_case) in chunk.iter().enumerate() {
+            let gpu_result = GoldilocksField::from(results[i]);
+            if gpu_result.to_canonical_u64() == test_case.expected.to_canonical_u64() {
+                passed_tests += 1;
+            } else {
+                failed_tests.push(batch_idx * BATCH_SIZE + i + 1);
+                if failed_tests.len() <= 5 {
+                    println!(
+                        "❌ gf_from_const test failed: input=[{}, {}], expected=0x{:016x}, got=0x{:016x}",
+                        test_case.a, test_case.b,
+                        test_case.expected.to_canonical_u64(),
+                        gpu_result.to_canonical_u64()
+                    );
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    let mut results = TestResults::new("gf_from_const".to_string(), total_tests);
     results.passed = passed_tests;
     results.failed = failed_tests;
     results.print_summary()

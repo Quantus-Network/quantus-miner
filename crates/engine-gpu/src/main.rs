@@ -48,6 +48,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Running Poseidon2 GPU Component Tests...\n");
 
     // Run all component tests
+    if let Err(e) = tests::test_gf_from_const(&device, &queue).await {
+        eprintln!("❌ gf_from_const tests failed: {}", e);
+    }
+
     if let Err(e) = tests::test_gf_mul(&device, &queue).await {
         eprintln!("❌ gf_mul tests failed: {}", e);
     }
