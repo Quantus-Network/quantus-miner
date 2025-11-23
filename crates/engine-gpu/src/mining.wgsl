@@ -45,6 +45,7 @@ const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(
     array<u32, 2>(2700752774u, 1052996327u),
     array<u32, 2>(4063512019u, 1429786100u)
 );
+
 // Initial external round constants (4 rounds x 12 elements)
 const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(
     array<array<u32, 2>, 12>(

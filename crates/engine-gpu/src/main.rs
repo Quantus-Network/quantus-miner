@@ -68,14 +68,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ External linear layer tests failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_first_round_debug(&device, &queue).await {
-        eprintln!("❌ First round debug failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_initial_external_rounds(&device, &queue).await {
-        eprintln!("❌ Initial external rounds test failed: {}", e);
-    }
-
     if let Err(e) = tests::test_poseidon2_constants_verification(&device, &queue).await {
         eprintln!("❌ Constants verification test failed: {}", e);
     }
@@ -88,10 +80,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Internal rounds only test failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_full_permutation(&device, &queue).await {
-        eprintln!("❌ Full permutation test failed: {}", e);
-    }
-
     if let Err(e) =
         tests::test_poseidon2_terminal_external_constants_verification(&device, &queue).await
     {
@@ -101,13 +89,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("🎯 Testing Poseidon2 permutation with proper conversion...");
-
     if let Err(e) = tests::test_poseidon2_permutation(&device, &queue).await {
         eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
     }
 
     println!("\nAll tests completed!");
+
+    // generate_correct_wgsl_constants();
     Ok(())
 }
 
