@@ -105,8 +105,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
     }
 
-    if let Err(e) = tests::test_poseidon2_hash(&device, &queue).await {
-        eprintln!("❌ Poseidon2 hash tests failed: {}", e);
+    if let Err(e) = tests::test_poseidon2_squeeze_twice(&device, &queue).await {
+        eprintln!("❌ Poseidon2 squeeze-twice tests failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_bytes_to_field_elements(&device, &queue).await {
+        eprintln!("❌ Bytes to field elements tests failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_field_elements_to_bytes(&device, &queue).await {
+        eprintln!("❌ Field elements to bytes tests failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_poseidon2_standard_hash(&device, &queue).await {
+        eprintln!("❌ Poseidon2 standard hash tests failed: {}", e);
     }
 
     println!("\nAll tests completed!");
