@@ -662,6 +662,12 @@ struct Poseidon2TestCase {
 }
 
 #[derive(Debug, Clone)]
+struct Poseidon2HashTestCase {
+    input_bytes: Vec<u8>,    // Should be exactly 96 bytes for our GPU implementation
+    expected_hash: [u8; 32], // First 32 bytes of the 64-byte squeeze_twice output
+}
+
+#[derive(Debug, Clone)]
 struct InternalRoundsTestCase {
     input: [GoldilocksField; 12],
     expected: [GoldilocksField; 12],
@@ -730,6 +736,69 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
         vectors.push(Poseidon2TestCase { input, expected });
+    }
+
+    vectors
+}
+
+fn generate_poseidon2_hash_test_vectors() -> Vec<Poseidon2HashTestCase> {
+    let mut vectors = Vec::new();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42424242);
+
+    // Our GPU function expects exactly 96 bytes and produces 32 bytes (first half of 64-byte output)
+    // Test with 96-byte inputs using qp_poseidon_core::hash_squeeze_twice for reference
+
+    // Zero input (96 bytes of zeros)
+    let zero_input = vec![0u8; 96];
+    let zero_expected_64 = qp_poseidon_core::hash_squeeze_twice(&zero_input);
+    let mut zero_expected_32 = [0u8; 32];
+    zero_expected_32.copy_from_slice(&zero_expected_64[0..32]); // Take first 32 bytes
+    vectors.push(Poseidon2HashTestCase {
+        input_bytes: zero_input,
+        expected_hash: zero_expected_32,
+    });
+
+    // All 0x01 input
+    let ones_input = vec![1u8; 96];
+    let ones_expected_64 = qp_poseidon_core::hash_squeeze_twice(&ones_input);
+    let mut ones_expected_32 = [0u8; 32];
+    ones_expected_32.copy_from_slice(&ones_expected_64[0..32]);
+    vectors.push(Poseidon2HashTestCase {
+        input_bytes: ones_input,
+        expected_hash: ones_expected_32,
+    });
+
+    // All 0xFF input
+    let ff_input = vec![0xFFu8; 96];
+    let ff_expected_64 = qp_poseidon_core::hash_squeeze_twice(&ff_input);
+    let mut ff_expected_32 = [0u8; 32];
+    ff_expected_32.copy_from_slice(&ff_expected_64[0..32]);
+    vectors.push(Poseidon2HashTestCase {
+        input_bytes: ff_input,
+        expected_hash: ff_expected_32,
+    });
+
+    // Sequential pattern input
+    let seq_input: Vec<u8> = (0u8..96).collect();
+    let seq_expected_64 = qp_poseidon_core::hash_squeeze_twice(&seq_input);
+    let mut seq_expected_32 = [0u8; 32];
+    seq_expected_32.copy_from_slice(&seq_expected_64[0..32]);
+    vectors.push(Poseidon2HashTestCase {
+        input_bytes: seq_input,
+        expected_hash: seq_expected_32,
+    });
+
+    // Random inputs (96 bytes each)
+    for _ in 0..20 {
+        let mut input = vec![0u8; 96];
+        rng.fill(&mut input[..]);
+        let expected_64 = qp_poseidon_core::hash_squeeze_twice(&input);
+        let mut expected_32 = [0u8; 32];
+        expected_32.copy_from_slice(&expected_64[0..32]);
+        vectors.push(Poseidon2HashTestCase {
+            input_bytes: input,
+            expected_hash: expected_32,
+        });
     }
 
     vectors
@@ -3657,6 +3726,184 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }
 
     let mut results = TestResults::new("s-box".to_string(), total_tests);
+    results.passed = passed_tests;
+    results.failed = failed_tests;
+    results.print_summary()
+}
+
+pub async fn test_poseidon2_hash(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_vectors = generate_poseidon2_hash_test_vectors();
+    let total_tests = test_vectors.len();
+    let mut passed_tests = 0;
+    let mut failed_tests = Vec::new();
+    let mut failure_details = Vec::new();
+
+    let shader_source = format!(
+        "
+{}
+
+@group(0) @binding(0) var<storage, read> input_data: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_hashes: array<u32>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let test_id = global_id.x;
+    let input_offset = test_id * 24u; // 24 u32s = 96 bytes per test
+
+    // Copy input data to array (exactly 96 bytes = 24 u32s)
+    var input_array: array<u32, 24>;
+    for (var i = 0u; i < 24u; i++) {{
+        input_array[i] = input_data[input_offset + i];
+    }}
+
+    // Hash the input (96 bytes -> 64 bytes)
+    let hash_result = poseidon2_hash_squeeze_twice(input_array);
+
+    // Write first 32 bytes (8 u32s) of result as the hash
+    let output_offset = test_id * 8u;
+    for (var i = 0u; i < 8u; i++) {{
+        output_hashes[output_offset + i] = hash_result[i];
+    }}
+}}
+",
+        include_str!("mining.wgsl")
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Poseidon2 Hash Test Shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Poseidon2 Hash Test Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group_layout = pipeline.get_bind_group_layout(0);
+
+    // Process tests in batches
+    const BATCH_SIZE: usize = 16;
+    for (batch_idx, chunk) in test_vectors.chunks(BATCH_SIZE).enumerate() {
+        // Prepare input data - all inputs are exactly 96 bytes
+        let mut input_data = Vec::new();
+
+        for test_case in chunk {
+            // Ensure input is exactly 96 bytes
+            assert_eq!(
+                test_case.input_bytes.len(),
+                96,
+                "All test inputs must be exactly 96 bytes"
+            );
+
+            // Convert bytes to u32s (96 bytes = 24 u32s)
+            for chunk_4 in test_case.input_bytes.chunks(4) {
+                let u32_val = u32::from_le_bytes([chunk_4[0], chunk_4[1], chunk_4[2], chunk_4[3]]);
+                input_data.push(u32_val);
+            }
+        }
+
+        let input_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Data Buffer"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: (chunk.len() * 8 * 4) as u64, // 8 u32s per hash * 4 bytes per u32
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Test Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Command Encoder"),
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(chunk.len() as u32, 1, 1);
+        }
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: output_buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer.size());
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let data = slice.get_mapped_range();
+        let results: &[u32] = bytemuck::cast_slice(&data);
+
+        // Check results for the chunk
+        for (i, test_case) in chunk.iter().enumerate() {
+            // Get GPU result (first 32 bytes = 8 u32s)
+            let gpu_hash_u32s = &results[i * 8..(i + 1) * 8];
+            let mut gpu_hash = [0u8; 32];
+            for (j, &u32_val) in gpu_hash_u32s.iter().enumerate() {
+                let bytes = u32_val.to_le_bytes();
+                gpu_hash[j * 4..(j + 1) * 4].copy_from_slice(&bytes);
+            }
+
+            if gpu_hash == test_case.expected_hash {
+                passed_tests += 1;
+            } else {
+                failed_tests.push(batch_idx * BATCH_SIZE + i + 1);
+                failure_details.push((test_case.clone(), gpu_hash));
+
+                if failure_details.len() <= 3 {
+                    println!("❌ FAILED: Poseidon2 hash test (96 bytes input)");
+                    println!(
+                        "Input bytes (first 32): {:02x?}",
+                        &test_case.input_bytes[..32]
+                    );
+                    println!("Expected hash: {:02x?}", &test_case.expected_hash[..]);
+                    println!("GPU hash:     {:02x?}", &gpu_hash[..]);
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    let mut results = TestResults::new("poseidon2 hash".to_string(), total_tests);
     results.passed = passed_tests;
     results.failed = failed_tests;
     results.print_summary()
