@@ -312,7 +312,7 @@ impl MiningState {
 fn thread_mine_range(
     thread_id: usize,
     header_hash: [u8; 32],
-    distance_threshold: U512,
+    difficulty: U512,
     start: U512,
     end: U512,
     cancel_flag: Arc<AtomicBool>,
@@ -352,10 +352,10 @@ fn thread_mine_range(
         // The qpow-math crate has been updated to use difficulty instead of target/threshold.
         // We need to convert our distance_threshold (which is a target) to difficulty.
         // difficulty = MAX / target
-        let difficulty = if distance_threshold == U512::zero() {
+        let difficulty = if difficulty == U512::zero() {
             U512::MAX
         } else {
-            U512::MAX / distance_threshold
+            U512::MAX / difficulty
         };
 
         if let Some((found_nonce_bytes, distance)) =
