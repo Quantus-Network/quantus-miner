@@ -348,8 +348,18 @@ fn thread_mine_range(
         };
 
         let start_nonce_bytes = current_nonce.to_big_endian();
+        
+        // The qpow-math crate has been updated to use difficulty instead of target/threshold.
+        // We need to convert our distance_threshold (which is a target) to difficulty.
+        // difficulty = MAX / target
+        let difficulty = if distance_threshold == U512::zero() {
+            U512::MAX
+        } else {
+            U512::MAX / distance_threshold
+        };
+
         if let Some((found_nonce_bytes, distance)) =
-            qpow_mine_range(header_hash, start_nonce_bytes, steps_u64, distance_threshold)
+            qpow_mine_range(header_hash, start_nonce_bytes, steps_u64, difficulty)
         {
             let found_nonce = U512::from_big_endian(&found_nonce_bytes);
             let scanned_in_chunk = if found_nonce >= current_nonce {
