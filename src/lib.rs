@@ -8,10 +8,54 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use warp::{Rejection, Reply};
 
 const MINE_RANGE_SIZE: u64 = 10_000u64;
+
+#[derive(Debug, Clone)]
+pub struct MinerMetrics {
+    pub hash_rate: f64,
+    pub active_jobs: usize,
+    pub total_hashes: u64,
+    pub workers: usize,
+    pub cpu_capacity: usize,
+    pub last_update: Instant,
+    pub last_total_hashes: u64,
+}
+
+impl Default for MinerMetrics {
+    fn default() -> Self {
+        Self {
+            hash_rate: 0.0,
+            active_jobs: 0,
+            total_hashes: 0,
+            workers: 0,
+            cpu_capacity: 0,
+            last_update: Instant::now(),
+            last_total_hashes: 0,
+        }
+    }
+}
+
+impl MinerMetrics {
+    pub fn format_prometheus(&self) -> String {
+        format!(
+            "# HELP miner_hash_rate Current hash rate in hashes per second\n\
+             # TYPE miner_hash_rate gauge\n\
+             miner_hash_rate {:.2}\n\
+             miner_active_jobs {}\n\
+             miner_hashes_total {}\n\
+             miner_workers {}\n\
+             miner_effective_cpus {}\n",
+            self.hash_rate,
+            self.active_jobs,
+            self.total_hashes,
+            self.workers,
+            self.cpu_capacity
+        )
+    }
+}
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct QPoWSeal {
@@ -37,6 +81,7 @@ pub struct MiningJobResult {
 pub struct MiningState {
     pub jobs: Arc<Mutex<HashMap<String, MiningJob>>>,
     pub num_cores: usize,
+    pub metrics: Arc<RwLock<MinerMetrics>>,
 }
 
 #[derive(Debug)]
@@ -152,14 +197,17 @@ impl MiningJob {
         }
     }
 
-    pub fn update_from_results(&mut self) -> bool {
+    pub fn update_from_results(&mut self) -> (bool, u64) {
         let receiver = match &self.result_receiver {
             Some(r) => r,
-            None => return false,
+            None => return (false, 0),
         };
+
+        let mut new_hashes = 0u64;
 
         while let Ok(thread_result) = receiver.try_recv() {
             self.total_hash_count += thread_result.hash_count;
+            new_hashes += thread_result.hash_count;
 
             if thread_result.completed {
                 self.completed_threads += 1;
@@ -194,7 +242,7 @@ impl MiningJob {
             }
         }
 
-        self.status != JobStatus::Running
+        (self.status != JobStatus::Running, new_hashes)
     }
 }
 
@@ -232,6 +280,7 @@ impl MiningState {
         MiningState {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             num_cores: cores.max(1),
+            metrics: Arc::new(RwLock::new(MinerMetrics::default())),
         }
     }
 
@@ -276,21 +325,45 @@ impl MiningState {
 
     pub async fn start_mining_loop(&self) {
         let jobs = self.jobs.clone();
+        let metrics = self.metrics.clone();
+        let num_cores = self.num_cores;
+        
         log::debug!(target: "miner", "Starting mining loop...");
 
         tokio::spawn(async move {
             loop {
                 let mut jobs_guard = jobs.lock().await;
+                let mut total_new_hashes_this_tick = 0u64;
+                let mut active_jobs_count = 0;
+                let mut current_workers = 0;
 
                 jobs_guard.retain(|job_id, job| {
-                    if job.status == JobStatus::Running && job.update_from_results() {
-                        log::debug!(target: "miner",
-                            "Job {} finished with status {:?}, hashes: {}, time: {:?}",
-                            job_id,
-                            job.status,
-                            job.total_hash_count,
-                            job.start_time.elapsed()
-                        );
+                    let is_running = job.status == JobStatus::Running;
+                    
+                    if is_running {
+                        let (finished, new_hashes) = job.update_from_results();
+                        total_new_hashes_this_tick += new_hashes;
+                        
+                        // If still running after update (or just finished), count stats
+                        // Actually if it just finished, we still count the hashes, but maybe not active job for next tick?
+                        // The retain logic keeps it if running OR finished recently.
+                        
+                        if job.status == JobStatus::Running {
+                            active_jobs_count += 1;
+                            current_workers += job.thread_handles.len();
+                        }
+
+                        if finished {
+                            log::debug!(target: "miner",
+                                "Job {} finished with status {:?}, hashes: {}, time: {:?}",
+                                job_id,
+                                job.status,
+                                job.total_hash_count,
+                                job.start_time.elapsed()
+                            );
+                        }
+                    } else {
+                        // For jobs that are already finished but retained, we don't count them as active
                     }
 
                     // Retain jobs that are running or recently finished (e.g., within 5 minutes)
@@ -303,6 +376,43 @@ impl MiningState {
                 });
 
                 drop(jobs_guard);
+
+                // Update metrics
+                {
+                    let mut metrics_guard = metrics.write().await;
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(metrics_guard.last_update).as_secs_f64();
+
+                    metrics_guard.total_hashes += total_new_hashes_this_tick;
+                    metrics_guard.active_jobs = active_jobs_count;
+                    metrics_guard.workers = current_workers;
+                    metrics_guard.cpu_capacity = num_cores;
+
+                    // Calculate rolling average hashrate
+                    // We use a simple exponential moving average or just windowed average
+                    // given we sleep for 100ms, elapsed is ~0.1s.
+                    // But jitter exists.
+                    
+                    if elapsed > 0.0 {
+                         let instant_rate = total_new_hashes_this_tick as f64 / elapsed;
+                         // Smooth it out a bit: 
+                         // new_rate = old_rate * 0.9 + instant_rate * 0.1
+                         // This gives a smoothing over ~1 second (10 ticks)
+                         if metrics_guard.hash_rate == 0.0 {
+                             metrics_guard.hash_rate = instant_rate;
+                         } else {
+                             metrics_guard.hash_rate = metrics_guard.hash_rate * 0.9 + instant_rate * 0.1;
+                         }
+                         
+                         // If no active jobs and rate is small, clamp to 0
+                         if active_jobs_count == 0 && metrics_guard.hash_rate < 1.0 {
+                             metrics_guard.hash_rate = 0.0;
+                         }
+                    }
+                    
+                    metrics_guard.last_update = now;
+                }
+                
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });

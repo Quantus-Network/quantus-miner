@@ -13,6 +13,10 @@ struct Args {
     #[arg(short, long, env = "MINER_PORT", default_value_t = 9833)]
     port: u16,
 
+    /// Port number to listen on for Prometheus metrics
+    #[arg(long, env = "METRICS_PORT", default_value_t = 9900)]
+    metrics_port: u16,
+
     /// Number of CPU cores to use for mining
     #[arg(long, env = "MINER_CORES")]
     num_cores: Option<usize>,
@@ -44,6 +48,34 @@ async fn main() {
 
     // --- Start the mining loop ---
     state.start_mining_loop().await;
+
+    // --- Start Metrics Server ---
+    let metrics_state = state.clone();
+    let metrics_port = args.metrics_port;
+    tokio::spawn(async move {
+        log::info!("Starting metrics server on port {}", metrics_port);
+        let metrics_route = warp::get()
+            .and(warp::path("metrics"))
+            .and(warp::any().map(move || metrics_state.clone()))
+            .map(|state: MiningState| {
+                // We need to read from async lock
+                // But map is sync. 
+                // Use and_then for async handler
+                state
+            })
+            .and_then(|state: MiningState| async move {
+                let metrics = state.metrics.read().await;
+                Ok::<_, std::convert::Infallible>(warp::reply::with_header(
+                    metrics.format_prometheus(),
+                    "Content-Type",
+                    "text/plain; version=0.0.4; charset=utf-8",
+                ))
+            });
+
+        warp::serve(metrics_route)
+            .run(([0, 0, 0, 0], metrics_port))
+            .await;
+    });
 
     // --- Set up Warp filters ---
     let state_clone = state.clone(); // Clone state for the filter closure
