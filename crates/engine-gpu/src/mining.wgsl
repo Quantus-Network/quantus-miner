@@ -819,6 +819,9 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     // This simulates CPU's finalize_twice adding ONE to buffer position 0
     state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker (should be 1)
 
+    // Add sponge padding marker (ONE) to the next position
+    state[1] = gf_add(state[1], gf_one());
+
     // Final permutation (CPU calls permute after completing the block)
     poseidon2_permute(&state);
 
