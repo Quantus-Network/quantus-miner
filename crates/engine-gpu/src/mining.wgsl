@@ -190,7 +190,7 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 );
 
 // Storage buffers
-@group(0) @binding(0) var<storage, read_write> results: array<u32>;
+@group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
@@ -879,4 +879,65 @@ fn is_below_target(hash: array<u32, 16>, difficulty_tgt: array<u32, 16>) -> bool
     return false; // Equal, not below
 }
 
-// No main function - individual tests will create their own entry points
+// Main mining kernel
+@compute @workgroup_size(256)
+fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // If solution already found, exit early
+    if (atomicLoad(&results[0]) != 0u) {
+        return;
+    }
+
+    let index = global_id.x;
+
+    // Compute current nonce = start_nonce + index
+    var current_nonce: array<u32, 16>;
+    var carry: u32 = 0u;
+
+    // First limb addition with index
+    let val0 = start_nonce[0];
+    let sum0 = val0 + index;
+    current_nonce[0] = sum0;
+    carry = select(0u, 1u, sum0 < val0);
+
+    // Subsequent limbs with carry propagation
+    for (var i = 1u; i < 16u; i++) {
+        let val = start_nonce[i];
+        let sum = val + carry;
+        current_nonce[i] = sum;
+        carry = select(0u, 1u, sum < val);
+    }
+
+    // Construct input (96 bytes = 24 u32s)
+    // Header (32 bytes = 8 u32s) followed by Nonce (64 bytes = 16 u32s)
+    var input: array<u32, 24>;
+    for (var i = 0u; i < 8u; i++) {
+        input[i] = header[i];
+    }
+    // Nonce needs to be Big Endian in the byte stream for hashing.
+    // current_nonce is Little Endian words.
+    for (var i = 0u; i < 16u; i++) {
+        let val = current_nonce[15u - i];
+        // Reverse bytes
+        let rev = ((val & 0xFFu) << 24u) |
+                  ((val & 0xFF00u) << 8u) |
+                  ((val & 0xFF0000u) >> 8u) |
+                  ((val & 0xFF000000u) >> 24u);
+        input[8u + i] = rev;
+    }
+
+    // Hash
+    let hash = double_hash(input);
+
+    // Check target
+    if (is_below_target(hash, difficulty_target)) {
+        // Try to claim the solution
+        if (atomicExchange(&results[0], 1u) == 0u) {
+            // We won! Write nonce and hash
+            // results layout: [0]=found, [1..16]=nonce, [17..32]=hash
+            for (var i = 0u; i < 16u; i++) {
+                atomicStore(&results[1u + i], current_nonce[i]);
+                atomicStore(&results[17u + i], hash[i]);
+            }
+        }
+    }
+}

@@ -45,8 +45,7 @@ pub enum EngineSelection {
     CpuBaseline,
     CpuFast,
     CpuChainManipulator,
-    GpuCuda,
-    GpuOpenCl,
+    Gpu,
 }
 
 impl Default for ServiceConfig {
@@ -71,8 +70,7 @@ impl fmt::Display for ServiceConfig {
             EngineSelection::CpuBaseline => "cpu-baseline",
             EngineSelection::CpuFast => "cpu-fast",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
-            EngineSelection::GpuCuda => "gpu-cuda",
-            EngineSelection::GpuOpenCl => "gpu-opencl",
+            EngineSelection::Gpu => "gpu",
         };
         write!(
             f,
@@ -1194,31 +1192,18 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             }
             Arc::new(eng)
         }
-        EngineSelection::GpuCuda => {
-            #[cfg(feature = "cuda")]
+        EngineSelection::Gpu => {
+            #[cfg(feature = "gpu")]
             {
-                let eng = engine_gpu_cuda::CudaEngine::new();
-                if !eng.cuda_available() {
-                    log::error!("Requested engine gpu-cuda but CUDA driver/device is not available or initialization failed. Build has 'cuda' feature but runtime support is missing.");
-                    return Err(anyhow::anyhow!(
-                        "engine 'gpu-cuda' unavailable at runtime (CUDA init failed)"
-                    ));
-                }
-                Arc::new(eng)
+                Arc::new(engine_gpu::GpuEngine::new())
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(feature = "gpu"))]
             {
-                log::error!("Requested engine gpu-cuda, but this binary was built without the 'cuda' feature. Rebuild miner-service with --features cuda.");
+                log::error!("Requested engine gpu, but this binary was built without the 'gpu' feature. Rebuild miner-service with --features gpu.");
                 return Err(anyhow::anyhow!(
-                    "engine 'gpu-cuda' not built (missing 'cuda' feature)"
+                    "engine 'gpu' not built (missing 'gpu' feature)"
                 ));
             }
-        }
-        EngineSelection::GpuOpenCl => {
-            log::error!("Requested engine gpu-opencl is not implemented yet. Use a CPU engine (cpu-fast or cpu-baseline) for now.");
-            return Err(anyhow::anyhow!(
-                "engine 'gpu-opencl' is not implemented yet"
-            ));
         }
     };
     log::info!("Using engine: {}", engine.name());

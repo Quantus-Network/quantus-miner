@@ -18,6 +18,8 @@ baseline = []
 simd-poseidon2 = []
 
 [dependencies]
+engine-cpu = { path = "../engine-cpu" }
+pow-core = { path = "../pow-core" }
 primitive-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
