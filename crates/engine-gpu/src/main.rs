@@ -6,6 +6,7 @@ use qp_plonky2_field::types::{Field, PrimeField64};
 use wgpu::{self, util::DeviceExt};
 
 mod tests;
+mod end_to_end_tests;
 
 fn u8_array_to_u32_array(bytes: &[u8; 96]) -> [u32; 24] {
     let mut result = [0u32; 24];
@@ -119,6 +120,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Err(e) = tests::test_double_hash(&device, &queue).await {
         eprintln!("❌ Double hash tests failed: {}", e);
+    }
+
+    if let Err(e) = end_to_end_tests::test_end_to_end_mining(&device, &queue).await {
+        eprintln!("❌ End-to-end mining test failed: {}", e);
+    }
+
+    println!("\nAll tests completed!");
+    if let Err(e) = end_to_end_tests::test_end_to_end_mining(&device, &queue).await {
+        eprintln!("❌ End-to-end mining test failed: {}", e);
     }
 
     println!("\nAll tests completed!");

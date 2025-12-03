@@ -973,18 +973,29 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         input[8u + i] = rev;
     }
 
-    // Hash
-    let hash = double_hash(input);
+    // Hash (Big Endian)
+    let hash_be = double_hash(input);
+
+    // Convert to Little Endian for difficulty check and storage
+    var hash_le: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        let val = hash_be[15u - i];
+        // Reverse bytes in u32
+        hash_le[i] = ((val & 0xFFu) << 24u) |
+                     ((val & 0xFF00u) << 8u) |
+                     ((val & 0xFF0000u) >> 8u) |
+                     ((val & 0xFF000000u) >> 24u);
+    }
 
     // Check target
-    if (is_below_target(hash, difficulty_target)) {
+    if (is_below_target(hash_le, difficulty_target)) {
         // Try to claim the solution
         if (atomicExchange(&results[0], 1u) == 0u) {
             // We won! Write nonce and hash
             // results layout: [0]=found, [1..16]=nonce, [17..32]=hash
             for (var i = 0u; i < 16u; i++) {
                 atomicStore(&results[1u + i], current_nonce[i]);
-                atomicStore(&results[17u + i], hash[i]);
+                atomicStore(&results[17u + i], hash_le[i]);
             }
         }
     }
