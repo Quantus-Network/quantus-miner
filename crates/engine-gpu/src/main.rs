@@ -112,9 +112,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = tests::test_field_elements_to_bytes(&device, &queue).await {
         eprintln!("❌ Field elements to bytes tests failed: {}", e);
     }
-    
+
     if let Err(e) = tests::test_poseidon2_squeeze_twice(&device, &queue).await {
         eprintln!("❌ Poseidon2 squeeze-twice tests failed: {}", e);
+    }
+
+    if let Err(e) = tests::test_double_hash(&device, &queue).await {
+        eprintln!("❌ Double hash tests failed: {}", e);
     }
 
     println!("\nAll tests completed!");
