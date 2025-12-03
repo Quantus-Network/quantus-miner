@@ -21,6 +21,7 @@ impl GpuEngine {
     }
 
     async fn init() -> Result<Self, Box<dyn std::error::Error>> {
+        log::info!(target: "gpu_engine", "Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
@@ -33,6 +34,8 @@ impl GpuEngine {
             })
             .await
             .map_err(|e| format!("No suitable GPU adapter found: {:?}", e))?;
+
+        log::info!(target: "gpu_engine", "Selected adapter: {:?}", adapter.get_info());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -60,6 +63,7 @@ impl GpuEngine {
         });
 
         let bind_group_layout = pipeline.get_bind_group_layout(0);
+        log::info!(target: "gpu_engine", "GPU engine initialized successfully");
 
         Ok(Self {
             device,
@@ -207,9 +211,11 @@ impl GpuEngine {
                     let bytes = result_u32s[17 + i].to_le_bytes();
                     hash_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
                 }
+                // GPU returns hash in Little Endian u32 array (normalized in shader)
                 let hash = U512::from_little_endian(&hash_bytes);
 
                 let work = nonce.to_big_endian();
+                log::info!(target: "gpu_engine", "Solution found on GPU! Nonce: {}, Hash: {:x}", nonce, hash);
 
                 return Some(Candidate { nonce, work, hash });
             }
