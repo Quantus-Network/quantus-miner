@@ -16,7 +16,7 @@ fn main() {
     // 1. Setup Context
     // Use a fixed header and easy difficulty (1) so any nonce is valid
     let header = [1u8; 32];
-    let difficulty = U512::from(1u64);
+    let difficulty = U512::from(100u64);
     let cpu_engine = BaselineCpuEngine::new();
     let ctx = cpu_engine.prepare_context(header, difficulty);
 
@@ -52,8 +52,8 @@ fn main() {
 
     // Search a small range around the valid nonce
     let gpu_range = Range {
-        start: valid_nonce,
-        end: valid_nonce + U512::from(10u64), // Search 10 nonces starting from the valid one
+        start: U512::from(0u64),
+        end: U512::from(100u64), // Search 100 nonces starting from the valid one
     };
 
     log::info!(
