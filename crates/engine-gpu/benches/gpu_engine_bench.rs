@@ -3,6 +3,8 @@ use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
+use engine_gpu::GpuEngine;
+use engine_cpu::{MinerEngine, Range};
 
 fn bench_gpu_engine(c: &mut Criterion) {
     // Create the engine
@@ -11,14 +13,14 @@ fn bench_gpu_engine(c: &mut Criterion) {
 
     let large_range = Range {
         start: U512::from(0u64),
-        end: U512::from(1000u64), // 1000 nonces
+        end: U512::from(100_000u64), // 100,000 nonces
     };
 
     c.bench_function("gpu_fast_large_range", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut header);
-            let difficulty = U512::from(10000000u64);
+            let difficulty = U512::from(1000000u64);
             let ctx = JobContext::new(header, difficulty);
 
             let result = engine.search_range(
@@ -39,7 +41,7 @@ fn bench_hash_from_nonce(c: &mut Criterion) {
     let ctx = JobContext::new(header, difficulty);
 
     // Create some test nonce values
-    let test_nonce_values: Vec<U512> = (0..100).map(|i| U512::from(1000u64 + i)).collect();
+    let test_nonce_values: Vec<U512> = (0..100000).map(|i| U512::from(1000u64 + i)).collect();
 
     c.bench_function("hash_from_nonce_single", |b| {
         let mut i = 0;
