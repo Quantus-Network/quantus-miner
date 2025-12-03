@@ -33,25 +33,25 @@ fn bench_gpu_engine(c: &mut Criterion) {
     });
 }
 
-fn bench_hash_from_nonce(c: &mut Criterion) {
-    // Create a test job context
-    let mut header = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut header);
-    let difficulty = U512::from(1000u64);
-    let ctx = JobContext::new(header, difficulty);
+// fn bench_hash_from_nonce(c: &mut Criterion) {
+//     // Create a test job context
+//     let mut header = [0u8; 32];
+//     rand::thread_rng().fill_bytes(&mut header);
+//     let difficulty = U512::from(1000u64);
+//     let ctx = JobContext::new(header, difficulty);
 
-    // Create some test nonce values
-    let test_nonce_values: Vec<U512> = (0..100000).map(|i| U512::from(1000u64 + i)).collect();
+//     // Create some test nonce values
+//     let test_nonce_values: Vec<U512> = (0..100000).map(|i| U512::from(1000u64 + i)).collect();
 
-    c.bench_function("hash_from_nonce_single", |b| {
-        let mut i = 0;
-        b.iter(|| {
-            let nonce = test_nonce_values[i % test_nonce_values.len()];
-            i += 1;
-            let hash = hash_from_nonce(black_box(&ctx), black_box(nonce));
-            black_box(hash)
-        })
-    });
-}
-criterion_group!(benches, bench_gpu_engine, bench_hash_from_nonce);
+//     c.bench_function("hash_from_nonce_single", |b| {
+//         let mut i = 0;
+//         b.iter(|| {
+//             let nonce = test_nonce_values[i % test_nonce_values.len()];
+//             i += 1;
+//             let hash = hash_from_nonce(black_box(&ctx), black_box(nonce));
+//             black_box(hash)
+//         })
+//     });
+// }
+criterion_group!(benches, bench_gpu_engine);
 criterion_main!(benches);

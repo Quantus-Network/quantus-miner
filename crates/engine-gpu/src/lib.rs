@@ -7,17 +7,17 @@ use pow_core::JobContext;
 use primitive_types::U512;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// Represents a single GPU device context.
 struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
     // Reusable buffers
     header_buffer: wgpu::Buffer,
     target_buffer: wgpu::Buffer,
+    start_nonce_buffer: wgpu::Buffer,
     results_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
 }
@@ -100,6 +100,14 @@ impl GpuEngine {
                 mapped_at_creation: false,
             });
 
+            // Start Nonce: 16 u32s
+            let start_nonce_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Start Nonce Buffer"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
             // Results: [flag (1), nonce (16), hash (16)] = 33 u32s
             let results_size = (1 + 16 + 16) * 4;
             let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -118,15 +126,39 @@ impl GpuEngine {
                 mapped_at_creation: false,
             });
 
-            log::debug!(target: "gpu_engine", "Buffers initialized for adapter {}", i);
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Mining Bind Group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: results_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: header_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: start_nonce_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: target_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            log::debug!(target: "gpu_engine", "Buffers and bind group initialized for adapter {}", i);
 
             contexts.push(Arc::new(GpuContext {
                 device,
                 queue,
                 pipeline,
-                bind_group_layout,
+                bind_group,
                 header_buffer,
                 target_buffer,
+                start_nonce_buffer,
                 results_buffer,
                 staging_buffer,
             }));
@@ -137,73 +169,24 @@ impl GpuEngine {
         Ok(Self { contexts })
     }
 
-    fn run_batch(
-        ctx: &GpuContext,
-        job_ctx: &JobContext,
-        start_nonce: U512,
-        batch_size: u32,
-    ) -> Option<Candidate> {
-        // Update Header Buffer
-        let mut header_u32s = [0u32; 8];
-        for i in 0..8 {
-            let chunk = &job_ctx.header[i * 4..(i + 1) * 4];
-            header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        ctx.queue
-            .write_buffer(&ctx.header_buffer, 0, bytemuck::cast_slice(&header_u32s));
-
-        // Update Target Buffer
-        let target_bytes = job_ctx.target.to_little_endian();
-        let mut target_u32s = [0u32; 16];
-        for i in 0..16 {
-            let chunk = &target_bytes[i * 4..(i + 1) * 4];
-            target_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        ctx.queue
-            .write_buffer(&ctx.target_buffer, 0, bytemuck::cast_slice(&target_u32s));
-
-        // Create Start Nonce Buffer (per batch)
+    fn run_batch(ctx: &GpuContext, start_nonce: U512, batch_size: u32) -> Option<Candidate> {
+        // Update Start Nonce Buffer
         let start_nonce_bytes = start_nonce.to_little_endian();
         let mut start_nonce_u32s = [0u32; 16];
         for i in 0..16 {
             let chunk = &start_nonce_bytes[i * 4..(i + 1) * 4];
             start_nonce_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
-        let start_nonce_buffer = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Start Nonce Buffer"),
-                contents: bytemuck::cast_slice(&start_nonce_u32s),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        ctx.queue.write_buffer(
+            &ctx.start_nonce_buffer,
+            0,
+            bytemuck::cast_slice(&start_nonce_u32s),
+        );
 
         // Reset Results Buffer
         let results_size = (1 + 16 + 16) * 4;
         let zeros = vec![0u8; results_size as usize];
         ctx.queue.write_buffer(&ctx.results_buffer, 0, &zeros);
-
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Mining Bind Group"),
-            layout: &ctx.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ctx.results_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: ctx.header_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: start_nonce_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: ctx.target_buffer.as_entire_binding(),
-                },
-            ],
-        });
 
         let mut encoder = ctx
             .device
@@ -217,7 +200,7 @@ impl GpuEngine {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&ctx.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_bind_group(0, &ctx.bind_group, &[]);
             let workgroups = (batch_size + 255) / 256;
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
@@ -313,8 +296,35 @@ impl MinerEngine for GpuEngine {
 
                 s.spawn(move || {
                     log::debug!(target: "gpu_engine", "GPU {} started. Range: {} - {}", i, start, end);
+
+                    // Update Header Buffer
+                    let mut header_u32s = [0u32; 8];
+                    for i in 0..8 {
+                        let chunk = &ctx.header[i * 4..(i + 1) * 4];
+                        header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    }
+                    gpu_ctx.queue.write_buffer(
+                        &gpu_ctx.header_buffer,
+                        0,
+                        bytemuck::cast_slice(&header_u32s),
+                    );
+
+                    // Update Target Buffer
+                    let target_bytes = ctx.target.to_little_endian();
+                    let mut target_u32s = [0u32; 16];
+                    for i in 0..16 {
+                        let chunk = &target_bytes[i * 4..(i + 1) * 4];
+                        target_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    }
+                    gpu_ctx.queue.write_buffer(
+                        &gpu_ctx.target_buffer,
+                        0,
+                        bytemuck::cast_slice(&target_u32s),
+                    );
+
                     let mut current_start = start;
-                    let batch_size = 65536 * 4; // Larger batch size for efficiency
+                    // Increased batch size to reduce overhead
+                    let batch_size = 65536 * 64; // ~4M hashes per batch
 
                     while current_start <= end {
                         if cancel.load(Ordering::Relaxed) {
@@ -333,7 +343,7 @@ impl MinerEngine for GpuEngine {
                         };
 
                         if let Some(candidate) =
-                            Self::run_batch(gpu_ctx, ctx, current_start, current_batch_size)
+                            Self::run_batch(gpu_ctx, current_start, current_batch_size)
                         {
                             let mut lock = found_candidate.lock().unwrap();
                             if lock.is_none() {
