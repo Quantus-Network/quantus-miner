@@ -30,6 +30,9 @@ crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+reqwest = { version = "0.11", features = ["json"] }
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["quic", "dangerous_configuration"] }
 
 # Protocol types from the node repo (keep API compatibility)
 quantus-miner-api = { workspace = true }

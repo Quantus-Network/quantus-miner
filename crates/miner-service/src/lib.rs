@@ -1160,6 +1160,18 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     if workers > effective_cpus {
         workers = effective_cpus.max(1);
     }
+    
+    // Force workers=1 for GPU engine to prevent concurrent buffer mapping panics
+    if matches!(config.engine, EngineSelection::Gpu) {
+        if workers > 1 {
+            log::info!(
+                "GPU engine selected. Forcing workers to 1 (was {}) to avoid buffer contention.",
+                workers
+            );
+            workers = 1;
+        }
+    }
+
 
     log::info!(
         "Using {workers} worker thread(s) for mining (effective logical CPUs available: {effective_cpus})"
