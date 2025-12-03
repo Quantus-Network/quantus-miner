@@ -41,6 +41,7 @@ rand_chacha = "0.3"  # For deterministic random test generation
 hex = { workspace = true }
 criterion = "0.5"
 rand = { workspace = true, features = ["std", "std_rng"] }
+env_logger.workspace = true
 
 [[bench]]
 name = "gpu_engine_bench"

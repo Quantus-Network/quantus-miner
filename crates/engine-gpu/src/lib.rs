@@ -153,7 +153,7 @@ impl GpuEngine {
             .write_buffer(&ctx.header_buffer, 0, bytemuck::cast_slice(&header_u32s));
 
         // Update Target Buffer
-        let target_bytes = job_ctx.difficulty.to_little_endian();
+        let target_bytes = job_ctx.target.to_little_endian();
         let mut target_u32s = [0u32; 16];
         for i in 0..16 {
             let chunk = &target_bytes[i * 4..(i + 1) * 4];

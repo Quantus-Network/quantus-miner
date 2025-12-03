@@ -577,6 +577,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "engine-cpu",
+ "env_logger",
  "futures",
  "hex",
  "log",
