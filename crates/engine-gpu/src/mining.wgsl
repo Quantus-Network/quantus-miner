@@ -851,19 +851,67 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     return result;
 }
 
+// Poseidon2 hash function for 64-byte input (used in double hash)
+fn poseidon2_hash_squeeze_twice_64(input: array<u32, 16>) -> array<u32, 16> {
+    var state: array<GoldilocksField, 12>;
+
+    // Initialize state to zero
+    for (var i = 0u; i < 12u; i++) {
+        state[i] = gf_zero();
+    }
+
+    // Convert input to field elements
+    // 64 bytes = 16 u32s = 16 felts
+    // Padding adds 1 byte + 3 zeros = 4 bytes = 1 felt (value 1)
+    // Total 17 felts
+
+    // Process first 16 elements (4 complete chunks of 4)
+    for (var chunk = 0u; chunk < 4u; chunk++) {
+        // Absorb 4 elements for this chunk
+        for (var i = 0u; i < 4u; i++) {
+            let felt_idx = chunk * 4u + i;
+            state[i] = gf_add(state[i], gf_from_u32(input[felt_idx]));
+        }
+        // Permute after each complete chunk
+        poseidon2_permute(&state);
+    }
+
+    // Handle the last felt (padding marker = 1) and sponge padding
+    // The last felt is 1 (from bytes 1, 0, 0, 0)
+    state[0] = gf_add(state[0], gf_one());
+
+    // Add sponge padding marker (ONE) to the next position
+    state[1] = gf_add(state[1], gf_one());
+
+    // Final permutation
+    poseidon2_permute(&state);
+
+    // First squeeze
+    let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
+        state[0], state[1], state[2], state[3]
+    ));
+
+    // Second squeeze
+    poseidon2_permute(&state);
+
+    let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
+        state[0], state[1], state[2], state[3]
+    ));
+
+    // Combine both squeezes into 64-byte output
+    var result: array<u32, 16>;
+    for (var i = 0u; i < 8u; i++) {
+        result[i] = first_output[i];
+        result[i + 8u] = second_output[i];
+    }
+
+    return result;
+}
+
 // Double Poseidon2 hash (like Bitcoin's double SHA256)
 fn double_hash(input: array<u32, 24>) -> array<u32, 16> {
     let first_hash = poseidon2_hash_squeeze_twice(input);
-    // Convert back to input format for second hash
-    var second_input: array<u32, 24>;
-    for (var i = 0u; i < 16u; i++) {
-        second_input[i] = first_hash[i];
-    }
-    // Pad remaining with zeros
-    for (var i = 16u; i < 24u; i++) {
-        second_input[i] = 0u;
-    }
-    return poseidon2_hash_squeeze_twice(second_input);
+    return poseidon2_hash_squeeze_twice_64(first_hash);
 }
 
 // Check if hash < target (U512 comparison)
