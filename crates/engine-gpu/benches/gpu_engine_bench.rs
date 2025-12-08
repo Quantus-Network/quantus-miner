@@ -1,10 +1,10 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use engine_cpu::{MinerEngine, Range};
+use engine_gpu::GpuEngine;
 use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
-use engine_gpu::GpuEngine;
-use engine_cpu::{MinerEngine, Range};
 
 fn bench_gpu_engine(c: &mut Criterion) {
     // Create the engine
@@ -20,7 +20,7 @@ fn bench_gpu_engine(c: &mut Criterion) {
         b.iter(|| {
             let mut header = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut header);
-            let difficulty = U512::from(1000000u64);
+            let difficulty = U512::from(10_000_000u64);
             let ctx = JobContext::new(header, difficulty);
 
             let result = engine.search_range(
@@ -33,25 +33,25 @@ fn bench_gpu_engine(c: &mut Criterion) {
     });
 }
 
-// fn bench_hash_from_nonce(c: &mut Criterion) {
-//     // Create a test job context
-//     let mut header = [0u8; 32];
-//     rand::thread_rng().fill_bytes(&mut header);
-//     let difficulty = U512::from(1000u64);
-//     let ctx = JobContext::new(header, difficulty);
+fn bench_hash_from_nonce(c: &mut Criterion) {
+    // Create a test job context
+    let mut header = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut header);
+    let difficulty = U512::from(1000u64);
+    let ctx = JobContext::new(header, difficulty);
 
-//     // Create some test nonce values
-//     let test_nonce_values: Vec<U512> = (0..100000).map(|i| U512::from(1000u64 + i)).collect();
+    // Create some test nonce values
+    let test_nonce_values: Vec<U512> = (0..100).map(|i| U512::from(1000u64 + i)).collect();
 
-//     c.bench_function("hash_from_nonce_single", |b| {
-//         let mut i = 0;
-//         b.iter(|| {
-//             let nonce = test_nonce_values[i % test_nonce_values.len()];
-//             i += 1;
-//             let hash = hash_from_nonce(black_box(&ctx), black_box(nonce));
-//             black_box(hash)
-//         })
-//     });
-// }
-criterion_group!(benches, bench_gpu_engine);
+    c.bench_function("hash_from_nonce_single", |b| {
+        let mut i = 0;
+        b.iter(|| {
+            let nonce = test_nonce_values[i % test_nonce_values.len()];
+            i += 1;
+            let hash = hash_from_nonce(black_box(&ctx), black_box(nonce));
+            black_box(hash)
+        })
+    });
+}
+criterion_group!(benches, bench_gpu_engine, bench_hash_from_nonce);
 criterion_main!(benches);

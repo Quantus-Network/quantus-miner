@@ -19,7 +19,7 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
         b.iter(|| {
             let mut header = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut header);
-            let difficulty = U512::from(1000000u64);
+            let difficulty = U512::from(10_000_000u64);
             let ctx = JobContext::new(header, difficulty);
 
             let result = engine.search_range(

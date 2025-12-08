@@ -4,7 +4,6 @@ use qp_plonky2_field::types::{Field, Field64, PrimeField64};
 
 use qp_poseidon_core::serialization::{p2_backend::GF as P2Goldilocks, GoldiCompat};
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use wgpu::util::DeviceExt;
 
 // A simple struct to hold a test case for gf_mul
