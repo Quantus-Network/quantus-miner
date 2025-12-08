@@ -32,7 +32,7 @@ impl GpuEngine {
     }
 
     async fn init() -> Result<Self, Box<dyn std::error::Error>> {
-        log::info!(target: "gpu_engine", "Initializing WGPU...");
+        log::info!("Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
@@ -44,15 +44,22 @@ impl GpuEngine {
         let adapters: Vec<_> = adapters.into_iter().collect();
 
         if adapters.is_empty() {
-            log::error!(target: "gpu_engine", "No suitable GPU adapters found.");
+            log::error!("No suitable GPU adapters found.");
             return Err("No suitable GPU adapters found".into());
         }
 
         let mut contexts = Vec::new();
+        let mut adapter_infos = Vec::new();
         for (i, adapter) in adapters.into_iter().enumerate() {
             let info = adapter.get_info();
-            log::info!(target: "gpu_engine", "Initializing adapter {}: {} (Backend: {:?})", i, info.name, info.backend);
+            log::info!(
+                "Initializing GPU adapter {}: {} (Backend: {:?})",
+                i,
+                info.name,
+                info.backend
+            );
             log::debug!(target: "gpu_engine", "Adapter {} info: {:?}", i, info);
+            adapter_infos.push(info.clone());
 
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
@@ -164,7 +171,43 @@ impl GpuEngine {
             }));
         }
 
-        log::info!(target: "gpu_engine", "GPU engine initialized with {} devices", contexts.len());
+        log::info!("GPU engine initialized with {} devices", contexts.len());
+
+        // Set engine backend info for metrics
+        #[cfg(feature = "metrics")]
+        {
+            metrics::set_gpu_device_count(contexts.len() as i64);
+
+            for (i, adapter_info) in adapter_infos.iter().enumerate() {
+                let device_id = format!("gpu-{}", i);
+                let backend_str = format!("{:?}", adapter_info.backend);
+                let vendor_str = format!("{}", adapter_info.vendor);
+                let device_type_str = format!("{:?}", adapter_info.device_type);
+                let clean_name = adapter_info.name.replace(" ", "_").replace(",", "");
+
+                // Set general engine backend info
+                metrics::set_engine_backend(&device_id, &backend_str);
+
+                // Set detailed GPU device info
+                metrics::set_gpu_device_info(
+                    &device_id,
+                    &clean_name,
+                    &backend_str,
+                    &vendor_str,
+                    &device_type_str,
+                );
+
+                // Log GPU device info for monitoring
+                log::info!(
+                    "📊 GPU Device {}: {} | Backend: {:?} | Vendor: {} | Device Type: {:?}",
+                    i,
+                    adapter_info.name,
+                    adapter_info.backend,
+                    adapter_info.vendor,
+                    adapter_info.device_type
+                );
+            }
+        }
 
         Ok(Self { contexts })
     }
@@ -240,7 +283,7 @@ impl GpuEngine {
                 let hash = U512::from_little_endian(&hash_bytes);
 
                 let work = nonce.to_big_endian();
-                log::info!(target: "gpu_engine", "Solution found on GPU! Nonce: {}, Hash: {:x}", nonce, hash);
+                log::info!("GPU solution found! Nonce: {}, Hash: {:x}", nonce, hash);
 
                 drop(data);
                 ctx.staging_buffer.unmap();
@@ -249,7 +292,7 @@ impl GpuEngine {
             drop(data);
             ctx.staging_buffer.unmap();
         } else {
-            log::error!(target: "gpu_engine", "Failed to map staging buffer");
+            log::error!("GPU failed to map staging buffer");
         }
 
         None
@@ -268,10 +311,15 @@ impl MinerEngine for GpuEngine {
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
         // Simple multi-gpu strategy: split range among available GPUs
         let num_gpus = self.contexts.len();
-        log::info!(target: "gpu_engine", "Starting search on {} GPUs. Range: {} - {}", num_gpus, range.start, range.end);
+        log::info!(
+            "Starting GPU search on {} devices. Range: {} - {}",
+            num_gpus,
+            range.start,
+            range.end
+        );
 
         if num_gpus == 0 {
-            log::warn!(target: "gpu_engine", "No GPUs available for search.");
+            log::warn!("No GPUs available for search.");
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
@@ -326,6 +374,14 @@ impl MinerEngine for GpuEngine {
                     // Increased batch size to reduce overhead
                     let batch_size = 65536 * 64; // ~4M hashes per batch
 
+                    #[cfg(feature = "metrics")]
+                    {
+                        let device_id = format!("gpu-{}", i);
+                        metrics::set_gpu_batch_size(&device_id, batch_size as f64);
+                        let workgroups = (batch_size + 255) / 256;
+                        metrics::set_gpu_workgroups(&device_id, workgroups as f64);
+                    }
+
                     while current_start <= end {
                         if cancel.load(Ordering::Relaxed) {
                             log::debug!(target: "gpu_engine", "GPU {} cancelled.", i);
@@ -347,7 +403,7 @@ impl MinerEngine for GpuEngine {
                         {
                             let mut lock = found_candidate.lock().unwrap();
                             if lock.is_none() {
-                                log::info!(target: "gpu_engine", "GPU {} found candidate!", i);
+                                log::info!("GPU {} found solution {:?}", i, candidate);
                                 *lock = Some(candidate);
                             }
                             return;

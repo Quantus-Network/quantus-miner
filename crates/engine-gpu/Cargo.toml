@@ -11,15 +11,17 @@ description = "GPU mining engine implementation for the Quantus External Miner"
 
 [features]
 # Default to the baseline/reference implementation; enable others as needed.
-default = ["baseline"]
+default = ["baseline", "metrics"]
 
 # Map engine features (pow-core dependency removed for now)
 baseline = []
 simd-poseidon2 = []
+metrics = ["dep:metrics"]
 
 [dependencies]
 engine-cpu = { path = "../engine-cpu" }
 pow-core = { path = "../pow-core" }
+metrics = { path = "../metrics", optional = true }
 primitive-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

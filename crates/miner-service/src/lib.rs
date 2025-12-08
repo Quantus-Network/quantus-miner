@@ -25,8 +25,10 @@ pub struct ServiceConfig {
     pub workers: Option<usize>,
     /// Optional metrics port. When Some, metrics endpoint starts; when None, metrics are disabled.
     pub metrics_port: Option<u16>,
-    /// Target milliseconds for per-thread progress updates (chunking). If None, defaults to 2000ms.
-    pub progress_chunk_ms: Option<u64>,
+    /// How often to report mining progress (in milliseconds). If None, defaults to 10000ms.
+    pub progress_interval_ms: Option<u64>,
+    /// Size of work chunks to process before reporting progress (in number of hashes). If None, uses engine-specific defaults.
+    pub chunk_size: Option<u64>,
     /// Optional starting value for the manipulator engine's solved-blocks throttle index.
     pub manip_solved_blocks: Option<u64>,
     /// Optional base sleep per batch in nanoseconds for manipulator engine (default 500_000ns).
@@ -54,7 +56,8 @@ impl Default for ServiceConfig {
             port: 9833,
             workers: None,
             metrics_port: None,
-            progress_chunk_ms: None,
+            progress_interval_ms: None,
+            chunk_size: None,
             manip_solved_blocks: None,
             manip_base_delay_ns: None,
             manip_step_batch: None,
@@ -74,16 +77,17 @@ impl fmt::Display for ServiceConfig {
         };
         write!(
             f,
-            "port={}, workers={:?}, engine={}, metrics_port={:?}, progress_chunk_ms={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            "port={}, workers={:?}, engine={}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
             self.port,
             self.workers,
             engine,
             self.metrics_port,
-            self.progress_chunk_ms,
+            self.progress_interval_ms,
+            self.chunk_size,
             self.manip_solved_blocks,
             self.manip_base_delay_ns,
             self.manip_step_batch,
-            self.manip_throttle_cap
+            self.manip_throttle_cap,
         )
     }
 }
@@ -94,19 +98,27 @@ pub struct MiningService {
     pub jobs: Arc<Mutex<HashMap<String, MiningJob>>>,
     pub workers: usize,
     pub engine: Arc<dyn MinerEngine>,
-    /// Target milliseconds for per-thread progress updates (chunking).
-    pub progress_chunk_ms: u64,
+    /// How often to report mining progress (in milliseconds).
+    pub progress_interval_ms: u64,
+    /// Work chunk size (number of hashes to process before progress update).
+    pub chunk_size: Option<u64>,
     /// Gauge of currently running jobs (for metrics)
     pub active_jobs_gauge: Arc<tokio::sync::Mutex<i64>>,
 }
 
 impl MiningService {
-    pub fn new(workers: usize, engine: Arc<dyn MinerEngine>, progress_chunk_ms: u64) -> Self {
+    fn new(
+        workers: usize,
+        engine: Arc<dyn MinerEngine>,
+        progress_interval_ms: u64,
+        chunk_size: Option<u64>,
+    ) -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             workers,
             engine,
-            progress_chunk_ms,
+            progress_interval_ms,
+            chunk_size,
             active_jobs_gauge: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
@@ -118,7 +130,11 @@ impl MiningService {
             return Err("Job already exists".to_string());
         }
 
-        log::debug!(target: "miner", "Adding job: {} with {} workers", job_id, self.workers);
+        log::info!(
+            "Adding mining job: {} with {} workers",
+            job_id,
+            self.workers
+        );
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
@@ -133,7 +149,12 @@ impl MiningService {
                 metrics::set_active_jobs(*g);
             }
         }
-        job.start_mining(self.engine.clone(), self.workers, self.progress_chunk_ms);
+        job.start_mining(
+            self.engine.clone(),
+            self.workers,
+            self.progress_interval_ms,
+            self.chunk_size,
+        );
         jobs.insert(job_id, job);
         Ok(())
     }
@@ -148,7 +169,7 @@ impl MiningService {
         if let Some(job) = jobs.get_mut(job_id) {
             if !job.result_served {
                 job.result_served = true;
-                log::info!(target: "miner", "Result served and marked for job: {job_id}");
+                log::info!("Mining result served for job: {job_id}");
                 #[cfg(feature = "metrics")]
                 {
                     // reuse existing counter to trace served events
@@ -161,7 +182,7 @@ impl MiningService {
     pub async fn remove_job(&self, job_id: &str) -> Option<MiningJob> {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(job_id) {
-            log::debug!(target: "miner", "Removing job: {job_id}");
+            log::info!("Removing mining job: {job_id}");
             job.cancel();
             Some(job)
         } else {
@@ -182,19 +203,18 @@ impl MiningService {
     /// Periodically polls running jobs for results and advances their status.
     pub async fn start_mining_loop(&self) {
         let jobs = self.jobs.clone();
-        log::debug!(target: "miner", "Starting mining loop...");
+        log::info!("🔄 Starting job monitoring loop...");
 
         tokio::spawn(async move {
             let mut last_watchdog = std::time::Instant::now();
-            let mut iter: u64 = 0;
+            let service_start = std::time::Instant::now();
             loop {
-                iter += 1;
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
                     if job.status == JobStatus::Running && job.update_from_results() {
-                        log::debug!(target: "miner",
-                            "Job {} finished with status {:?}, hashes: {}, time: {:?}",
+                        log::info!(
+                            "Mining job {} finished with status {:?}, hashes: {}, time: {:?}",
                             job_id,
                             job.status,
                             job.total_hash_count,
@@ -207,7 +227,7 @@ impl MiningService {
                         || (job.status == JobStatus::Completed && !job.result_served)
                         || job.start_time.elapsed().as_secs() < 300;
                     if !retain {
-                        log::debug!(target: "miner", "Cleaning up old job {job_id}");
+                        log::info!("🧹 Cleaning up completed job {}", job_id);
                     }
                     retain
                 });
@@ -229,31 +249,77 @@ impl MiningService {
                     metrics::set_active_jobs(running_jobs);
                 }
                 let do_watchdog = last_watchdog.elapsed().as_secs() >= 30;
-                let (total, running, completed, failed, cancelled) = if do_watchdog {
+                let (total, running, completed, failed, cancelled, total_hash_rate) = if do_watchdog
+                {
                     let mut running = 0usize;
                     let mut completed = 0usize;
                     let mut cancelled = 0usize;
                     let mut failed = 0usize;
+                    let mut total_hash_rate = 0.0;
                     let total = jobs_guard.len();
                     for (_id, job) in jobs_guard.iter() {
                         match job.status {
-                            JobStatus::Running => running += 1,
+                            JobStatus::Running => {
+                                running += 1;
+                                total_hash_rate += job.last_hash_rate;
+                            }
                             JobStatus::Completed => completed += 1,
                             JobStatus::Cancelled => cancelled += 1,
                             JobStatus::Failed => failed += 1,
                         }
                     }
-                    (total, running, completed, failed, cancelled)
+                    (
+                        total,
+                        running,
+                        completed,
+                        failed,
+                        cancelled,
+                        total_hash_rate,
+                    )
                 } else {
-                    (0, 0, 0, 0, 0)
+                    (0, 0, 0, 0, 0, 0.0)
                 };
                 drop(jobs_guard);
                 if do_watchdog {
-                    log::info!(
-                        target: "miner",
-                        "Watchdog: jobs total={}, running={}, completed={}, failed={}, cancelled={}, loop_iter={}",
-                        total, running, completed, failed, cancelled, iter
-                    );
+                    let uptime = service_start.elapsed();
+                    let uptime_str = if uptime.as_secs() < 60 {
+                        format!("{}s", uptime.as_secs())
+                    } else if uptime.as_secs() < 3600 {
+                        format!("{}m {}s", uptime.as_secs() / 60, uptime.as_secs() % 60)
+                    } else {
+                        format!(
+                            "{}h {}m",
+                            uptime.as_secs() / 3600,
+                            (uptime.as_secs() % 3600) / 60
+                        )
+                    };
+
+                    if total == 0 {
+                        log::info!(
+                            "📊 Mining service healthy - uptime: {} - waiting for jobs",
+                            uptime_str
+                        );
+                    } else if running == 0 {
+                        log::info!(
+                            "📊 Mining status - uptime: {} - no active jobs - {} completed, {} cancelled, {} failed",
+                            uptime_str, completed, cancelled, failed
+                        );
+                    } else {
+                        let hash_rate_str = if total_hash_rate >= 1_000_000.0 {
+                            format!("{:.1}M", total_hash_rate / 1_000_000.0)
+                        } else if total_hash_rate >= 1_000.0 {
+                            format!("{:.1}K", total_hash_rate / 1_000.0)
+                        } else if total_hash_rate > 0.0 {
+                            format!("{:.0}", total_hash_rate)
+                        } else {
+                            "starting...".to_string()
+                        };
+
+                        log::info!(
+                            "📊 Mining status - uptime: {} - jobs: {} active, {} completed, {} cancelled, {} failed - hash rate: {} H/s",
+                            uptime_str, running, completed, cancelled, failed, hash_rate_str
+                        );
+                    }
                     last_watchdog = std::time::Instant::now();
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -374,7 +440,8 @@ impl MiningJob {
         &mut self,
         engine: Arc<dyn MinerEngine>,
         workers: usize,
-        progress_chunk_ms: u64,
+        progress_interval_ms: u64,
+        chunk_size: Option<u64>,
     ) {
         let chan_capacity = std::env::var("MINER_RESULT_CHANNEL_CAP")
             .ok()
@@ -387,8 +454,7 @@ impl MiningJob {
         // Partition nonce range safely
         let partitions = compute_partitions(self.nonce_start, self.nonce_end, workers);
 
-        log::debug!(
-            target: "miner",
+        log::info!(
             "Starting mining with {} workers, total range: {} ({} partitions)",
             workers,
             partitions.total_range,
@@ -414,7 +480,8 @@ impl MiningJob {
                     EngineRange { start, end },
                     cancel_flag,
                     sender,
-                    progress_chunk_ms,
+                    progress_interval_ms,
+                    chunk_size,
                 );
             });
 
@@ -423,7 +490,10 @@ impl MiningJob {
     }
 
     pub fn cancel(&mut self) {
-        log::debug!(target: "miner", "Cancelling mining job: {}", self.job_id.as_ref().unwrap());
+        log::info!(
+            "Cancelling mining job: {}",
+            self.job_id.as_ref().unwrap_or(&"unknown".to_string())
+        );
         self.cancel_flag.store(true, Ordering::Relaxed);
         self.status = JobStatus::Cancelled;
         #[cfg(feature = "metrics")]
@@ -637,10 +707,10 @@ fn mine_range_with_engine(
     range: EngineRange,
     cancel_flag: Arc<AtomicBool>,
     sender: Sender<ThreadResult>,
-    progress_chunk_ms: u64,
+    progress_interval_ms: u64,
+    chunk_size: Option<u64>,
 ) {
-    log::debug!(
-        target: "miner",
+    log::info!(
         "Job {} thread {} mining range {} to {} (inclusive)",
         job_id,
         thread_id,
@@ -652,11 +722,19 @@ fn mine_range_with_engine(
     let mut current_start = range.start;
     let end = range.end;
     // Derive a rough chunk size from target milliseconds and an estimate of hashes/sec.
-    // Start with a conservative default of 100k ops/sec per thread and scale by target ms.
-    let target_ms = progress_chunk_ms;
-    let est_ops_per_sec: u64 = 100_000;
-    let derived_chunk: u64 = ((est_ops_per_sec.saturating_mul(target_ms)) / 1000).max(5_000);
-    let chunk_size = U512::from(derived_chunk);
+    let target_ms = progress_interval_ms;
+    let chunk_size_u64 = chunk_size.unwrap_or_else(|| {
+        // Use engine-specific defaults if not configured
+        if engine.name().contains("gpu") {
+            // GPU can handle much larger chunks efficiently
+            100_000_000 // 100M hashes per chunk
+        } else {
+            // CPU uses time-based chunks
+            let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
+            ((est_ops_per_sec.saturating_mul(target_ms)) / 1000).max(5_000)
+        }
+    });
+    let chunk_size = U512::from(chunk_size_u64);
     let mut done = false;
 
     while current_start <= end && !cancel_flag.load(Ordering::Relaxed) {
@@ -673,7 +751,6 @@ fn mine_range_with_engine(
         };
 
         log::debug!(
-            target: "miner",
             "Job {} thread {} processing subrange {}..{} (inclusive)",
             job_id,
             thread_id,
@@ -696,8 +773,19 @@ fn mine_range_with_engine(
                     origin: Some(origin),
                     completed: true,
                 };
+                log::info!(
+                    "🎉 Solution found! Job {} thread {} - Nonce: {}, Hash: {:x}",
+                    job_id,
+                    thread_id,
+                    nonce,
+                    hash
+                );
                 if sender.try_send(final_result).is_err() {
-                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send final result");
+                    log::warn!(
+                        "Job {} thread {} failed to send final result",
+                        job_id,
+                        thread_id
+                    );
                 }
                 done = true;
                 break;
@@ -712,12 +800,15 @@ fn mine_range_with_engine(
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
-                    log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send progress update");
+                    log::warn!(
+                        "Job {} thread {} failed to send progress update",
+                        job_id,
+                        thread_id
+                    );
                     break;
                 } else {
-                    log::debug!(
-                        target: "miner",
-                        "Job {} thread {} progress: hashed={} in subrange {}..{}",
+                    log::info!(
+                        "⛏️  Job {} thread {} processed {} hashes (range: {}..{})",
                         job_id,
                         thread_id,
                         hash_count,
@@ -901,14 +992,40 @@ pub async fn handle_result_request(
         }
     };
 
-    log::debug!(
-        target: "miner",
-        "Result polling watchdog: job_id={}, status={:?}, result_served={}, elapsed_s={:.3}",
-        job_id,
-        job.status,
-        job.result_served,
-        job.start_time.elapsed().as_secs_f64()
-    );
+    let elapsed = job.start_time.elapsed().as_secs_f64();
+    match job.status {
+        JobStatus::Running => {
+            log::debug!(
+                "🔍 Job {} still running - elapsed: {:.1}s - hash rate: {:.0} H/s",
+                job_id,
+                elapsed,
+                job.last_hash_rate
+            );
+        }
+        JobStatus::Completed if !job.result_served => {
+            log::info!(
+                "✅ Job {} completed - ready for pickup - elapsed: {:.1}s - {} hashes",
+                job_id,
+                elapsed,
+                job.total_hash_count
+            );
+        }
+        JobStatus::Completed => {
+            log::debug!(
+                "📤 Job {} result already served - elapsed: {:.1}s",
+                job_id,
+                elapsed
+            );
+        }
+        _ => {
+            log::debug!(
+                "🔄 Job {} status: {:?} - elapsed: {:.1}s",
+                job_id,
+                job.status,
+                elapsed
+            );
+        }
+    }
     let status = match job.status {
         JobStatus::Running => ApiResponseStatus::Running,
         JobStatus::Completed => ApiResponseStatus::Completed,
@@ -1160,7 +1277,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     if workers > effective_cpus {
         workers = effective_cpus.max(1);
     }
-    
+
     // Force workers=1 for GPU engine to prevent concurrent buffer mapping panics
     if matches!(config.engine, EngineSelection::Gpu) {
         if workers > 1 {
@@ -1171,7 +1288,6 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             workers = 1;
         }
     }
-
 
     log::info!(
         "Using {workers} worker thread(s) for mining (effective logical CPUs available: {effective_cpus})"
@@ -1218,11 +1334,34 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             }
         }
     };
-    log::info!("Using engine: {}", engine.name());
-    log::info!("Service configuration: {config}");
+    log::info!(
+        "🚀 Mining engine selected: {} ({})",
+        engine.name(),
+        match config.engine {
+            EngineSelection::CpuBaseline => "Single-threaded CPU reference implementation",
+            EngineSelection::CpuFast => "Optimized multi-threaded CPU mining",
+            EngineSelection::CpuChainManipulator => "Throttled CPU mining for difficulty control",
+            EngineSelection::Gpu => "High-performance GPU mining",
+        }
+    );
+    log::info!("⚙️  Service configuration: {config}");
 
-    let progress_chunk_ms = config.progress_chunk_ms.unwrap_or(2000);
-    let service = MiningService::new(workers, engine.clone(), progress_chunk_ms);
+    let progress_interval_ms = config.progress_interval_ms.unwrap_or(10000);
+    let service = MiningService::new(
+        workers,
+        engine.clone(),
+        progress_interval_ms,
+        config.chunk_size,
+    );
+
+    log::info!("⛏️  Mining service ready with {} worker threads", workers);
+    if let Some(chunk_size) = config.chunk_size {
+        log::info!(
+            "📦 Custom chunk size: {} hashes per progress update",
+            chunk_size
+        );
+    }
+    log::info!("⏰ Progress reporting interval: {}ms", progress_interval_ms);
 
     // Start mining loop
     service.start_mining_loop().await;
@@ -1370,7 +1509,20 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Start server
     let addr = ([0, 0, 0, 0], config.port);
     let socket = std::net::SocketAddr::from(addr);
-    log::info!("Server starting on {socket}");
+    log::info!("🌐 HTTP API server starting on http://{}", socket);
+    log::info!("📡 Mining endpoints available:");
+    log::info!("   POST http://{}/mine - Submit mining jobs", socket);
+    log::info!(
+        "   GET  http://{}/result/{{job_id}} - Check mining results",
+        socket
+    );
+    if config.metrics_port.is_some() {
+        log::info!(
+            "   GET  http://{}:{}/metrics - Prometheus metrics",
+            socket.ip(),
+            config.metrics_port.unwrap()
+        );
+    }
     warp::serve(routes).run(socket).await;
 
     Ok(())
@@ -1388,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn test_mining_state_add_get_remove() {
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000);
+        let state = MiningService::new(2, engine, 2000, None);
 
         let job = MiningJob::new(
             [1u8; 32],
@@ -1407,7 +1559,7 @@ mod tests {
         // Test that a job fails if no nonce is found (threshold too strict).
         // To make this deterministic, avoid nonce=0, which some math paths treat as special.
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000);
+        let state = MiningService::new(1, engine, 2000, None);
         state.start_mining_loop().await;
 
         // Impossible difficulty with a nonce range that excludes 0
@@ -1505,7 +1657,7 @@ mod tests {
     async fn test_job_lifecycle_success() {
         // Test that a job completes successfully
         let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000);
+        let state = MiningService::new(2, engine, 2000, None);
         state.start_mining_loop().await;
 
         // Easy difficulty
@@ -1629,7 +1781,7 @@ mod tests {
 
         let engine: Arc<dyn engine_cpu::MinerEngine> =
             Arc::new(engine_cpu::BaselineCpuEngine::new());
-        let service = super::MiningService::new(2, engine, 2000);
+        let service = MiningService::new(2, engine, 1000, None);
         service.start_mining_loop().await;
 
         // Build routes
@@ -1706,7 +1858,8 @@ mod tests {
             range,
             cancel,
             tx,
-            10, // ms (min chunk size is 5k; fine for testing progress + completion)
+            10,   // ms (min chunk size is 5k; fine for testing progress + completion)
+            None, // chunk_size
         );
 
         // Expect at least two messages: one progress (completed=false) and one final completion (completed=true)

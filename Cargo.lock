@@ -581,6 +581,7 @@ dependencies = [
  "futures",
  "hex",
  "log",
+ "metrics",
  "pow-core",
  "primitive-types 0.13.1",
  "qp-plonky2 1.1.1",
