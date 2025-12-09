@@ -309,128 +309,84 @@ impl MinerEngine for GpuEngine {
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
-        // Simple multi-gpu strategy: split range among available GPUs
-        let num_gpus = self.contexts.len();
-        log::info!(
-            "Starting GPU search on {} devices. Range: {} - {}",
-            num_gpus,
-            range.start,
-            range.end
-        );
-
-        if num_gpus == 0 {
+        if self.contexts.is_empty() {
             log::warn!("No GPUs available for search.");
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
-        let total_range = range.end - range.start + 1;
-        let range_per_gpu = total_range / U512::from(num_gpus);
-        let remainder = total_range % U512::from(num_gpus);
+        // Use first GPU only for now to simplify and avoid threading overhead
+        let gpu_ctx = &self.contexts[0];
+        log::info!(
+            "Starting GPU search on device 0. Range: {} - {}",
+            range.start,
+            range.end
+        );
 
-        let atomic_hash_count = std::sync::atomic::AtomicU64::new(0);
-        let found_candidate = std::sync::Mutex::new(None);
+        // Pre-convert header and target once (not per batch)
+        let mut header_u32s = [0u32; 8];
+        for i in 0..8 {
+            let chunk = &ctx.header[i * 4..(i + 1) * 4];
+            header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        gpu_ctx.queue.write_buffer(
+            &gpu_ctx.header_buffer,
+            0,
+            bytemuck::cast_slice(&header_u32s),
+        );
 
-        std::thread::scope(|s| {
-            for i in 0..num_gpus {
-                let gpu_ctx = &self.contexts[i];
-                let atomic_hash_count = &atomic_hash_count;
-                let found_candidate = &found_candidate;
+        let target_bytes = ctx.target.to_little_endian();
+        let mut target_u32s = [0u32; 16];
+        for i in 0..16 {
+            let chunk = &target_bytes[i * 4..(i + 1) * 4];
+            target_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        gpu_ctx.queue.write_buffer(
+            &gpu_ctx.target_buffer,
+            0,
+            bytemuck::cast_slice(&target_u32s),
+        );
 
-                let start = range.start + range_per_gpu * U512::from(i);
-                let mut end = start + range_per_gpu - 1;
-                if i == num_gpus - 1 {
-                    end = end + remainder;
-                }
+        let mut current_start = range.start;
+        // GPU hardware limit: max 65535 workgroups per dimension
+        // With workgroup_size(256): max_nonces = 65535 * 256 = 16,777,344
+        let batch_size = 65535 * 256; // ~16.7M hashes per batch (max hardware allows)
+        let mut hash_count = 0u64;
 
-                s.spawn(move || {
-                    log::debug!(target: "gpu_engine", "GPU {} started. Range: {} - {}", i, start, end);
+        #[cfg(feature = "metrics")]
+        {
+            let device_id = "gpu-0";
+            metrics::set_gpu_batch_size(device_id, batch_size as f64);
+            let workgroups = (batch_size + 255) / 256;
+            metrics::set_gpu_workgroups(device_id, workgroups as f64);
+        }
 
-                    // Update Header Buffer
-                    let mut header_u32s = [0u32; 8];
-                    for i in 0..8 {
-                        let chunk = &ctx.header[i * 4..(i + 1) * 4];
-                        header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    }
-                    gpu_ctx.queue.write_buffer(
-                        &gpu_ctx.header_buffer,
-                        0,
-                        bytemuck::cast_slice(&header_u32s),
-                    );
-
-                    // Update Target Buffer
-                    let target_bytes = ctx.target.to_little_endian();
-                    let mut target_u32s = [0u32; 16];
-                    for i in 0..16 {
-                        let chunk = &target_bytes[i * 4..(i + 1) * 4];
-                        target_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    }
-                    gpu_ctx.queue.write_buffer(
-                        &gpu_ctx.target_buffer,
-                        0,
-                        bytemuck::cast_slice(&target_u32s),
-                    );
-
-                    let mut current_start = start;
-                    // Increased batch size to reduce overhead
-                    let batch_size = 65536 * 64; // ~4M hashes per batch
-
-                    #[cfg(feature = "metrics")]
-                    {
-                        let device_id = format!("gpu-{}", i);
-                        metrics::set_gpu_batch_size(&device_id, batch_size as f64);
-                        let workgroups = (batch_size + 255) / 256;
-                        metrics::set_gpu_workgroups(&device_id, workgroups as f64);
-                    }
-
-                    while current_start <= end {
-                        if cancel.load(Ordering::Relaxed) {
-                            log::debug!(target: "gpu_engine", "GPU {} cancelled.", i);
-                            break;
-                        }
-                        if found_candidate.lock().unwrap().is_some() {
-                            break;
-                        }
-
-                        let remaining = end - current_start + 1;
-                        let current_batch_size = if remaining < U512::from(batch_size) {
-                            remaining.as_u64() as u32
-                        } else {
-                            batch_size
-                        };
-
-                        if let Some(candidate) =
-                            Self::run_batch(gpu_ctx, current_start, current_batch_size)
-                        {
-                            let mut lock = found_candidate.lock().unwrap();
-                            if lock.is_none() {
-                                log::info!("GPU {} found solution {:?}", i, candidate);
-                                *lock = Some(candidate);
-                            }
-                            return;
-                        }
-
-                        atomic_hash_count.fetch_add(current_batch_size as u64, Ordering::Relaxed);
-                        current_start = current_start + U512::from(current_batch_size);
-                    }
-                    log::debug!(target: "gpu_engine", "GPU {} finished.", i);
-                });
+        while current_start <= range.end {
+            if cancel.load(Ordering::Relaxed) {
+                log::debug!(target: "gpu_engine", "GPU 0 cancelled.");
+                return EngineStatus::Cancelled { hash_count };
             }
-        });
 
-        let hash_count = atomic_hash_count.load(Ordering::Relaxed);
-        let lock = found_candidate.lock().unwrap();
-        if let Some(candidate) = &*lock {
-            return EngineStatus::Found {
-                candidate: candidate.clone(),
-                hash_count,
-                origin: FoundOrigin::GpuG1,
+            let remaining = range.end - current_start + 1;
+            let current_batch_size = if remaining < U512::from(batch_size) {
+                remaining.as_u64() as u32
+            } else {
+                batch_size
             };
+
+            if let Some(candidate) = Self::run_batch(gpu_ctx, current_start, current_batch_size) {
+                log::info!("GPU 0 found solution {:?}", candidate);
+                return EngineStatus::Found {
+                    candidate,
+                    hash_count: hash_count + current_batch_size as u64,
+                    origin: FoundOrigin::GpuG1,
+                };
+            }
+
+            hash_count += current_batch_size as u64;
+            current_start = current_start + U512::from(current_batch_size);
         }
 
-        if cancel.load(Ordering::Relaxed) {
-            EngineStatus::Cancelled { hash_count }
-        } else {
-            EngineStatus::Exhausted { hash_count }
-        }
+        log::debug!(target: "gpu_engine", "GPU 0 finished.");
+        EngineStatus::Exhausted { hash_count }
     }
 }
