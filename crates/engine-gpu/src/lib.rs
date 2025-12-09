@@ -314,15 +314,23 @@ impl MinerEngine for GpuEngine {
 
         // Dispatch configuration already logged during initialization
 
-        // For small ranges (benchmarks), use smaller batches for faster completion
+        // Always use large batch sizes to amortize GPU overhead - GPUs need substantial work
         let total_range_size = (range.end - range.start + 1).as_u64();
-        let batch_size = if total_range_size < 10_000_000u64 {
-            // Small range: use 1M nonce batches max
-            std::cmp::min(1_000_000u32, total_range_size as u32)
+        let min_gpu_batch_size = 10_000_000u32; // 10M nonces minimum for GPU efficiency
+        let batch_size = if total_range_size < min_gpu_batch_size as u64 {
+            // Even for small ranges, use minimum efficient batch size
+            // This may process more nonces than requested but ensures GPU efficiency
+            min_gpu_batch_size
         } else {
             // Large range: use full batch size
-            max_batch_size
+            std::cmp::max(max_batch_size, min_gpu_batch_size)
         };
+
+        log::info!(
+            target: "gpu_engine",
+            "GPU batch configuration: total_range={}, batch_size={}, min_batch_size={}, batches_per_sync={}",
+            total_range_size, batch_size, min_gpu_batch_size, BATCHES_PER_SYNC
+        );
 
         // Write dispatch configuration to GPU buffer
         let dispatch_config = [
@@ -340,7 +348,7 @@ impl MinerEngine for GpuEngine {
         let mut hash_count = 0u64;
 
         // Batch multiple dispatches to reduce sync overhead
-        const BATCHES_PER_SYNC: u32 = 4; // Process 4 batches before checking results
+        const BATCHES_PER_SYNC: u32 = 16; // Process 16 batches before checking results to reduce sync overhead
         const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
         const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
 
@@ -426,6 +434,11 @@ impl MinerEngine for GpuEngine {
             if hash_count % (batch_size as u64 * BATCHES_PER_SYNC as u64) == 0
                 || current_start > range.end
             {
+                log::debug!(
+                    target: "gpu_engine",
+                    "GPU sync point: submitting {} batches, hash_count={}, batches_processed={}",
+                    command_buffers.len(), hash_count, hash_count / batch_size as u64
+                );
                 // Submit all batched commands at once
                 gpu_ctx.queue.submit(command_buffers.drain(..));
 
