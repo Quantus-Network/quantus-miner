@@ -14,11 +14,16 @@ struct GpuContext {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
+    adapter_info: wgpu::AdapterInfo,
+    // Cached vendor configuration
+    optimal_workgroups: u32,
+    estimated_cores: u32,
     // Reusable buffers
     header_buffer: wgpu::Buffer,
     target_buffer: wgpu::Buffer,
     start_nonce_buffer: wgpu::Buffer,
     results_buffer: wgpu::Buffer,
+    dispatch_config_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
 }
 
@@ -58,7 +63,15 @@ impl GpuEngine {
                 info.name,
                 info.backend
             );
-            log::debug!(target: "gpu_engine", "Adapter {} info: {:?}", i, info);
+            log::info!(target: "gpu_engine", "Adapter {} detailed info:", i);
+            log::info!(target: "gpu_engine", "  Name: {}", info.name);
+            log::info!(target: "gpu_engine", "  Vendor: {}", info.vendor);
+            log::info!(target: "gpu_engine", "  Device: {}", info.device);
+            log::info!(target: "gpu_engine", "  Device Type: {:?}", info.device_type);
+            log::info!(target: "gpu_engine", "  Driver: {}", info.driver);
+            log::info!(target: "gpu_engine", "  Driver Info: {}", info.driver_info);
+            log::info!(target: "gpu_engine", "  Backend: {:?}", info.backend);
+            log::debug!(target: "gpu_engine", "Adapter {} full info: {:?}", i, info);
             adapter_infos.push(info.clone());
 
             let (device, queue) = adapter
@@ -72,6 +85,14 @@ impl GpuEngine {
                 .await?;
 
             log::debug!(target: "gpu_engine", "Device and Queue requested for adapter {}", i);
+            log::info!(target: "gpu_engine", "Device limits for adapter {}:", i);
+            let limits = device.limits();
+            log::info!(target: "gpu_engine", "  Max workgroups per dimension: {}", limits.max_compute_workgroups_per_dimension);
+            log::info!(target: "gpu_engine", "  Max workgroup size X: {}", limits.max_compute_workgroup_size_x);
+            log::info!(target: "gpu_engine", "  Max workgroup size Y: {}", limits.max_compute_workgroup_size_y);
+            log::info!(target: "gpu_engine", "  Max workgroup size Z: {}", limits.max_compute_workgroup_size_z);
+            log::info!(target: "gpu_engine", "  Max compute invocations per workgroup: {}", limits.max_compute_invocations_per_workgroup);
+            log::info!(target: "gpu_engine", "  Max buffer size: {}", limits.max_buffer_size);
 
             let shader_source = include_str!("mining.wgsl");
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -126,6 +147,14 @@ impl GpuEngine {
                 mapped_at_creation: false,
             });
 
+            // Dispatch config: [total_threads, nonces_per_thread, workgroups, threads_per_workgroup] = 4 u32s
+            let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Dispatch Config Buffer"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
             let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging Buffer"),
                 size: results_size,
@@ -153,20 +182,32 @@ impl GpuEngine {
                         binding: 3,
                         resource: target_buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: dispatch_config_buffer.as_entire_binding(),
+                    },
                 ],
             });
 
             log::debug!(target: "gpu_engine", "Buffers and bind group initialized for adapter {}", i);
+
+            // Calculate vendor-specific configuration once during initialization
+            let (optimal_workgroups, estimated_cores) =
+                Self::get_vendor_specific_dispatch(&info, &device);
 
             contexts.push(Arc::new(GpuContext {
                 device,
                 queue,
                 pipeline,
                 bind_group,
+                adapter_info: info,
+                optimal_workgroups,
+                estimated_cores,
                 header_buffer,
                 target_buffer,
                 start_nonce_buffer,
                 results_buffer,
+                dispatch_config_buffer,
                 staging_buffer,
             }));
         }
@@ -230,10 +271,9 @@ impl MinerEngine for GpuEngine {
 
         // Use first GPU only for now to simplify and avoid threading overhead
         let gpu_ctx = &self.contexts[0];
-        log::info!(
-            "Starting GPU search on device 0. Range: {} - {}",
-            range.start,
-            range.end
+        log::debug!(
+            "Starting continuous GPU search on device 0 from nonce {}",
+            range.start
         );
 
         // Pre-convert header and target once (not per batch)
@@ -261,9 +301,42 @@ impl MinerEngine for GpuEngine {
         );
 
         let mut current_start = range.start;
-        // GPU hardware limit: max 65535 workgroups per dimension
-        // With workgroup_size(256): max_nonces = 65535 * 256 = 16,777,344
-        let batch_size = 65535 * 256; // ~16.7M hashes per batch (max hardware allows)
+
+        // Get vendor-specific optimal dispatch configuration using stored adapter info
+
+        let threads_per_workgroup = 256u32; // Must match shader @workgroup_size
+        let nonces_per_thread = 256u32; // Must match shader constant
+
+        // Use cached vendor-specific dispatch configuration
+        let actual_workgroups = gpu_ctx.optimal_workgroups;
+        let actual_threads = actual_workgroups * threads_per_workgroup;
+        let max_batch_size = actual_threads * nonces_per_thread;
+
+        // Dispatch configuration already logged during initialization
+
+        // For small ranges (benchmarks), use smaller batches for faster completion
+        let total_range_size = (range.end - range.start + 1).as_u64();
+        let batch_size = if total_range_size < 10_000_000u64 {
+            // Small range: use 1M nonce batches max
+            std::cmp::min(1_000_000u32, total_range_size as u32)
+        } else {
+            // Large range: use full batch size
+            max_batch_size
+        };
+
+        // Write dispatch configuration to GPU buffer
+        let dispatch_config = [
+            actual_threads,
+            nonces_per_thread,
+            actual_workgroups,
+            threads_per_workgroup,
+        ];
+        gpu_ctx.queue.write_buffer(
+            &gpu_ctx.dispatch_config_buffer,
+            0,
+            bytemuck::cast_slice(&dispatch_config),
+        );
+
         let mut hash_count = 0u64;
 
         // Batch multiple dispatches to reduce sync overhead
@@ -276,9 +349,15 @@ impl MinerEngine for GpuEngine {
         #[cfg(feature = "metrics")]
         {
             let device_id = "gpu-0";
-            metrics::set_gpu_batch_size(device_id, (batch_size * BATCHES_PER_SYNC) as f64);
-            let workgroups = (batch_size + 255) / 256;
-            metrics::set_gpu_workgroups(device_id, (workgroups * BATCHES_PER_SYNC) as f64);
+            metrics::set_gpu_batch_size(
+                device_id,
+                (batch_size as u64 * BATCHES_PER_SYNC as u64) as f64,
+            );
+            let workgroups = 65535; // Fixed workgroups since we use max dispatch
+            metrics::set_gpu_workgroups(
+                device_id,
+                (workgroups as u64 * BATCHES_PER_SYNC as u64) as f64,
+            );
         }
 
         // Collect command buffers to submit in batches
@@ -290,12 +369,20 @@ impl MinerEngine for GpuEngine {
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            let remaining = range.end - current_start + 1;
-            let current_batch_size = if remaining < U512::from(batch_size) {
-                remaining.as_u64() as u32
+            // Calculate batch size - either full batch or remaining in range
+            let remaining_in_range = (range.end - current_start + 1).as_u64();
+            let current_batch_nonces = if remaining_in_range < batch_size as u64 {
+                remaining_in_range
             } else {
-                batch_size
+                batch_size as u64
             };
+
+            // Calculate workgroups needed for this batch
+            let threads_needed = ((current_batch_nonces + nonces_per_thread as u64 - 1)
+                / nonces_per_thread as u64) as u32;
+            let workgroups_needed = ((threads_needed + threads_per_workgroup - 1)
+                / threads_per_workgroup)
+                .min(actual_workgroups);
 
             // Update start nonce (simplified conversion)
             let start_nonce_bytes = current_start.to_little_endian();
@@ -319,7 +406,7 @@ impl MinerEngine for GpuEngine {
                 });
                 cpass.set_pipeline(&gpu_ctx.pipeline);
                 cpass.set_bind_group(0, &gpu_ctx.bind_group, &[]);
-                cpass.dispatch_workgroups((current_batch_size + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(workgroups_needed, 1, 1);
             }
             encoder.copy_buffer_to_buffer(
                 &gpu_ctx.results_buffer,
@@ -332,11 +419,12 @@ impl MinerEngine for GpuEngine {
             // Store command buffer instead of immediate submit
             command_buffers.push(encoder.finish());
 
-            hash_count += current_batch_size as u64;
-            current_start = current_start + U512::from(current_batch_size);
+            hash_count += current_batch_nonces;
+            current_start = current_start + U512::from(current_batch_nonces);
 
-            // Submit and check results less frequently to reduce sync overhead
-            if hash_count % (batch_size * BATCHES_PER_SYNC) as u64 == 0 || current_start > range.end
+            // Submit and check results every few batches to reduce sync overhead
+            if hash_count % (batch_size as u64 * BATCHES_PER_SYNC as u64) == 0
+                || current_start > range.end
             {
                 // Submit all batched commands at once
                 gpu_ctx.queue.submit(command_buffers.drain(..));
@@ -377,7 +465,128 @@ impl MinerEngine for GpuEngine {
             }
         }
 
-        log::debug!(target: "gpu_engine", "GPU 0 finished.");
+        log::debug!(target: "gpu_engine", "GPU 0 finished range.");
         EngineStatus::Exhausted { hash_count }
+    }
+}
+
+impl GpuEngine {
+    /// Get vendor-specific optimal dispatch configuration
+    fn get_vendor_specific_dispatch(
+        adapter_info: &wgpu::AdapterInfo,
+        device: &wgpu::Device,
+    ) -> (u32, u32) {
+        let limits = device.limits();
+        let max_workgroups = limits.max_compute_workgroups_per_dimension.min(65535);
+
+        // Parse vendor from adapter info
+        let vendor_name = adapter_info.name.to_lowercase();
+        let _device_name = adapter_info.device.to_string().to_lowercase();
+
+        // Vendor detection logic without logging (already logged during initialization)
+        // Vendor-specific heuristics based on architecture knowledge
+        let (optimal_workgroups, estimated_cores) = if vendor_name.contains("nvidia")
+            || adapter_info.vendor == 4318
+        {
+            // NVIDIA GPUs (vendor ID 0x10DE = 4318)
+            // CUDA cores benefit from high occupancy, typically thousands of simple cores
+            let workgroups = if vendor_name.contains("rtx 40") || vendor_name.contains("rtx 4090") {
+                (max_workgroups / 8).max(4096) // High-end: RTX 4090 has 16384 CUDA cores
+            } else if vendor_name.contains("rtx 30") || vendor_name.contains("rtx 20") {
+                (max_workgroups / 12).max(2048) // Mid-high-end: RTX 3080 has ~8700 CUDA cores
+            } else if vendor_name.contains("gtx") || vendor_name.contains("rtx 16") {
+                (max_workgroups / 16).max(1024) // Mid-range: GTX 1660 has 1408 CUDA cores
+            } else {
+                (max_workgroups / 20).max(512) // Lower-end NVIDIA
+            };
+            let cores = workgroups * 256 / 2; // NVIDIA benefits from ~2x oversubscription
+            (workgroups, cores)
+        } else if vendor_name.contains("amd") || adapter_info.vendor == 4098 {
+            // AMD GPUs (vendor ID 0x1002 = 4098)
+            // Compute Units with stream processors, different architecture than NVIDIA
+            let workgroups = if vendor_name.contains("rx 7") || vendor_name.contains("rx 6900") {
+                (max_workgroups / 10).max(3072) // High-end: RX 7900 XTX has 6144 stream processors
+            } else if vendor_name.contains("rx 6") || vendor_name.contains("rx 5700") {
+                (max_workgroups / 14).max(2048) // Mid-high-end: RX 6800 XT has 4608 stream processors
+            } else if vendor_name.contains("rx 5") || vendor_name.contains("rx 580") {
+                (max_workgroups / 18).max(1024) // Mid-range: RX 580 has 2304 stream processors
+            } else {
+                (max_workgroups / 24).max(512) // Lower-end AMD
+            };
+            let cores = workgroups * 256 / 3; // AMD typically benefits from ~3x oversubscription
+            (workgroups, cores)
+        } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
+            // Intel GPUs (vendor ID 0x8086 = 32902)
+            // Newer Xe architecture, different from traditional designs
+            let workgroups = if vendor_name.contains("arc a7") || vendor_name.contains("arc a770") {
+                (max_workgroups / 12).max(2048) // High-end Arc A770
+            } else if vendor_name.contains("arc a5") || vendor_name.contains("arc a380") {
+                (max_workgroups / 16).max(1024) // Mid-range Arc A380
+            } else if vendor_name.contains("iris xe") {
+                (max_workgroups / 20).max(512) // Integrated Iris Xe
+            } else {
+                (max_workgroups / 24).max(256) // Other Intel integrated
+            };
+            let cores = workgroups * 256 / 4; // Conservative approach for Intel
+            (workgroups, cores)
+        } else if adapter_info.backend == wgpu::Backend::Metal {
+            // Apple GPUs (detected by Metal backend)
+            // Apple GPU cores are complex, powerful units - NOT like NVIDIA CUDA cores
+            // Each Apple GPU core can handle many operations in parallel
+            let (gpu_cores, workgroups) = if vendor_name.contains("m4 max") {
+                (40, 800) // M4 Max: 40 GPU cores, ~20x workgroups
+            } else if vendor_name.contains("m4 pro") {
+                (20, 400) // M4 Pro: 20 GPU cores, ~20x workgroups
+            } else if vendor_name.contains("m4") {
+                (10, 200) // M4: 10 GPU cores, ~20x workgroups
+            } else if vendor_name.contains("m3 max") {
+                (40, 800) // M3 Max: 40 GPU cores
+            } else if vendor_name.contains("m3 pro") {
+                (18, 360) // M3 Pro: 18 GPU cores
+            } else if vendor_name.contains("m3") {
+                (10, 200) // M3: 10 GPU cores
+            } else if vendor_name.contains("m2 ultra") {
+                (76, 1520) // M2 Ultra: 76 GPU cores
+            } else if vendor_name.contains("m2 max") {
+                (38, 760) // M2 Max: 38 GPU cores
+            } else if vendor_name.contains("m2 pro") {
+                (19, 380) // M2 Pro: 19 GPU cores
+            } else if vendor_name.contains("m2") {
+                (10, 200) // M2: 10 GPU cores
+            } else if vendor_name.contains("m1 ultra") {
+                (64, 1280) // M1 Ultra: 64 GPU cores
+            } else if vendor_name.contains("m1 max") {
+                (32, 640) // M1 Max: 32 GPU cores
+            } else if vendor_name.contains("m1 pro") {
+                (16, 320) // M1 Pro: 16 GPU cores
+            } else if vendor_name.contains("m1") {
+                (8, 160) // M1: 8 GPU cores
+            } else {
+                (8, 160) // Conservative fallback for unknown Apple GPU
+            };
+
+            // Clamp to reasonable limits
+            let clamped_workgroups = workgroups.min(max_workgroups / 4).max(64);
+
+            // Each Apple GPU core is roughly equivalent to 64-128 "effective processing units"
+            // This gives us a realistic estimate of parallel processing capability
+            let estimated_cores = gpu_cores * 96; // Conservative middle ground
+
+            // Apple GPU configuration calculated
+            (clamped_workgroups, estimated_cores)
+        } else {
+            // Unknown/Generic GPU - use conservative defaults
+            // Unknown/Generic GPU - use conservative defaults (logging moved to initialization)
+            let workgroups = (max_workgroups / 16).max(512);
+            let cores = workgroups * 256 / 4;
+            (workgroups, cores)
+        };
+
+        log::info!(target: "gpu_engine", "Vendor-specific dispatch configuration:");
+        log::info!(target: "gpu_engine", "  Max hardware workgroups: {}", max_workgroups);
+        log::info!(target: "gpu_engine", "  Optimal workgroups: {}", optimal_workgroups);
+        log::info!(target: "gpu_engine", "  Estimated effective cores: {}", estimated_cores);
+
+        (optimal_workgroups, estimated_cores)
     }
 }
