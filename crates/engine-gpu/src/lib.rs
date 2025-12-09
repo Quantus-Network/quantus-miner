@@ -271,6 +271,8 @@ impl MinerEngine for GpuEngine {
         const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
         const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
 
+        // Results buffer must be reset per batch to detect solutions correctly
+
         #[cfg(feature = "metrics")]
         {
             let device_id = "gpu-0";
@@ -292,21 +294,18 @@ impl MinerEngine for GpuEngine {
                 batch_size
             };
 
-            // Submit GPU work without waiting
+            // Update start nonce (simplified conversion)
             let start_nonce_bytes = current_start.to_little_endian();
-            let start_nonce_u32s: &[u32] = bytemuck::cast_slice(&start_nonce_bytes);
-            gpu_ctx.queue.write_buffer(
-                &gpu_ctx.start_nonce_buffer,
-                0,
-                bytemuck::cast_slice(start_nonce_u32s),
-            );
+            gpu_ctx
+                .queue
+                .write_buffer(&gpu_ctx.start_nonce_buffer, 0, &start_nonce_bytes);
 
-            // Reset Results Buffer
+            // Reset results buffer to detect solutions from this batch
             gpu_ctx
                 .queue
                 .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
 
-            // Submit GPU work
+            // Create encoder and submit GPU work (streamlined)
             let mut encoder = gpu_ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -317,8 +316,7 @@ impl MinerEngine for GpuEngine {
                 });
                 cpass.set_pipeline(&gpu_ctx.pipeline);
                 cpass.set_bind_group(0, &gpu_ctx.bind_group, &[]);
-                let workgroups = (current_batch_size + 255) / 256;
-                cpass.dispatch_workgroups(workgroups, 1, 1);
+                cpass.dispatch_workgroups((current_batch_size + 255) / 256, 1, 1);
             }
             encoder.copy_buffer_to_buffer(
                 &gpu_ctx.results_buffer,
