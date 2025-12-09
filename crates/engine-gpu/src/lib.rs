@@ -305,7 +305,7 @@ impl MinerEngine for GpuEngine {
         // Get vendor-specific optimal dispatch configuration using stored adapter info
 
         let threads_per_workgroup = 256u32; // Must match shader @workgroup_size
-        let nonces_per_thread = 4096u32; // Much more work per thread to reduce GPU overhead
+        let nonces_per_thread = 1048576u32; // MASSIVE work per thread - each GPU thread processes 1M nonces for absolute maximum utilization
 
         // Use cached vendor-specific dispatch configuration
         let actual_workgroups = gpu_ctx.optimal_workgroups;
@@ -316,7 +316,7 @@ impl MinerEngine for GpuEngine {
 
         // Use maximum possible batch sizes to minimize GPU dispatches
         let total_range_size = (range.end - range.start + 1).as_u64();
-        let min_gpu_batch_size = 100_000_000u32; // 100M nonces minimum - GPU needs massive parallelism
+        let min_gpu_batch_size = 1_000_000_000u32; // 1B nonces minimum - with 1M nonces per thread, we need absolutely massive batches
 
         // Always use the largest possible batch size to minimize dispatches
         let batch_size = if total_range_size <= min_gpu_batch_size as u64 {
@@ -336,6 +336,11 @@ impl MinerEngine for GpuEngine {
             target: "gpu_engine",
             "GPU theoretical throughput: {} nonces per batch, estimated {} batches needed",
             max_batch_size, (total_range_size as f64 / max_batch_size as f64).ceil() as u32
+        );
+        log::info!(
+            target: "gpu_engine",
+            "GPU EXTREME parallelism: {} threads × {}M nonces/thread = {}M total parallel nonces per dispatch",
+            actual_threads, nonces_per_thread / 1_000_000, (actual_threads as u64 * nonces_per_thread as u64) / 1_000_000
         );
 
         // Write dispatch configuration to GPU buffer
