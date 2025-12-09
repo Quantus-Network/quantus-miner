@@ -281,6 +281,9 @@ impl MinerEngine for GpuEngine {
             metrics::set_gpu_workgroups(device_id, (workgroups * BATCHES_PER_SYNC) as f64);
         }
 
+        // Collect command buffers to submit in batches
+        let mut command_buffers = Vec::new();
+
         while current_start <= range.end {
             if cancel.load(Ordering::Relaxed) {
                 log::debug!(target: "gpu_engine", "GPU 0 cancelled.");
@@ -305,7 +308,7 @@ impl MinerEngine for GpuEngine {
                 .queue
                 .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
 
-            // Create encoder and submit GPU work (streamlined)
+            // Create command buffer for this batch
             let mut encoder = gpu_ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -325,15 +328,19 @@ impl MinerEngine for GpuEngine {
                 0,
                 RESULTS_SIZE as u64,
             );
-            gpu_ctx.queue.submit(Some(encoder.finish()));
 
-            // Only sync every few batches to reduce overhead
+            // Store command buffer instead of immediate submit
+            command_buffers.push(encoder.finish());
+
             hash_count += current_batch_size as u64;
             current_start = current_start + U512::from(current_batch_size);
 
-            // Check for results less frequently
+            // Submit and check results less frequently to reduce sync overhead
             if hash_count % (batch_size * BATCHES_PER_SYNC) as u64 == 0 || current_start > range.end
             {
+                // Submit all batched commands at once
+                gpu_ctx.queue.submit(command_buffers.drain(..));
+
                 let buffer_slice = gpu_ctx.staging_buffer.slice(..);
                 buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
                 let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
