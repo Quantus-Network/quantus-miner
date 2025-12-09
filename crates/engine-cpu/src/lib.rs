@@ -176,7 +176,7 @@ impl FastCpuEngine {
 
 impl MinerEngine for FastCpuEngine {
     fn name(&self) -> &'static str {
-        "cpu-fast"
+        "cpu"
     }
 
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {

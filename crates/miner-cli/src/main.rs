@@ -48,9 +48,9 @@ struct Args {
     #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
     manip_throttle_cap: Option<u64>,
 
-    /// Mining engine to use (default: cpu-fast).
-    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, gpu
-    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
+    /// Mining engine to use (default: cpu).
+    /// Options: cpu, cpu-chain-manipulator, gpu
+    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::Cpu)]
     engine: EngineCli,
 
     /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
@@ -100,10 +100,8 @@ struct Args {
 #[allow(clippy::enum_variant_names)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum EngineCli {
-    /// Baseline CPU engine (reference implementation)
-    CpuBaseline,
     /// Optimized CPU engine (incremental precompute + step_mul)
-    CpuFast,
+    Cpu,
     /// Throttling CPU engine that slows per block to help reduce difficulty
     CpuChainManipulator,
     /// GPU engine (WGPU based)
@@ -113,8 +111,7 @@ enum EngineCli {
 impl From<EngineCli> for EngineSelection {
     fn from(value: EngineCli) -> Self {
         match value {
-            EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
-            EngineCli::CpuFast => EngineSelection::CpuFast,
+            EngineCli::Cpu => EngineSelection::Cpu,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             EngineCli::Gpu => EngineSelection::Gpu,
         }

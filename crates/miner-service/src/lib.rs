@@ -44,8 +44,7 @@ pub struct ServiceConfig {
 /// Engine selection enum for future extensibility.
 #[derive(Clone, Debug)]
 pub enum EngineSelection {
-    CpuBaseline,
-    CpuFast,
+    Cpu,
     CpuChainManipulator,
     Gpu,
 }
@@ -62,7 +61,7 @@ impl Default for ServiceConfig {
             manip_base_delay_ns: None,
             manip_step_batch: None,
             manip_throttle_cap: None,
-            engine: EngineSelection::CpuBaseline,
+            engine: EngineSelection::Cpu,
         }
     }
 }
@@ -70,8 +69,7 @@ impl Default for ServiceConfig {
 impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let engine = match self.engine {
-            EngineSelection::CpuBaseline => "cpu-baseline",
-            EngineSelection::CpuFast => "cpu-fast",
+            EngineSelection::Cpu => "cpu",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
             EngineSelection::Gpu => "gpu",
         };
@@ -1296,8 +1294,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Select engine
     #[allow(unused_mut)]
     let mut engine: Arc<dyn MinerEngine> = match config.engine {
-        EngineSelection::CpuBaseline => Arc::new(engine_cpu::BaselineCpuEngine::new()),
-        EngineSelection::CpuFast => Arc::new(engine_cpu::FastCpuEngine::new()),
+        EngineSelection::Cpu => Arc::new(engine_cpu::FastCpuEngine::new()),
         EngineSelection::CpuChainManipulator => {
             let mut eng = engine_cpu::ChainEngine::new();
             // Apply optional throttle parameters if provided.
@@ -1338,8 +1335,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         "🚀 Mining engine selected: {} ({})",
         engine.name(),
         match config.engine {
-            EngineSelection::CpuBaseline => "Single-threaded CPU reference implementation",
-            EngineSelection::CpuFast => "Optimized multi-threaded CPU mining",
+            EngineSelection::Cpu => "Optimized multi-threaded CPU mining",
             EngineSelection::CpuChainManipulator => "Throttled CPU mining for difficulty control",
             EngineSelection::Gpu => "High-performance GPU mining",
         }
@@ -1539,7 +1535,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mining_state_add_get_remove() {
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
         let state = MiningService::new(2, engine, 2000, None);
 
         let job = MiningJob::new(
@@ -1558,7 +1554,7 @@ mod tests {
     async fn test_job_lifecycle_fail() {
         // Test that a job fails if no nonce is found (threshold too strict).
         // To make this deterministic, avoid nonce=0, which some math paths treat as special.
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
         let state = MiningService::new(1, engine, 2000, None);
         state.start_mining_loop().await;
 
@@ -1656,7 +1652,7 @@ mod tests {
     #[tokio::test]
     async fn test_job_lifecycle_success() {
         // Test that a job completes successfully
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
         let state = MiningService::new(2, engine, 2000, None);
         state.start_mining_loop().await;
 
@@ -1779,8 +1775,7 @@ mod tests {
     async fn http_endpoints_handle_basic_flows() {
         use warp::test::request;
 
-        let engine: Arc<dyn engine_cpu::MinerEngine> =
-            Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let engine: Arc<dyn engine_cpu::MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
         let service = MiningService::new(2, engine, 1000, None);
         service.start_mining_loop().await;
 
@@ -1835,7 +1830,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         // Baseline engine, hard difficulty to force Exhausted path for the sub-range
-        let engine = engine_cpu::BaselineCpuEngine::new();
+        let engine = engine_cpu::FastCpuEngine::new();
         let header = [3u8; 32];
         let difficulty = U512::MAX;
         let ctx = engine.prepare_context(header, difficulty);

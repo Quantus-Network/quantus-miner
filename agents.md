@@ -113,7 +113,7 @@ Use the stable toolchain.
   - cargo test --workspace --locked
 
 - Runtime sanity (typical)
-  - cargo run -p miner-cli -- --engine cpu-fast --workers <n>
+  - cargo run -p miner-cli -- --engine cpu --workers <n>
   - Check logs and metrics if enabled (see below)
 
 Notes:
@@ -138,15 +138,14 @@ If PRs introduce new feature flags or targets, document how CI should build them
 ## Engine selection policy (naming and runtime)
 
 Naming:
-- CPU engines use Cpu-prefixed variants in the CLI to avoid future collisions and clarify behavior:
-  - cpu-baseline, cpu-fast, cpu-chain-manipulator
-- GPU placeholders are exposed for UX and planning but currently unimplemented:
-  - gpu-cuda, gpu-opencl
+- CPU engines use simple, clear names:
+  - cpu, cpu-chain-manipulator
+- GPU engine is implemented and functional:
+  - gpu for cross-platform GPU mining using WGPU
 
 Runtime behavior:
-- If a GPU engine is selected, the service logs a clear error and exits non-zero:
-  - “engine 'gpu-cuda' is not implemented yet; use cpu-fast or cpu-baseline.”
-- Reviewers expect this behavior to remain until real GPU engines are implemented.
+- All engines are fully implemented and production-ready
+- GPU engine automatically detects and optimizes for available hardware
 
 ---
 

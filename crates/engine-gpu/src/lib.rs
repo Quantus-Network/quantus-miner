@@ -374,6 +374,9 @@ impl MinerEngine for GpuEngine {
 
         // Collect command buffers to submit in batches
         let mut command_buffers = Vec::new();
+        let batch_creation_start = std::time::Instant::now();
+        let mut total_buffer_write_time = std::time::Duration::ZERO;
+        let mut batch_count = 0u32;
 
         while current_start <= range.end {
             if cancel.load(Ordering::Relaxed) {
@@ -397,6 +400,7 @@ impl MinerEngine for GpuEngine {
                 .min(actual_workgroups);
 
             // Update start nonce (simplified conversion)
+            let buffer_write_start = std::time::Instant::now();
             let start_nonce_bytes = current_start.to_little_endian();
             gpu_ctx
                 .queue
@@ -406,6 +410,7 @@ impl MinerEngine for GpuEngine {
             gpu_ctx
                 .queue
                 .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
+            total_buffer_write_time += buffer_write_start.elapsed();
 
             // Create command buffer for this batch
             let mut encoder = gpu_ctx
@@ -433,7 +438,18 @@ impl MinerEngine for GpuEngine {
 
             hash_count += current_batch_nonces;
             current_start = current_start + U512::from(current_batch_nonces);
+            batch_count += 1;
         }
+
+        let batch_creation_time = batch_creation_start.elapsed();
+        log::info!(
+            target: "gpu_engine",
+            "Created {} GPU batches in {:.2}ms (buffer writes: {:.2}ms, avg {:.3}ms per batch)",
+            batch_count,
+            batch_creation_time.as_secs_f64() * 1000.0,
+            total_buffer_write_time.as_secs_f64() * 1000.0,
+            batch_creation_time.as_secs_f64() * 1000.0 / batch_count as f64
+        );
 
         // Submit ALL work at once - no intermediate syncs for maximum GPU utilization
         let batch_count = command_buffers.len();
@@ -444,20 +460,42 @@ impl MinerEngine for GpuEngine {
         );
         let submit_start = std::time::Instant::now();
         gpu_ctx.queue.submit(command_buffers.drain(..));
+        let submit_time = submit_start.elapsed();
+
+        log::info!(
+            target: "gpu_engine",
+            "GPU work submitted in {:.2}ms, now waiting for results...",
+            submit_time.as_secs_f64() * 1000.0
+        );
 
         // Single sync point at the end
+        let sync_start = std::time::Instant::now();
         let buffer_slice = gpu_ctx.staging_buffer.slice(..);
+        let map_start = std::time::Instant::now();
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+        let map_time = map_start.elapsed();
+
+        let poll_start = std::time::Instant::now();
         let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
-        let gpu_compute_time = submit_start.elapsed();
+        let poll_time = poll_start.elapsed();
+        let total_gpu_time = submit_start.elapsed();
+
         log::info!(
             target: "gpu_engine",
-            "GPU compute completed in {:.2}ms ({:.0} hashes/sec)",
-            gpu_compute_time.as_secs_f64() * 1000.0,
-            hash_count as f64 / gpu_compute_time.as_secs_f64()
+            "GPU timing breakdown: submit={:.2}ms, map_async={:.2}ms, poll={:.2}ms, total={:.2}ms",
+            submit_time.as_secs_f64() * 1000.0,
+            map_time.as_secs_f64() * 1000.0,
+            poll_time.as_secs_f64() * 1000.0,
+            total_gpu_time.as_secs_f64() * 1000.0
+        );
+        log::info!(
+            target: "gpu_engine",
+            "GPU performance: {:.0} hashes/sec, {:.2} ns/hash",
+            hash_count as f64 / total_gpu_time.as_secs_f64(),
+            total_gpu_time.as_nanos() as f64 / hash_count as f64
         );
 
         let data = buffer_slice.get_mapped_range();
