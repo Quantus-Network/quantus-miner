@@ -266,12 +266,17 @@ impl MinerEngine for GpuEngine {
         let batch_size = 65535 * 256; // ~16.7M hashes per batch (max hardware allows)
         let mut hash_count = 0u64;
 
+        // Batch multiple dispatches to reduce sync overhead
+        const BATCHES_PER_SYNC: u32 = 4; // Process 4 batches before checking results
+        const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
+        const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
+
         #[cfg(feature = "metrics")]
         {
             let device_id = "gpu-0";
-            metrics::set_gpu_batch_size(device_id, batch_size as f64);
+            metrics::set_gpu_batch_size(device_id, (batch_size * BATCHES_PER_SYNC) as f64);
             let workgroups = (batch_size + 255) / 256;
-            metrics::set_gpu_workgroups(device_id, workgroups as f64);
+            metrics::set_gpu_workgroups(device_id, (workgroups * BATCHES_PER_SYNC) as f64);
         }
 
         while current_start <= range.end {
@@ -287,8 +292,7 @@ impl MinerEngine for GpuEngine {
                 batch_size
             };
 
-            // Inline batch processing - no separate function needed
-            // Update Start Nonce Buffer (simplified conversion)
+            // Submit GPU work without waiting
             let start_nonce_bytes = current_start.to_little_endian();
             let start_nonce_u32s: &[u32] = bytemuck::cast_slice(&start_nonce_bytes);
             gpu_ctx.queue.write_buffer(
@@ -297,14 +301,12 @@ impl MinerEngine for GpuEngine {
                 bytemuck::cast_slice(start_nonce_u32s),
             );
 
-            // Reset Results Buffer (use static array instead of Vec)
-            const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
-            const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
+            // Reset Results Buffer
             gpu_ctx
                 .queue
                 .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
 
-            // Simplified encoder setup
+            // Submit GPU work
             let mut encoder = gpu_ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -327,43 +329,47 @@ impl MinerEngine for GpuEngine {
             );
             gpu_ctx.queue.submit(Some(encoder.finish()));
 
-            // Simplified synchronous buffer read
-            let buffer_slice = gpu_ctx.staging_buffer.slice(..);
-            buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-            gpu_ctx.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
+            // Only sync every few batches to reduce overhead
+            hash_count += current_batch_size as u64;
+            current_start = current_start + U512::from(current_batch_size);
 
-            let data = buffer_slice.get_mapped_range();
-            let result_u32s: &[u32] = bytemuck::cast_slice(&data);
+            // Check for results less frequently
+            if hash_count % (batch_size * BATCHES_PER_SYNC) as u64 == 0 || current_start > range.end
+            {
+                let buffer_slice = gpu_ctx.staging_buffer.slice(..);
+                buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+                let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
 
-            if result_u32s[0] != 0 {
-                // Direct conversion from u32 slice to U512
-                let nonce_u32s = &result_u32s[1..17];
-                let hash_u32s = &result_u32s[17..33];
+                let data = buffer_slice.get_mapped_range();
+                let result_u32s: &[u32] = bytemuck::cast_slice(&data);
 
-                let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
-                let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
-                let work = nonce.to_big_endian();
+                if result_u32s[0] != 0 {
+                    // Direct conversion from u32 slice to U512
+                    let nonce_u32s = &result_u32s[1..17];
+                    let hash_u32s = &result_u32s[17..33];
 
-                log::info!("GPU 0 found solution! Nonce: {}, Hash: {:x}", nonce, hash);
+                    let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
+                    let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
+                    let work = nonce.to_big_endian();
+
+                    log::info!("GPU 0 found solution! Nonce: {}, Hash: {:x}", nonce, hash);
+
+                    drop(data);
+                    gpu_ctx.staging_buffer.unmap();
+
+                    return EngineStatus::Found {
+                        candidate: Candidate { nonce, work, hash },
+                        hash_count,
+                        origin: FoundOrigin::GpuG1,
+                    };
+                }
 
                 drop(data);
                 gpu_ctx.staging_buffer.unmap();
-
-                return EngineStatus::Found {
-                    candidate: Candidate { nonce, work, hash },
-                    hash_count: hash_count + current_batch_size as u64,
-                    origin: FoundOrigin::GpuG1,
-                };
             }
-
-            drop(data);
-            gpu_ctx.staging_buffer.unmap();
-
-            hash_count += current_batch_size as u64;
-            current_start = current_start + U512::from(current_batch_size);
         }
 
         log::debug!(target: "gpu_engine", "GPU 0 finished.");
