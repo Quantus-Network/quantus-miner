@@ -194,7 +194,7 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
-@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads, nonces_per_thread, work_per_batch, threads_per_workgroup]
+@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads (logical), nonces_per_thread, batch_work (logical nonces in this dispatch), threads_per_workgroup]
 
 // Goldilocks field element represented as [limb0, limb1, limb2, limb3]
 // where the value is limb0 + limb1*2^16 + limb2*2^32 + limb3*2^48
@@ -938,9 +938,9 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let thread_id = global_id.x;
     // Read actual dispatch configuration from buffer
-    let total_threads = dispatch_config[0];        // Logical total threads for this batch
-    let nonces_per_thread = dispatch_config[1];    // Nonces per thread
-    let max_logical_nonces = dispatch_config[2];   // Total logical nonces in this batch (batch_work)
+    let total_threads = dispatch_config[0];        // Total logical threads in this dispatch
+    let nonces_per_thread = dispatch_config[1];    // Nonces processed by each thread
+    let batch_work = dispatch_config[2];           // Number of logical nonces this dispatch is responsible for
 
     // Guard against threads beyond configured total_threads to avoid overlapping work
     if (thread_id >= total_threads) {
@@ -949,10 +949,10 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Work coarsening: each thread processes multiple nonces to reduce batch overhead
     for (var nonce_offset = 0u; nonce_offset < nonces_per_thread; nonce_offset++) {
-        // Compute logical nonce index within this batch and avoid stepping past batch_work
+        // Compute logical nonce index within this dispatch and avoid stepping past batch_work
         let logical_index = thread_id + nonce_offset * total_threads;
-        if (logical_index >= max_logical_nonces) {
-            // This thread has exhausted its share in this batch.
+        if (logical_index >= batch_work) {
+            // This thread has exhausted its share of logical nonces for this dispatch.
             return;
         }
 

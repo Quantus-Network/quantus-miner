@@ -17,7 +17,6 @@ struct GpuContext {
     adapter_info: wgpu::AdapterInfo,
     // Cached vendor configuration
     optimal_workgroups: u32,
-    estimated_cores: u32,
     // Reusable buffers
     header_buffer: wgpu::Buffer,
     target_buffer: wgpu::Buffer,
@@ -192,8 +191,7 @@ impl GpuEngine {
             log::debug!(target: "gpu_engine", "Buffers and bind group initialized for adapter {}", i);
 
             // Calculate vendor-specific configuration once during initialization
-            let (optimal_workgroups, estimated_cores) =
-                Self::get_vendor_specific_dispatch(&info, &device);
+            let optimal_workgroups = Self::get_vendor_specific_dispatch(&info, &device);
 
             contexts.push(Arc::new(GpuContext {
                 device,
@@ -202,7 +200,6 @@ impl GpuEngine {
                 bind_group,
                 adapter_info: info,
                 optimal_workgroups,
-                estimated_cores,
                 header_buffer,
                 target_buffer,
                 start_nonce_buffer,
@@ -330,10 +327,7 @@ impl MinerEngine for GpuEngine {
             nonces_per_thread
         );
 
-        // Track how many nonces this engine has assigned within the requested range so
-        // we don't keep dispatching once we've conceptually covered the whole window.
-        let mut assigned = 0u64;
-
+        // Track how many nonces this engine has processed within the requested range.
         let mut hash_count = 0u64;
 
         // Eliminate intermediate syncs - only sync at end or when solution found
@@ -351,14 +345,14 @@ impl MinerEngine for GpuEngine {
         let mut batch_count = 0u32;
         let total_start = std::time::Instant::now();
 
-        while assigned < total_range_size && current_start <= range.end {
+        while hash_count < total_range_size && current_start <= range.end {
             if cancel.load(Ordering::Relaxed) {
                 log::debug!(target: "gpu_engine", "GPU 0 cancelled.");
                 return EngineStatus::Cancelled { hash_count };
             }
 
             // Determine how much work to do in this batch, capped to the remaining range.
-            let remaining = total_range_size - assigned;
+            let remaining = total_range_size - hash_count;
             let batch_work = remaining.min(work_per_batch);
 
             // Update dispatch configuration for this batch:
@@ -455,27 +449,23 @@ impl MinerEngine for GpuEngine {
             // Advance to the next disjoint batch of nonces. We deliberately do not
             // require contiguity between CPU and GPU engines, only that batches are
             // non-overlapping within this engine.
-            hash_count += batch_work;
-            assigned = assigned.saturating_add(batch_work);
+            hash_count = hash_count.saturating_add(batch_work);
             current_start = current_start + U512::from(batch_work);
             batch_count += 1;
         }
 
         let total_time = total_start.elapsed();
-        let effective_hashes = hash_count.min(total_range_size);
         log::info!(
             target: "gpu_engine",
             "GPU finished range. Total time: {:.2}ms, Batches: {}, Hashes: {}, Performance: {:.0} hashes/sec",
             total_time.as_secs_f64() * 1000.0,
             batch_count,
-            effective_hashes,
-            effective_hashes as f64 / total_time.as_secs_f64()
+            hash_count,
+            hash_count as f64 / total_time.as_secs_f64()
         );
 
         log::debug!(target: "gpu_engine", "GPU 0 finished range.");
-        EngineStatus::Exhausted {
-            hash_count: effective_hashes,
-        }
+        EngineStatus::Exhausted { hash_count }
     }
 }
 
@@ -484,7 +474,7 @@ impl GpuEngine {
     fn get_vendor_specific_dispatch(
         adapter_info: &wgpu::AdapterInfo,
         device: &wgpu::Device,
-    ) -> (u32, u32) {
+    ) -> u32 {
         let limits = device.limits();
         let max_workgroups = limits.max_compute_workgroups_per_dimension.min(65535);
 
@@ -492,110 +482,90 @@ impl GpuEngine {
         let vendor_name = adapter_info.name.to_lowercase();
         let _device_name = adapter_info.device.to_string().to_lowercase();
 
-        // Vendor detection logic without logging (already logged during initialization)
         // Vendor-specific heuristics based on architecture knowledge
-        let (optimal_workgroups, estimated_cores) = if vendor_name.contains("nvidia")
-            || adapter_info.vendor == 4318
-        {
+        let optimal_workgroups = if vendor_name.contains("nvidia") || adapter_info.vendor == 4318 {
             // NVIDIA GPUs (vendor ID 0x10DE = 4318)
-            // CUDA cores benefit from high occupancy, typically thousands of simple cores
             let workgroups = if vendor_name.contains("rtx 40") || vendor_name.contains("rtx 4090") {
-                (max_workgroups / 8).max(4096) // High-end: RTX 4090 has 16384 CUDA cores
+                (max_workgroups / 8).max(4096)
             } else if vendor_name.contains("rtx 30") || vendor_name.contains("rtx 20") {
-                (max_workgroups / 12).max(2048) // Mid-high-end: RTX 3080 has ~8700 CUDA cores
+                (max_workgroups / 12).max(2048)
             } else if vendor_name.contains("gtx") || vendor_name.contains("rtx 16") {
-                (max_workgroups / 16).max(1024) // Mid-range: GTX 1660 has 1408 CUDA cores
+                (max_workgroups / 16).max(1024)
             } else {
-                (max_workgroups / 20).max(512) // Lower-end NVIDIA
+                (max_workgroups / 20).max(512)
             };
-            let cores = workgroups * 256 / 2; // NVIDIA benefits from ~2x oversubscription
-            (workgroups, cores)
+            workgroups
         } else if vendor_name.contains("amd") || adapter_info.vendor == 4098 {
             // AMD GPUs (vendor ID 0x1002 = 4098)
-            // Compute Units with stream processors, different architecture than NVIDIA
             let workgroups = if vendor_name.contains("rx 7") || vendor_name.contains("rx 6900") {
-                (max_workgroups / 10).max(3072) // High-end: RX 7900 XTX has 6144 stream processors
+                (max_workgroups / 10).max(3072)
             } else if vendor_name.contains("rx 6") || vendor_name.contains("rx 5700") {
-                (max_workgroups / 14).max(2048) // Mid-high-end: RX 6800 XT has 4608 stream processors
+                (max_workgroups / 14).max(2048)
             } else if vendor_name.contains("rx 5") || vendor_name.contains("rx 580") {
-                (max_workgroups / 18).max(1024) // Mid-range: RX 580 has 2304 stream processors
+                (max_workgroups / 18).max(1024)
             } else {
-                (max_workgroups / 24).max(512) // Lower-end AMD
+                (max_workgroups / 24).max(512)
             };
-            let cores = workgroups * 256 / 3; // AMD typically benefits from ~3x oversubscription
-            (workgroups, cores)
+            workgroups
         } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
             // Intel GPUs (vendor ID 0x8086 = 32902)
-            // Newer Xe architecture, different from traditional designs
             let workgroups = if vendor_name.contains("arc a7") || vendor_name.contains("arc a770") {
-                (max_workgroups / 12).max(2048) // High-end Arc A770
+                (max_workgroups / 12).max(2048)
             } else if vendor_name.contains("arc a5") || vendor_name.contains("arc a380") {
-                (max_workgroups / 16).max(1024) // Mid-range Arc A380
+                (max_workgroups / 16).max(1024)
             } else if vendor_name.contains("iris xe") {
-                (max_workgroups / 20).max(512) // Integrated Iris Xe
+                (max_workgroups / 20).max(512)
             } else {
-                (max_workgroups / 24).max(256) // Other Intel integrated
+                (max_workgroups / 24).max(256)
             };
-            let cores = workgroups * 256 / 4; // Conservative approach for Intel
-            (workgroups, cores)
+            workgroups
         } else if adapter_info.backend == wgpu::Backend::Metal {
             // Apple GPUs (detected by Metal backend)
-            // Apple GPU cores are complex, powerful units - NOT like NVIDIA CUDA cores
-            // Each Apple GPU core can handle many operations in parallel
             let (gpu_cores, workgroups) = if vendor_name.contains("m4 max") {
-                (40, 800) // M4 Max: 40 GPU cores, ~20x workgroups
+                (40, 800)
             } else if vendor_name.contains("m4 pro") {
-                (20, 400) // M4 Pro: 20 GPU cores, ~20x workgroups
+                (20, 400)
             } else if vendor_name.contains("m4") {
-                (10, 200) // M4: 10 GPU cores, ~20x workgroups
+                (10, 200)
             } else if vendor_name.contains("m3 max") {
-                (40, 800) // M3 Max: 40 GPU cores
+                (40, 800)
             } else if vendor_name.contains("m3 pro") {
-                (18, 360) // M3 Pro: 18 GPU cores
+                (18, 360)
             } else if vendor_name.contains("m3") {
-                (10, 200) // M3: 10 GPU cores
+                (10, 200)
             } else if vendor_name.contains("m2 ultra") {
-                (76, 1520) // M2 Ultra: 76 GPU cores
+                (76, 1520)
             } else if vendor_name.contains("m2 max") {
-                (38, 760) // M2 Max: 38 GPU cores
+                (38, 760)
             } else if vendor_name.contains("m2 pro") {
-                (19, 380) // M2 Pro: 19 GPU cores
+                (19, 380)
             } else if vendor_name.contains("m2") {
-                (10, 200) // M2: 10 GPU cores
+                (10, 200)
             } else if vendor_name.contains("m1 ultra") {
-                (64, 1280) // M1 Ultra: 64 GPU cores
+                (64, 1280)
             } else if vendor_name.contains("m1 max") {
-                (32, 640) // M1 Max: 32 GPU cores
+                (32, 640)
             } else if vendor_name.contains("m1 pro") {
-                (16, 320) // M1 Pro: 16 GPU cores
+                (16, 320)
             } else if vendor_name.contains("m1") {
-                (8, 160) // M1: 8 GPU cores
+                (8, 160)
             } else {
-                (8, 160) // Conservative fallback for unknown Apple GPU
+                (8, 160)
             };
 
-            // Clamp to reasonable limits
             let clamped_workgroups = workgroups.min(max_workgroups / 4).max(64);
-
-            // Each Apple GPU core is roughly equivalent to 64-128 "effective processing units"
-            // This gives us a realistic estimate of parallel processing capability
-            let estimated_cores = gpu_cores * 96; // Conservative middle ground
-
-            // Apple GPU configuration calculated
-            (clamped_workgroups, estimated_cores)
+            let _ = gpu_cores; // gpu_cores currently unused but kept for potential future tuning
+            clamped_workgroups
         } else {
             // Unknown/Generic GPU - use conservative defaults
-            // Unknown/Generic GPU - use conservative defaults (logging moved to initialization)
             let workgroups = (max_workgroups / 16).max(512);
-            let cores = workgroups * 256 / 4;
-            (workgroups, cores)
+            workgroups
         };
 
         log::info!(target: "gpu_engine", "Vendor-specific dispatch configuration:");
         log::info!(target: "gpu_engine", "  Max hardware workgroups: {}", max_workgroups);
         log::info!(target: "gpu_engine", "  Optimal workgroups: {}", optimal_workgroups);
-        log::info!(target: "gpu_engine", "  Estimated effective cores: {}", estimated_cores);
 
-        (optimal_workgroups, estimated_cores)
+        optimal_workgroups
     }
 }
