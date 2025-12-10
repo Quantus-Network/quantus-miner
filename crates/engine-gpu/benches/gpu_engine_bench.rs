@@ -333,9 +333,9 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_cpu_vs_gpu_large,
     bench_cpu_vs_gpu_small,
     bench_cpu_vs_gpu_medium,
+    bench_cpu_vs_gpu_large,
     bench_solution_finding,
     bench_throughput_per_second,
     bench_gpu_batch_efficiency

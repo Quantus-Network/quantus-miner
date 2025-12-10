@@ -302,59 +302,37 @@ impl MinerEngine for GpuEngine {
 
         let mut current_start = range.start;
 
-        // Get vendor-specific optimal dispatch configuration using stored adapter info
-
+        // Get vendor-specific optimal dispatch configuration using stored adapter info.
+        // We always dispatch the full set of optimal workgroups and let each thread
+        // process multiple nonces so that:
+        // - All nonces tested by this engine are disjoint (no overlap between batches)
+        // - We amortize GPU dispatch and synchronization overhead over a lot of work
         let threads_per_workgroup = 256u32; // Must match shader @workgroup_size
-        let nonces_per_thread = 1048576u32; // MASSIVE work per thread - each GPU thread processes 1M nonces for absolute maximum utilization
+
+        // Each thread will walk a strided sequence of nonces. We deliberately keep this
+        // moderate to avoid TDR / watchdog timeouts on consumer GPUs.
+        let nonces_per_thread = 256u32;
 
         // Use cached vendor-specific dispatch configuration
         let actual_workgroups = gpu_ctx.optimal_workgroups;
         let actual_threads = actual_workgroups * threads_per_workgroup;
-        let max_batch_size = actual_threads * nonces_per_thread;
+        let work_per_batch = actual_threads as u64 * nonces_per_thread as u64;
 
-        // Dispatch configuration already logged during initialization
-
-        // Use maximum possible batch sizes to minimize GPU dispatches
+        // Log effective configuration once per search_range
         let total_range_size = (range.end - range.start + 1).as_u64();
-        let min_gpu_batch_size = 1_000_000_000u32; // 1B nonces minimum - with 1M nonces per thread, we need absolutely massive batches
-
-        // Always use the largest possible batch size to minimize dispatches
-        let batch_size = if total_range_size <= min_gpu_batch_size as u64 {
-            // For ranges smaller than minimum, just do one batch covering the entire range
-            total_range_size as u32
-        } else {
-            // Use maximum batch size possible, prioritizing fewer dispatches
-            std::cmp::max(max_batch_size, min_gpu_batch_size)
-        };
-
         log::info!(
             target: "gpu_engine",
-            "GPU batch configuration: total_range={}, batch_size={}, min_batch_size={}, nonces_per_thread={}, workgroups={}, total_threads={}",
-            total_range_size, batch_size, min_gpu_batch_size, nonces_per_thread, actual_workgroups, actual_threads
-        );
-        log::info!(
-            target: "gpu_engine",
-            "GPU theoretical throughput: {} nonces per batch, estimated {} batches needed",
-            max_batch_size, (total_range_size as f64 / max_batch_size as f64).ceil() as u32
-        );
-        log::info!(
-            target: "gpu_engine",
-            "GPU EXTREME parallelism: {} threads × {}M nonces/thread = {}M total parallel nonces per dispatch",
-            actual_threads, nonces_per_thread / 1_000_000, (actual_threads as u64 * nonces_per_thread as u64) / 1_000_000
-        );
-
-        // Write dispatch configuration to GPU buffer
-        let dispatch_config = [
-            actual_threads,
-            nonces_per_thread,
+            "GPU batch configuration: total_range={} nonces, work_per_batch={} ({} workgroups × {} threads × {} nonces/thread)",
+            total_range_size,
+            work_per_batch,
             actual_workgroups,
             threads_per_workgroup,
-        ];
-        gpu_ctx.queue.write_buffer(
-            &gpu_ctx.dispatch_config_buffer,
-            0,
-            bytemuck::cast_slice(&dispatch_config),
+            nonces_per_thread
         );
+
+        // Track how many nonces this engine has assigned within the requested range so
+        // we don't keep dispatching once we've conceptually covered the whole window.
+        let mut assigned = 0u64;
 
         let mut hash_count = 0u64;
 
@@ -362,45 +340,43 @@ impl MinerEngine for GpuEngine {
         const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
         const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
 
-        // Submit all work asynchronously and only sync at the end for maximum GPU utilization
-
         #[cfg(feature = "metrics")]
         {
             let device_id = "gpu-0";
-            metrics::set_gpu_batch_size(device_id, batch_size as f64);
+            metrics::set_gpu_batch_size(device_id, work_per_batch as f64);
             let workgroups = actual_workgroups; // Use actual workgroups for this GPU
             metrics::set_gpu_workgroups(device_id, workgroups as f64);
         }
 
-        // Collect command buffers to submit in batches
-        let mut command_buffers = Vec::new();
-        let batch_creation_start = std::time::Instant::now();
-        let mut total_buffer_write_time = std::time::Duration::ZERO;
         let mut batch_count = 0u32;
+        let total_start = std::time::Instant::now();
 
-        while current_start <= range.end {
+        while assigned < total_range_size && current_start <= range.end {
             if cancel.load(Ordering::Relaxed) {
                 log::debug!(target: "gpu_engine", "GPU 0 cancelled.");
                 return EngineStatus::Cancelled { hash_count };
             }
 
-            // Calculate batch size - either full batch or remaining in range
-            let remaining_in_range = (range.end - current_start + 1).as_u64();
-            let current_batch_nonces = if remaining_in_range < batch_size as u64 {
-                remaining_in_range
-            } else {
-                batch_size as u64
-            };
+            // Determine how much work to do in this batch, capped to the remaining range.
+            let remaining = total_range_size - assigned;
+            let batch_work = remaining.min(work_per_batch);
 
-            // Calculate workgroups needed for this batch
-            let threads_needed = ((current_batch_nonces + nonces_per_thread as u64 - 1)
-                / nonces_per_thread as u64) as u32;
-            let workgroups_needed = ((threads_needed + threads_per_workgroup - 1)
-                / threads_per_workgroup)
-                .min(actual_workgroups);
+            // Update dispatch configuration for this batch:
+            // [total_threads, nonces_per_thread, batch_work, threads_per_workgroup]
+            let dispatch_config = [
+                actual_threads,
+                nonces_per_thread,
+                batch_work as u32,
+                threads_per_workgroup,
+            ];
+            gpu_ctx.queue.write_buffer(
+                &gpu_ctx.dispatch_config_buffer,
+                0,
+                bytemuck::cast_slice(&dispatch_config),
+            );
 
-            // Update start nonce (simplified conversion)
-            let buffer_write_start = std::time::Instant::now();
+            // Update start nonce for this batch. Each batch walks a disjoint window of
+            // size `batch_work` starting from `current_start`.
             let start_nonce_bytes = current_start.to_little_endian();
             gpu_ctx
                 .queue
@@ -410,7 +386,6 @@ impl MinerEngine for GpuEngine {
             gpu_ctx
                 .queue
                 .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
-            total_buffer_write_time += buffer_write_start.elapsed();
 
             // Create command buffer for this batch
             let mut encoder = gpu_ctx
@@ -423,7 +398,9 @@ impl MinerEngine for GpuEngine {
                 });
                 cpass.set_pipeline(&gpu_ctx.pipeline);
                 cpass.set_bind_group(0, &gpu_ctx.bind_group, &[]);
-                cpass.dispatch_workgroups(workgroups_needed, 1, 1);
+                // Always dispatch the full optimal configuration; each thread will
+                // process `nonces_per_thread` nonces.
+                cpass.dispatch_workgroups(actual_workgroups, 1, 1);
             }
             encoder.copy_buffer_to_buffer(
                 &gpu_ctx.results_buffer,
@@ -433,100 +410,72 @@ impl MinerEngine for GpuEngine {
                 RESULTS_SIZE as u64,
             );
 
-            // Store command buffer for batch submission
-            command_buffers.push(encoder.finish());
+            // Submit immediately to ensure correct buffer state
+            gpu_ctx.queue.submit(Some(encoder.finish()));
 
-            hash_count += current_batch_nonces;
-            current_start = current_start + U512::from(current_batch_nonces);
-            batch_count += 1;
-        }
+            // Check results for this batch
+            let buffer_slice = gpu_ctx.staging_buffer.slice(..);
+            buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
 
-        let batch_creation_time = batch_creation_start.elapsed();
-        log::info!(
-            target: "gpu_engine",
-            "Created {} GPU batches in {:.2}ms (buffer writes: {:.2}ms, avg {:.3}ms per batch)",
-            batch_count,
-            batch_creation_time.as_secs_f64() * 1000.0,
-            total_buffer_write_time.as_secs_f64() * 1000.0,
-            batch_creation_time.as_secs_f64() * 1000.0 / batch_count as f64
-        );
+            let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
 
-        // Submit ALL work at once - no intermediate syncs for maximum GPU utilization
-        let batch_count = command_buffers.len();
-        log::info!(
-            target: "gpu_engine",
-            "GPU submitting {} batches totaling {} hashes (avg {:.0} hashes/batch)",
-            batch_count, hash_count, hash_count as f64 / batch_count as f64
-        );
-        let submit_start = std::time::Instant::now();
-        gpu_ctx.queue.submit(command_buffers.drain(..));
-        let submit_time = submit_start.elapsed();
+            let data = buffer_slice.get_mapped_range();
+            let result_u32s: &[u32] = bytemuck::cast_slice(&data);
 
-        log::info!(
-            target: "gpu_engine",
-            "GPU work submitted in {:.2}ms, now waiting for results...",
-            submit_time.as_secs_f64() * 1000.0
-        );
+            if result_u32s[0] != 0 {
+                // Solution found!
+                let nonce_u32s = &result_u32s[1..17];
+                let hash_u32s = &result_u32s[17..33];
 
-        // Single sync point at the end
-        let sync_start = std::time::Instant::now();
-        let buffer_slice = gpu_ctx.staging_buffer.slice(..);
-        let map_start = std::time::Instant::now();
-        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-        let map_time = map_start.elapsed();
+                let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
+                let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
+                let work = nonce.to_big_endian();
 
-        let poll_start = std::time::Instant::now();
-        let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-        let poll_time = poll_start.elapsed();
-        let total_gpu_time = submit_start.elapsed();
+                log::info!("GPU 0 found solution! Nonce: {}, Hash: {:x}", nonce, hash);
 
-        log::info!(
-            target: "gpu_engine",
-            "GPU timing breakdown: submit={:.2}ms, map_async={:.2}ms, poll={:.2}ms, total={:.2}ms",
-            submit_time.as_secs_f64() * 1000.0,
-            map_time.as_secs_f64() * 1000.0,
-            poll_time.as_secs_f64() * 1000.0,
-            total_gpu_time.as_secs_f64() * 1000.0
-        );
-        log::info!(
-            target: "gpu_engine",
-            "GPU performance: {:.0} hashes/sec, {:.2} ns/hash",
-            hash_count as f64 / total_gpu_time.as_secs_f64(),
-            total_gpu_time.as_nanos() as f64 / hash_count as f64
-        );
+                drop(data);
+                gpu_ctx.staging_buffer.unmap();
 
-        let data = buffer_slice.get_mapped_range();
-        let result_u32s: &[u32] = bytemuck::cast_slice(&data);
-
-        if result_u32s[0] != 0 {
-            // Solution found!
-            let nonce_u32s = &result_u32s[1..17];
-            let hash_u32s = &result_u32s[17..33];
-
-            let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
-            let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
-            let work = nonce.to_big_endian();
-
-            log::info!("GPU 0 found solution! Nonce: {}, Hash: {:x}", nonce, hash);
+                let batch_hashes = (hash_count + batch_work).min(total_range_size);
+                return EngineStatus::Found {
+                    candidate: Candidate { nonce, work, hash },
+                    // Approximate: we assume a uniform distribution within the batch and
+                    // cap reported work to the requested range length.
+                    hash_count: batch_hashes,
+                    origin: FoundOrigin::GpuG1,
+                };
+            }
 
             drop(data);
             gpu_ctx.staging_buffer.unmap();
 
-            return EngineStatus::Found {
-                candidate: Candidate { nonce, work, hash },
-                hash_count,
-                origin: FoundOrigin::GpuG1,
-            };
+            // Advance to the next disjoint batch of nonces. We deliberately do not
+            // require contiguity between CPU and GPU engines, only that batches are
+            // non-overlapping within this engine.
+            hash_count += batch_work;
+            assigned = assigned.saturating_add(batch_work);
+            current_start = current_start + U512::from(batch_work);
+            batch_count += 1;
         }
 
-        drop(data);
-        gpu_ctx.staging_buffer.unmap();
+        let total_time = total_start.elapsed();
+        let effective_hashes = hash_count.min(total_range_size);
+        log::info!(
+            target: "gpu_engine",
+            "GPU finished range. Total time: {:.2}ms, Batches: {}, Hashes: {}, Performance: {:.0} hashes/sec",
+            total_time.as_secs_f64() * 1000.0,
+            batch_count,
+            effective_hashes,
+            effective_hashes as f64 / total_time.as_secs_f64()
+        );
 
         log::debug!(target: "gpu_engine", "GPU 0 finished range.");
-        EngineStatus::Exhausted { hash_count }
+        EngineStatus::Exhausted {
+            hash_count: effective_hashes,
+        }
     }
 }
 

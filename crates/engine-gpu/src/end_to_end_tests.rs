@@ -1,8 +1,8 @@
-use pow_core::{JobContext, hash_from_nonce};
+use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
-use wgpu::util::DeviceExt;
 use rand::Rng;
 use rand::SeedableRng;
+use wgpu::util::DeviceExt;
 
 pub async fn test_end_to_end_mining(
     device: &wgpu::Device,
@@ -72,13 +72,29 @@ pub async fn test_end_to_end_mining(
     let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Results Buffer"),
         size: results_size as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
     // Clear results buffer
     let zeros = vec![0u8; results_size];
     queue.write_buffer(&results_buffer, 0, &zeros);
+
+    // Dispatch config buffer: [total_threads, nonces_per_thread, work_per_batch, threads_per_workgroup]
+    let dispatch_config_data: [u32; 4] = [256, 1, 1, 256];
+    let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Dispatch Config Buffer"),
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(
+        &dispatch_config_buffer,
+        0,
+        bytemuck::cast_slice(&dispatch_config_data),
+    );
 
     // Load Shader
     let shader_source = include_str!("mining.wgsl");
@@ -117,6 +133,10 @@ pub async fn test_end_to_end_mining(
                 binding: 3,
                 resource: target_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: dispatch_config_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -150,10 +170,12 @@ pub async fn test_end_to_end_mining(
     let (sender, receiver) = futures::channel::oneshot::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
 
-    device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    }).unwrap();
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .unwrap();
 
     if let Ok(Ok(())) = receiver.await {
         let data = buffer_slice.get_mapped_range();
