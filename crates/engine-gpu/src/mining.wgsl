@@ -597,44 +597,33 @@ fn external_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
     // First apply the 4x4 MDS matrix to each consecutive 4 elements
     for (var chunk = 0u; chunk < 3u; chunk++) {
         let offset = chunk * 4u;
-        var chunk_state: array<GoldilocksField, 4>;
+        var x: array<GoldilocksField, 4>;
 
         // Copy chunk
         for (var i = 0u; i < 4u; i++) {
-            chunk_state[i] = (*state)[offset + i];
+            x[i] = (*state)[offset + i];
         }
 
-        // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
-        let two = gf_from_limbs(2u, 0u, 0u, 0u);
-        let three = gf_from_limbs(3u, 0u, 0u, 0u);
+        // Optimized 4x4 MDS application using only additions and doubles,
+        // matching apply_external_linear_layer_to_chunk in the CPU implementation.
+        let t01 = gf_add(x[0], x[1]);
+        let t23 = gf_add(x[2], x[3]);
+        let t0123 = gf_add(t01, t23);
+        let t01123 = gf_add(t0123, x[1]);
+        let t01233 = gf_add(t0123, x[3]);
 
-        // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
-        let new_0 = gf_add(gf_add(gf_add(
-            gf_mul(chunk_state[0], two),
-            gf_mul(chunk_state[1], three)),
-            chunk_state[2]),
-            chunk_state[3]);
+        let two_x0 = gf_add(x[0], x[0]);
+        let two_x2 = gf_add(x[2], x[2]);
 
-        // new[1] = 1*x[0] + 2*x[1] + 3*x[2] + 1*x[3]
-        let new_1 = gf_add(gf_add(gf_add(
-            chunk_state[0],
-            gf_mul(chunk_state[1], two)),
-            gf_mul(chunk_state[2], three)),
-            chunk_state[3]);
-
-        // new[2] = 1*x[0] + 1*x[1] + 2*x[2] + 3*x[3]
-        let new_2 = gf_add(gf_add(gf_add(
-            chunk_state[0],
-            chunk_state[1]),
-            gf_mul(chunk_state[2], two)),
-            gf_mul(chunk_state[3], three));
-
-        // new[3] = 3*x[0] + 1*x[1] + 1*x[2] + 2*x[3]
-        let new_3 = gf_add(gf_add(gf_add(
-            gf_mul(chunk_state[0], three),
-            chunk_state[1]),
-            chunk_state[2]),
-            gf_mul(chunk_state[3], two));
+        // The order of updates matches the reference algorithm:
+        // x[3] = t01233 + 2*x[0]
+        // x[1] = t01123 + 2*x[2]
+        // x[0] = t01123 + t01
+        // x[2] = t01233 + t23
+        let new_3 = gf_add(t01233, two_x0);
+        let new_1 = gf_add(t01123, two_x2);
+        let new_0 = gf_add(t01123, t01);
+        let new_2 = gf_add(t01233, t23);
 
         // Copy back
         (*state)[offset + 0u] = new_0;
