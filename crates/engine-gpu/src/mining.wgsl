@@ -194,7 +194,7 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
-@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads (logical), nonces_per_thread, batch_work (logical nonces in this dispatch), threads_per_workgroup]
+@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads (logical), nonces_per_thread, total_nonces (logical nonces in this dispatch), threads_per_workgroup]
 
 // Goldilocks field element represented as [limb0, limb1, limb2, limb3]
 // where the value is limb0 + limb1*2^16 + limb2*2^32 + limb3*2^48
@@ -937,37 +937,38 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let thread_id = global_id.x;
-    // Read actual dispatch configuration from buffer
+    // Read dispatch configuration from buffer
     let total_threads = dispatch_config[0];        // Total logical threads in this dispatch
     let nonces_per_thread = dispatch_config[1];    // Nonces processed by each thread
-    let batch_work = dispatch_config[2];           // Number of logical nonces this dispatch is responsible for
+    let total_nonces = dispatch_config[2];         // Total logical nonces this dispatch should cover
 
-    // Guard against threads beyond configured total_threads to avoid overlapping work
+    // Guard against threads beyond configured total_threads
     if (thread_id >= total_threads) {
         return;
     }
 
-    // Work coarsening: each thread processes multiple nonces to reduce batch overhead
-    for (var nonce_offset = 0u; nonce_offset < nonces_per_thread; nonce_offset++) {
-        // Compute logical nonce index within this dispatch and avoid stepping past batch_work
-        let logical_index = thread_id + nonce_offset * total_threads;
-        if (logical_index >= batch_work) {
-            // This thread has exhausted its share of logical nonces for this dispatch.
-            return;
+    // Base logical index for this thread
+    let base_index = thread_id * nonces_per_thread;
+
+    // Work coarsening: each thread processes a contiguous block of nonces
+    for (var j = 0u; j < nonces_per_thread; j = j + 1u) {
+        let logical_index = base_index + j;
+        if (logical_index >= total_nonces) {
+            break;
         }
 
-        // Check if solution already found (early exit for entire batch)
+        // Check if solution already found (early exit for entire dispatch)
         if (atomicLoad(&results[0]) != 0u) {
             return;
         }
 
-        // Calculate this thread's current nonce: start_nonce + thread_id + (nonce_offset * total_threads)
+        // current_nonce = start_nonce + logical_index
         var current_nonce: array<u32, 16>;
         var carry: u32 = 0u;
 
-        // Start with base: start_nonce + thread_id
+        // Add logical_index into the low limb and propagate carry through the U512 nonce
         let val0 = start_nonce[0];
-        let sum0 = val0 + thread_id;
+        let sum0 = val0 + logical_index;
         current_nonce[0] = sum0;
         carry = select(0u, 1u, sum0 < val0);
 
@@ -977,23 +978,6 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let sum = val + carry;
             current_nonce[i] = sum;
             carry = select(0u, 1u, sum < val);
-        }
-
-        // Add (nonce_offset * total_threads) to current_nonce
-        if (nonce_offset > 0u) {
-            let offset_increment = nonce_offset * total_threads;
-            let val0_offset = current_nonce[0];
-            let sum0_offset = val0_offset + offset_increment;
-            current_nonce[0] = sum0_offset;
-            var offset_carry = select(0u, 1u, sum0_offset < val0_offset);
-
-            // Propagate carry from offset addition
-            for (var i = 1u; i < 16u && offset_carry != 0u; i++) {
-                let val_offset = current_nonce[i];
-                let sum_offset = val_offset + offset_carry;
-                current_nonce[i] = sum_offset;
-                offset_carry = select(0u, 1u, sum_offset < val_offset);
-            }
         }
 
         // Construct input (96 bytes = 24 u32s)
