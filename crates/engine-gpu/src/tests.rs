@@ -48,34 +48,27 @@ struct ExternalLinearLayerTestCase {
     expected: [GoldilocksField; 12],
 }
 
-// Represents the GoldilocksField in a WGSL-compatible format (four u16 limbs stored as u32s)
+// Represents the GoldilocksField in a WGSL-compatible format (two u32 limbs)
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct GfWgls {
     limb0: u32,
     limb1: u32,
-    limb2: u32,
-    limb3: u32,
 }
 
 impl From<GoldilocksField> for GfWgls {
     fn from(gf: GoldilocksField) -> Self {
         let val = gf.0;
         Self {
-            limb0: (val & 0xFFFF) as u32,
-            limb1: ((val >> 16) & 0xFFFF) as u32,
-            limb2: ((val >> 32) & 0xFFFF) as u32,
-            limb3: ((val >> 48) & 0xFFFF) as u32,
+            limb0: (val & 0xFFFFFFFF) as u32,
+            limb1: ((val >> 32) & 0xFFFFFFFF) as u32,
         }
     }
 }
 
 impl From<GfWgls> for GoldilocksField {
     fn from(gf: GfWgls) -> Self {
-        let val = (gf.limb0 as u64)
-            | ((gf.limb1 as u64) << 16)
-            | ((gf.limb2 as u64) << 32)
-            | ((gf.limb3 as u64) << 48);
+        let val = (gf.limb0 as u64) | ((gf.limb1 as u64) << 32);
         GoldilocksField::from_noncanonical_u64(val)
     }
 }
@@ -269,9 +262,8 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Test values with specific limb patterns
     for _ in 0..20 {
-        let limb2_val = (rng.gen::<u16>() as u64) << 32;
-        let limb3_val = (rng.gen::<u16>() as u64) << 48;
-        let a = GoldilocksField::from_canonical_u64(limb2_val | limb3_val);
+        let high_val = (rng.gen::<u32>() as u64) << 32;
+        let a = GoldilocksField::from_canonical_u64(high_val);
         let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
         vectors.push(GfMulTestCase {
             a,
@@ -2960,10 +2952,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         drop(data);
         staging_buffer.unmap();
 
-        let gpu_result_u64 = (result_wgls.limb0 as u64)
-            | ((result_wgls.limb1 as u64) << 16)
-            | ((result_wgls.limb2 as u64) << 32)
-            | ((result_wgls.limb3 as u64) << 48);
+        let gpu_result_u64 = (result_wgls.limb0 as u64) | ((result_wgls.limb1 as u64) << 32);
         let gpu_result = GoldilocksField(gpu_result_u64);
 
         let expected_wgls: GfWgls = vector.expected.into();
@@ -2984,64 +2973,32 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
             // Analyze the operands
             let a_limbs = [
-                (vector.a.0 & 0xFFFF) as u32,
-                ((vector.a.0 >> 16) & 0xFFFF) as u32,
-                ((vector.a.0 >> 32) & 0xFFFF) as u32,
-                ((vector.a.0 >> 48) & 0xFFFF) as u32,
+                (vector.a.0 & 0xFFFFFFFF) as u32,
+                ((vector.a.0 >> 32) & 0xFFFFFFFF) as u32,
             ];
             let b_limbs = [
-                (vector.b.0 & 0xFFFF) as u32,
-                ((vector.b.0 >> 16) & 0xFFFF) as u32,
-                ((vector.b.0 >> 32) & 0xFFFF) as u32,
-                ((vector.b.0 >> 48) & 0xFFFF) as u32,
+                (vector.b.0 & 0xFFFFFFFF) as u32,
+                ((vector.b.0 >> 32) & 0xFFFFFFFF) as u32,
             ];
 
-            println!(
-                "  a: [{}, {}, {}, {}]",
-                a_limbs[0], a_limbs[1], a_limbs[2], a_limbs[3]
-            );
-            println!(
-                "  b: [{}, {}, {}, {}]",
-                b_limbs[0], b_limbs[1], b_limbs[2], b_limbs[3]
-            );
-
-            // Determine which multiplication path this should take
-            let a_high_nonzero = a_limbs[2] != 0 || a_limbs[3] != 0;
-            let b_high_nonzero = b_limbs[2] != 0 || b_limbs[3] != 0;
-            let path = if !a_high_nonzero && !b_high_nonzero {
-                "Step 1: Both small (high limbs=0)"
-            } else if !a_high_nonzero || !b_high_nonzero {
-                "Step 2: Mixed case (one has high limbs=0)"
-            } else {
-                "Step 3: Both large (both have high limbs≠0)"
-            };
-            println!("  Expected path: {}", path);
+            println!("  a: [{}, {}]", a_limbs[0], a_limbs[1]);
+            println!("  b: [{}, {}]", b_limbs[0], b_limbs[1]);
 
             println!(
-                "  CPU expected: 0x{:016x} [{}, {}, {}, {}]",
-                vector.expected.0,
-                expected_wgls.limb0,
-                expected_wgls.limb1,
-                expected_wgls.limb2,
-                expected_wgls.limb3
+                "  CPU expected: 0x{:016x} [{}, {}]",
+                vector.expected.0, expected_wgls.limb0, expected_wgls.limb1
             );
             println!(
-                "  GPU result:   0x{:016x} [{}, {}, {}, {}]",
-                gpu_result.0,
-                result_wgls.limb0,
-                result_wgls.limb1,
-                result_wgls.limb2,
-                result_wgls.limb3
+                "  GPU result:   0x{:016x} [{}, {}]",
+                gpu_result.0, result_wgls.limb0, result_wgls.limb1
             );
 
             // Show the exact differences
             let diff_limb0 = result_wgls.limb0 as i64 - expected_wgls.limb0 as i64;
             let diff_limb1 = result_wgls.limb1 as i64 - expected_wgls.limb1 as i64;
-            let diff_limb2 = result_wgls.limb2 as i64 - expected_wgls.limb2 as i64;
-            let diff_limb3 = result_wgls.limb3 as i64 - expected_wgls.limb3 as i64;
             println!(
-                "  Differences: limb0={:+}, limb1={:+}, limb2={:+}, limb3={:+}",
-                diff_limb0, diff_limb1, diff_limb2, diff_limb3
+                "  Differences: limb0={:+}, limb1={:+}",
+                diff_limb0, diff_limb1
             );
         }
     }
@@ -3086,8 +3043,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     chunk_state[3] = input_data[base_idx + 3u];
 
     // Apply 4x4 MDS matrix transformation: [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]]
-    let two = gf_from_limbs(2u, 0u, 0u, 0u);
-    let three = gf_from_limbs(3u, 0u, 0u, 0u);
+    let two = gf_from_limbs(2u, 0u);
+    let three = gf_from_limbs(3u, 0u);
 
     // new[0] = 2*x[0] + 3*x[1] + 1*x[2] + 1*x[3]
     let new_0 = gf_add(gf_add(gf_add(
@@ -3186,10 +3143,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             for &elem in &test_case.input {
                 let u64_val = elem.to_canonical_u64();
                 input_data.push(GfWgls {
-                    limb0: (u64_val & 0xFFFF) as u32,
-                    limb1: ((u64_val >> 16) & 0xFFFF) as u32,
-                    limb2: ((u64_val >> 32) & 0xFFFF) as u32,
-                    limb3: ((u64_val >> 48) & 0xFFFF) as u32,
+                    limb0: (u64_val & 0xFFFFFFFF) as u32,
+                    limb1: ((u64_val >> 32) & 0xFFFFFFFF) as u32,
                 });
             }
         }
@@ -3271,28 +3226,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         for (i, test_case) in chunk.iter().enumerate() {
             let gpu_result = [
                 GoldilocksField::from_noncanonical_u64(
-                    (gpu_results[i * 4].limb0 as u64 & 0xFFFF)
-                        | (((gpu_results[i * 4].limb1 as u64) & 0xFFFF) << 16)
-                        | (((gpu_results[i * 4].limb2 as u64) & 0xFFFF) << 32)
-                        | (((gpu_results[i * 4].limb3 as u64) & 0xFFFF) << 48),
+                    (gpu_results[i * 4 + 0].limb0 as u64)
+                        | ((gpu_results[i * 4 + 0].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (gpu_results[i * 4 + 1].limb0 as u64 & 0xFFFF)
-                        | (((gpu_results[i * 4 + 1].limb1 as u64) & 0xFFFF) << 16)
-                        | (((gpu_results[i * 4 + 1].limb2 as u64) & 0xFFFF) << 32)
-                        | (((gpu_results[i * 4 + 1].limb3 as u64) & 0xFFFF) << 48),
+                    (gpu_results[i * 4 + 1].limb0 as u64)
+                        | ((gpu_results[i * 4 + 1].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (gpu_results[i * 4 + 2].limb0 as u64 & 0xFFFF)
-                        | (((gpu_results[i * 4 + 2].limb1 as u64) & 0xFFFF) << 16)
-                        | (((gpu_results[i * 4 + 2].limb2 as u64) & 0xFFFF) << 32)
-                        | (((gpu_results[i * 4 + 2].limb3 as u64) & 0xFFFF) << 48),
+                    (gpu_results[i * 4 + 2].limb0 as u64)
+                        | ((gpu_results[i * 4 + 2].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (gpu_results[i * 4 + 3].limb0 as u64 & 0xFFFF)
-                        | (((gpu_results[i * 4 + 3].limb1 as u64) & 0xFFFF) << 16)
-                        | (((gpu_results[i * 4 + 3].limb2 as u64) & 0xFFFF) << 32)
-                        | (((gpu_results[i * 4 + 3].limb3 as u64) & 0xFFFF) << 48),
+                    (gpu_results[i * 4 + 3].limb0 as u64)
+                        | ((gpu_results[i * 4 + 3].limb1 as u64) << 32),
                 ),
             ];
 
@@ -3471,76 +3418,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         for (i, test_case) in chunk.iter().enumerate() {
             let gpu_result = [
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12].limb0 as u64)
-                        | ((results[i * 12].limb1 as u64) << 16)
-                        | ((results[i * 12].limb2 as u64) << 32)
-                        | ((results[i * 12].limb3 as u64) << 48),
+                    (results[i * 12].limb0 as u64) | ((results[i * 12].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 1].limb0 as u64)
-                        | ((results[i * 12 + 1].limb1 as u64) << 16)
-                        | ((results[i * 12 + 1].limb2 as u64) << 32)
-                        | ((results[i * 12 + 1].limb3 as u64) << 48),
+                    (results[i * 12 + 1].limb0 as u64) | ((results[i * 12 + 1].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 2].limb0 as u64)
-                        | ((results[i * 12 + 2].limb1 as u64) << 16)
-                        | ((results[i * 12 + 2].limb2 as u64) << 32)
-                        | ((results[i * 12 + 2].limb3 as u64) << 48),
+                    (results[i * 12 + 2].limb0 as u64) | ((results[i * 12 + 2].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 3].limb0 as u64)
-                        | ((results[i * 12 + 3].limb1 as u64) << 16)
-                        | ((results[i * 12 + 3].limb2 as u64) << 32)
-                        | ((results[i * 12 + 3].limb3 as u64) << 48),
+                    (results[i * 12 + 3].limb0 as u64) | ((results[i * 12 + 3].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 4].limb0 as u64)
-                        | ((results[i * 12 + 4].limb1 as u64) << 16)
-                        | ((results[i * 12 + 4].limb2 as u64) << 32)
-                        | ((results[i * 12 + 4].limb3 as u64) << 48),
+                    (results[i * 12 + 4].limb0 as u64) | ((results[i * 12 + 4].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 5].limb0 as u64)
-                        | ((results[i * 12 + 5].limb1 as u64) << 16)
-                        | ((results[i * 12 + 5].limb2 as u64) << 32)
-                        | ((results[i * 12 + 5].limb3 as u64) << 48),
+                    (results[i * 12 + 5].limb0 as u64) | ((results[i * 12 + 5].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 6].limb0 as u64)
-                        | ((results[i * 12 + 6].limb1 as u64) << 16)
-                        | ((results[i * 12 + 6].limb2 as u64) << 32)
-                        | ((results[i * 12 + 6].limb3 as u64) << 48),
+                    (results[i * 12 + 6].limb0 as u64) | ((results[i * 12 + 6].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 7].limb0 as u64)
-                        | ((results[i * 12 + 7].limb1 as u64) << 16)
-                        | ((results[i * 12 + 7].limb2 as u64) << 32)
-                        | ((results[i * 12 + 7].limb3 as u64) << 48),
+                    (results[i * 12 + 7].limb0 as u64) | ((results[i * 12 + 7].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 8].limb0 as u64)
-                        | ((results[i * 12 + 8].limb1 as u64) << 16)
-                        | ((results[i * 12 + 8].limb2 as u64) << 32)
-                        | ((results[i * 12 + 8].limb3 as u64) << 48),
+                    (results[i * 12 + 8].limb0 as u64) | ((results[i * 12 + 8].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
-                    (results[i * 12 + 9].limb0 as u64)
-                        | ((results[i * 12 + 9].limb1 as u64) << 16)
-                        | ((results[i * 12 + 9].limb2 as u64) << 32)
-                        | ((results[i * 12 + 9].limb3 as u64) << 48),
+                    (results[i * 12 + 9].limb0 as u64) | ((results[i * 12 + 9].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
                     (results[i * 12 + 10].limb0 as u64)
-                        | ((results[i * 12 + 10].limb1 as u64) << 16)
-                        | ((results[i * 12 + 10].limb2 as u64) << 32)
-                        | ((results[i * 12 + 10].limb3 as u64) << 48),
+                        | ((results[i * 12 + 10].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
                     (results[i * 12 + 11].limb0 as u64)
-                        | ((results[i * 12 + 11].limb1 as u64) << 16)
-                        | ((results[i * 12 + 11].limb2 as u64) << 32)
-                        | ((results[i * 12 + 11].limb3 as u64) << 48),
+                        | ((results[i * 12 + 11].limb1 as u64) << 32),
                 ),
             ];
 

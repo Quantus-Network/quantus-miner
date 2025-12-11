@@ -196,87 +196,106 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
 @group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads (logical), nonces_per_thread, total_nonces (logical nonces in this dispatch), threads_per_workgroup]
 
-// Goldilocks field element represented as [limb0, limb1, limb2, limb3]
-// where the value is limb0 + limb1*2^16 + limb2*2^32 + limb3*2^48
+// Goldilocks field element represented as [limb0, limb1]
+// where the value is limb0 + limb1*2^32
 struct GoldilocksField {
-    limb0: u32,  // Actually u16, but WGSL doesn't have native u16
+    limb0: u32,
     limb1: u32,
-    limb2: u32,
-    limb3: u32,
 }
 
 // Field modulus P = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001
-// In u16 limbs: P = [1, 0, 0xFFFF, 0xFFFF]
+// In u32 limbs: P = [1, 0xFFFFFFFF]
 const P_LIMB0: u32 = 1u;
-const P_LIMB1: u32 = 0u;
-const P_LIMB2: u32 = 0xFFFFu;
-const P_LIMB3: u32 = 0xFFFFu;
+const P_LIMB1: u32 = 0xFFFFFFFFu;
 
 // EPSILON = 2^32 - 1 = 0x00000000FFFFFFFF
-// In u16 limbs: EPSILON = [0xFFFF, 0xFFFF, 0, 0]
-const EPSILON_LIMB0: u32 = 0xFFFFu;
-const EPSILON_LIMB1: u32 = 0xFFFFu;
-const EPSILON_LIMB2: u32 = 0u;
-const EPSILON_LIMB3: u32 = 0u;
+// In u32 limbs: EPSILON = [0xFFFFFFFF, 0]
+const EPSILON_LIMB0: u32 = 0xFFFFFFFFu;
+const EPSILON_LIMB1: u32 = 0u;
 
 // Helper to create field elements
-fn gf_from_limbs(l0: u32, l1: u32, l2: u32, l3: u32) -> GoldilocksField {
-    return GoldilocksField(l0 & 0xFFFFu, l1 & 0xFFFFu, l2 & 0xFFFFu, l3 & 0xFFFFu);
+fn gf_from_limbs(l0: u32, l1: u32) -> GoldilocksField {
+    return GoldilocksField(l0, l1);
 }
 
 fn gf_zero() -> GoldilocksField {
-    return gf_from_limbs(0u, 0u, 0u, 0u);
+    return gf_from_limbs(0u, 0u);
 }
 
 fn gf_one() -> GoldilocksField {
-    return gf_from_limbs(1u, 0u, 0u, 0u);
+    return gf_from_limbs(1u, 0u);
 }
 
 fn gf_from_u32(val: u32) -> GoldilocksField {
-    return GoldilocksField(val & 0xFFFFu, (val >> 16u) & 0xFFFFu, 0u, 0u);
+    return GoldilocksField(val, 0u);
 }
 
 // Convert a 64-bit value (as two u32s) to GoldilocksField
 fn gf_from_u64_parts(low: u32, high: u32) -> GoldilocksField {
-    var result = GoldilocksField(
-        low & 0xFFFFu,         // bits 0-15
-        (low >> 16u) & 0xFFFFu, // bits 16-31
-        high & 0xFFFFu,        // bits 32-47
-        (high >> 16u) & 0xFFFFu // bits 48-63
-    );
+    var result = GoldilocksField(low, high);
 
     // Reduce if >= P
-    if (gf_compare(result, gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3)) != 2u) {
-        result = gf_sub(result, gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3));
+    if (gf_compare(result, gf_from_limbs(P_LIMB0, P_LIMB1)) != 2u) {
+        result = gf_sub(result, gf_from_limbs(P_LIMB0, P_LIMB1));
     }
 
     return result;
 }
 
-// Addition with carry for u16 values (stored in u32)
-// Returns vec2<u32>(sum, carry) where sum is masked to 16 bits
-fn u16_add_with_carry(a: u32, b: u32, carry_in: u32) -> vec2<u32> {
-    let sum = a + b + carry_in;
-    return vec2<u32>(sum & 0xFFFFu, sum >> 16u);
+// Addition with carry for u32 values
+// Returns vec2<u32>(sum, carry)
+fn u32_add_with_carry(a: u32, b: u32, carry_in: u32) -> vec2<u32> {
+    let sum1 = a + b;
+    let c1 = select(0u, 1u, sum1 < a);
+    let sum2 = sum1 + carry_in;
+    let c2 = select(0u, 1u, sum2 < sum1);
+    return vec2<u32>(sum2, c1 + c2);
 }
 
-// Subtraction with borrow for u16 values (stored in u32)
-// Returns vec2<u32>(diff, borrow) where diff is masked to 16 bits
-fn u16_sub_with_borrow(a: u32, b: u32, borrow_in: u32) -> vec2<u32> {
-    let temp = a + 0x10000u - b - borrow_in;  // Add 2^16 to avoid underflow
-    return vec2<u32>(temp & 0xFFFFu, select(0u, 1u, temp < 0x10000u));
+// Subtraction with borrow for u32 values
+// Returns vec2<u32>(diff, borrow)
+fn u32_sub_with_borrow(a: u32, b: u32, borrow_in: u32) -> vec2<u32> {
+    let diff1 = a - b;
+    let b1 = select(0u, 1u, diff1 > a); // if a - b > a, then underflow happened (since b > 0)
+    // Wait, if a < b, a - b wraps around to a large number.
+    // e.g. 2 - 3 = 0xFFFFFFFF. 0xFFFFFFFF > 2. Correct.
+
+    let diff2 = diff1 - borrow_in;
+    let b2 = select(0u, 1u, diff2 > diff1);
+
+    return vec2<u32>(diff2, b1 + b2);
+}
+
+// Multiply two u32 values to get a u64 result (as vec2<u32>)
+fn u32_mul_to_u64(a: u32, b: u32) -> vec2<u32> {
+    let a_lo = a & 0xFFFFu;
+    let a_hi = a >> 16u;
+    let b_lo = b & 0xFFFFu;
+    let b_hi = b >> 16u;
+
+    let p0 = a_lo * b_lo;
+    let p1 = a_hi * b_lo;
+    let p2 = a_lo * b_hi;
+    let p3 = a_hi * b_hi;
+
+    let sum_mid_part = p1 + p2;
+    let carry_mid = select(0u, 1u, sum_mid_part < p1);
+
+    let term_mid_lo = sum_mid_part << 16u;
+    let term_mid_hi = (sum_mid_part >> 16u) | (carry_mid << 16u);
+
+    let res_lo = p0 + term_mid_lo;
+    let carry_lo = select(0u, 1u, res_lo < p0);
+
+    let res_hi = p3 + term_mid_hi + carry_lo;
+
+    return vec2<u32>(res_lo, res_hi);
 }
 
 // Compare two GoldilocksField values
 // Returns: 0 if a == b, 1 if a > b, 2 if a < b
 fn gf_compare(a: GoldilocksField, b: GoldilocksField) -> u32 {
     // Compare from most significant limb to least
-    if (a.limb3 != b.limb3) {
-        return select(2u, 1u, a.limb3 > b.limb3);
-    }
-    if (a.limb2 != b.limb2) {
-        return select(2u, 1u, a.limb2 > b.limb2);
-    }
     if (a.limb1 != b.limb1) {
         return select(2u, 1u, a.limb1 > b.limb1);
     }
@@ -289,35 +308,31 @@ fn gf_compare(a: GoldilocksField, b: GoldilocksField) -> u32 {
 // Goldilocks field addition
 fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     // Add limb by limb with carry propagation
-    let add0 = u16_add_with_carry(a.limb0, b.limb0, 0u);
-    let add1 = u16_add_with_carry(a.limb1, b.limb1, add0.y);
-    let add2 = u16_add_with_carry(a.limb2, b.limb2, add1.y);
-    let add3 = u16_add_with_carry(a.limb3, b.limb3, add2.y);
+    let add0 = u32_add_with_carry(a.limb0, b.limb0, 0u);
+    let add1 = u32_add_with_carry(a.limb1, b.limb1, add0.y);
 
-    var result = GoldilocksField(add0.x, add1.x, add2.x, add3.x);
+    var result = GoldilocksField(add0.x, add1.x);
 
     // Handle overflow: if carry out, we've computed a + b = result + 2^64
     // In Goldilocks: 2^64 ≡ 2^32 - 1 (mod P)
-    if (add3.y != 0u) {
-        // Add 2^32 - 1 = 0xFFFFFFFF = [0xFFFF, 0xFFFF, 0, 0]
-        let eps_add0 = u16_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-        let eps_add1 = u16_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
-        let eps_add2 = u16_add_with_carry(result.limb2, EPSILON_LIMB2, eps_add1.y);
-        let eps_add3 = u16_add_with_carry(result.limb3, EPSILON_LIMB3, eps_add2.y);
-        result = GoldilocksField(eps_add0.x, eps_add1.x, eps_add2.x, eps_add3.x);
+    if (add1.y != 0u) {
+        // Add EPSILON = 0xFFFFFFFF00000000 (Wait, EPSILON is 2^32 - 1)
+        // EPSILON = 0x00000000FFFFFFFF
+        // EPSILON_LIMB0 = 0xFFFFFFFF, EPSILON_LIMB1 = 0
+        let eps_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
+        let eps_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
+        result = GoldilocksField(eps_add0.x, eps_add1.x);
 
         // If adding EPSILON caused another overflow, add EPSILON again
-        if (eps_add3.y != 0u) {
-            let eps2_add0 = u16_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-            let eps2_add1 = u16_add_with_carry(result.limb1, EPSILON_LIMB1, eps2_add0.y);
-            let eps2_add2 = u16_add_with_carry(result.limb2, EPSILON_LIMB2, eps2_add1.y);
-            let eps2_add3 = u16_add_with_carry(result.limb3, EPSILON_LIMB3, eps2_add2.y);
-            result = GoldilocksField(eps2_add0.x, eps2_add1.x, eps2_add2.x, eps2_add3.x);
+        if (eps_add1.y != 0u) {
+            let eps2_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
+            let eps2_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps2_add0.y);
+            result = GoldilocksField(eps2_add0.x, eps2_add1.x);
         }
     }
 
     // Final reduction if result >= P
-    let p = gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3);
+    let p = gf_from_limbs(P_LIMB0, P_LIMB1);
     if (gf_compare(result, p) != 2u) { // if result >= P
         result = gf_sub_no_underflow(result, p);
     }
@@ -327,11 +342,9 @@ fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
 
 // Helper for subtraction without underflow (assumes a >= b)
 fn gf_sub_no_underflow(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    let sub0 = u16_sub_with_borrow(a.limb0, b.limb0, 0u);
-    let sub1 = u16_sub_with_borrow(a.limb1, b.limb1, sub0.y);
-    let sub2 = u16_sub_with_borrow(a.limb2, b.limb2, sub1.y);
-    let sub3 = u16_sub_with_borrow(a.limb3, b.limb3, sub2.y);
-    return GoldilocksField(sub0.x, sub1.x, sub2.x, sub3.x);
+    let sub0 = u32_sub_with_borrow(a.limb0, b.limb0, 0u);
+    let sub1 = u32_sub_with_borrow(a.limb1, b.limb1, sub0.y);
+    return GoldilocksField(sub0.x, sub1.x);
 }
 
 // Goldilocks field subtraction
@@ -342,228 +355,107 @@ fn gf_sub(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     }
 
     // Otherwise: a < b, so compute a - b + P
-    let p = gf_from_limbs(P_LIMB0, P_LIMB1, P_LIMB2, P_LIMB3);
+    let p = gf_from_limbs(P_LIMB0, P_LIMB1);
     let a_plus_p = gf_add_no_reduction(a, p);
     return gf_sub_no_underflow(a_plus_p, b);
 }
 
 // Addition without final modular reduction (used internally)
 fn gf_add_no_reduction(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    let add0 = u16_add_with_carry(a.limb0, b.limb0, 0u);
-    let add1 = u16_add_with_carry(a.limb1, b.limb1, add0.y);
-    let add2 = u16_add_with_carry(a.limb2, b.limb2, add1.y);
-    let add3 = u16_add_with_carry(a.limb3, b.limb3, add2.y);
-    return GoldilocksField(add0.x, add1.x, add2.x, add3.x);
-}
-
-// Proper Goldilocks field multiplication for all values
-// Multiply two u16 values to get a u32 result
-fn u16_mul(a: u32, b: u32) -> u32 {
-    return (a & 0xFFFFu) * (b & 0xFFFFu);
+    let add0 = u32_add_with_carry(a.limb0, b.limb0, 0u);
+    let add1 = u32_add_with_carry(a.limb1, b.limb1, add0.y);
+    return GoldilocksField(add0.x, add1.x);
 }
 
 // Simplified multiplication that handles carries more carefully
-fn gf_mul_unreduced(a: GoldilocksField, b: GoldilocksField) -> array<u32, 8> {
-    var result: array<u32, 8>;
+fn gf_mul_unreduced(a: GoldilocksField, b: GoldilocksField) -> array<u32, 4> {
+    // p0 = a0 * b0 (64 bits)
+    let p0 = u32_mul_to_u64(a.limb0, b.limb0);
 
-    // Initialize all to zero
-    for (var i = 0u; i < 8u; i++) {
-        result[i] = 0u;
-    }
+    // p1 = a0 * b1 (64 bits)
+    let p1 = u32_mul_to_u64(a.limb0, b.limb1);
 
-    // Use double-precision arithmetic for each partial product
-    // and add with proper carry propagation
-    var temp: array<u32, 8>;
-    for (var i = 0u; i < 8u; i++) {
-        temp[i] = 0u;
-    }
+    // p2 = a1 * b0 (64 bits)
+    let p2 = u32_mul_to_u64(a.limb1, b.limb0);
 
-    // a.limb0 * b (multiply a.limb0 by each limb of b)
-    var carry = 0u;
-    var prod = a.limb0 * b.limb0;
-    temp[0] = prod & 0xFFFFu;
-    carry = prod >> 16u;
+    // p3 = a1 * b1 (64 bits)
+    let p3 = u32_mul_to_u64(a.limb1, b.limb1);
 
-    prod = a.limb0 * b.limb1 + carry;
-    temp[1] = prod & 0xFFFFu;
-    carry = prod >> 16u;
+    // result[0] = p0.x
+    // result[1] = p0.y + p1.x + p2.x + carry
+    // result[2] = p1.y + p2.y + p3.x + carry
+    // result[3] = p3.y + carry
 
-    prod = a.limb0 * b.limb2 + carry;
-    temp[2] = prod & 0xFFFFu;
-    carry = prod >> 16u;
+    var r0 = p0.x;
 
-    prod = a.limb0 * b.limb3 + carry;
-    temp[3] = prod & 0xFFFFu;
-    temp[4] = prod >> 16u;
+    let sum1 = u32_add_with_carry(p0.y, p1.x, 0u);
+    let sum2 = u32_add_with_carry(sum1.x, p2.x, 0u);
+    var r1 = sum2.x;
+    var c1 = sum1.y + sum2.y; // carry to next limb
 
-    // Add temp to result
-    carry = 0u;
-    for (var i = 0u; i < 8u; i++) {
-        let sum = result[i] + temp[i] + carry;
-        result[i] = sum & 0xFFFFu;
-        carry = sum >> 16u;
-    }
+    let sum3 = u32_add_with_carry(p1.y, p2.y, c1);
+    let sum4 = u32_add_with_carry(sum3.x, p3.x, 0u);
+    var r2 = sum4.x;
+    var c2 = sum3.y + sum4.y;
 
-    // Clear temp and do a.limb1 * b << 16
-    for (var i = 0u; i < 8u; i++) {
-        temp[i] = 0u;
-    }
+    let sum5 = u32_add_with_carry(p3.y, 0u, c2);
+    var r3 = sum5.x;
 
-    carry = 0u;
-    prod = a.limb1 * b.limb0;
-    temp[1] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb1 * b.limb1 + carry;
-    temp[2] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb1 * b.limb2 + carry;
-    temp[3] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb1 * b.limb3 + carry;
-    temp[4] = prod & 0xFFFFu;
-    temp[5] = prod >> 16u;
-
-    // Add temp to result
-    carry = 0u;
-    for (var i = 0u; i < 8u; i++) {
-        let sum = result[i] + temp[i] + carry;
-        result[i] = sum & 0xFFFFu;
-        carry = sum >> 16u;
-    }
-
-    // Clear temp and do a.limb2 * b << 32
-    for (var i = 0u; i < 8u; i++) {
-        temp[i] = 0u;
-    }
-
-    carry = 0u;
-    prod = a.limb2 * b.limb0;
-    temp[2] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb2 * b.limb1 + carry;
-    temp[3] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb2 * b.limb2 + carry;
-    temp[4] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb2 * b.limb3 + carry;
-    temp[5] = prod & 0xFFFFu;
-    temp[6] = prod >> 16u;
-
-    // Add temp to result
-    carry = 0u;
-    for (var i = 0u; i < 8u; i++) {
-        let sum = result[i] + temp[i] + carry;
-        result[i] = sum & 0xFFFFu;
-        carry = sum >> 16u;
-    }
-
-    // Clear temp and do a.limb3 * b << 48
-    for (var i = 0u; i < 8u; i++) {
-        temp[i] = 0u;
-    }
-
-    carry = 0u;
-    prod = a.limb3 * b.limb0;
-    temp[3] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb3 * b.limb1 + carry;
-    temp[4] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb3 * b.limb2 + carry;
-    temp[5] = prod & 0xFFFFu;
-    carry = prod >> 16u;
-
-    prod = a.limb3 * b.limb3 + carry;
-    temp[6] = prod & 0xFFFFu;
-    temp[7] = prod >> 16u;
-
-    // Add temp to result
-    carry = 0u;
-    for (var i = 0u; i < 8u; i++) {
-        let sum = result[i] + temp[i] + carry;
-        result[i] = sum & 0xFFFFu;
-        carry = sum >> 16u;
-    }
-
-    return result;
+    return array<u32, 4>(r0, r1, r2, r3);
 }
 
-// Reduce an 8-limb number modulo the Goldilocks prime
-// Simplified version matching CPU algorithm exactly
-fn gf_reduce_8limb(limbs: array<u32, 8>) -> GoldilocksField {
-    // Convert to 64-bit representation like CPU
-    let x_lo = gf_from_limbs(limbs[0], limbs[1], limbs[2], limbs[3]);
-    let x_hi = gf_from_limbs(limbs[4], limbs[5], limbs[6], limbs[7]);
+// Reduce a 4-limb number modulo the Goldilocks prime
+fn gf_reduce_4limb(limbs: array<u32, 4>) -> GoldilocksField {
+    // x_lo = limbs[0], limbs[1]
+    let x_lo = gf_from_limbs(limbs[0], limbs[1]);
 
-    // If high part is zero, just return low part
-    if (limbs[4] == 0u && limbs[5] == 0u && limbs[6] == 0u && limbs[7] == 0u) {
-        return x_lo;
-    }
+    // x_hi = limbs[2], limbs[3]
+    // x_hi_hi = limbs[3] (upper 32 bits of x_hi)
+    let x_hi_hi = gf_from_limbs(limbs[3], 0u);
 
-    // x_hi_hi = x_hi >> 32 (upper 32 bits of high part)
-    let x_hi_hi = gf_from_limbs(limbs[6], limbs[7], 0u, 0u);
-
-    // x_hi_lo = x_hi & NEG_ORDER (lower 32 bits of high part)
-    let x_hi_lo = gf_from_limbs(limbs[4], limbs[5], 0u, 0u);
+    // x_hi_lo = limbs[2] (lower 32 bits of x_hi)
+    let x_hi_lo = gf_from_limbs(limbs[2], 0u);
 
     // Step 1: t0 = x_lo - x_hi_hi (with underflow detection)
     var t0: GoldilocksField;
     var underflow = false;
 
-    // Perform subtraction with borrow propagation
-    let sub0 = u16_sub_with_borrow(x_lo.limb0, x_hi_hi.limb0, 0u);
-    let sub1 = u16_sub_with_borrow(x_lo.limb1, x_hi_hi.limb1, sub0.y);
-    let sub2 = u16_sub_with_borrow(x_lo.limb2, x_hi_hi.limb2, sub1.y);
-    let sub3 = u16_sub_with_borrow(x_lo.limb3, x_hi_hi.limb3, sub2.y);
-    t0 = GoldilocksField(sub0.x, sub1.x, sub2.x, sub3.x);
+    let sub0 = u32_sub_with_borrow(x_lo.limb0, x_hi_hi.limb0, 0u);
+    let sub1 = u32_sub_with_borrow(x_lo.limb1, x_hi_hi.limb1, sub0.y);
+    t0 = GoldilocksField(sub0.x, sub1.x);
 
-    // Check for final borrow (underflow)
-    if (sub3.y != 0u) {
+    if (sub1.y != 0u) {
         underflow = true;
     }
 
     // Step 2: if underflow { t0 -= NEG_ORDER; }
     if (underflow) {
-        let eps_sub0 = u16_sub_with_borrow(t0.limb0, EPSILON_LIMB0, 0u);
-        let eps_sub1 = u16_sub_with_borrow(t0.limb1, EPSILON_LIMB1, eps_sub0.y);
-        let eps_sub2 = u16_sub_with_borrow(t0.limb2, EPSILON_LIMB2, eps_sub1.y);
-        let eps_sub3 = u16_sub_with_borrow(t0.limb3, EPSILON_LIMB3, eps_sub2.y);
-        t0 = GoldilocksField(eps_sub0.x, eps_sub1.x, eps_sub2.x, eps_sub3.x);
+        let eps_sub0 = u32_sub_with_borrow(t0.limb0, EPSILON_LIMB0, 0u);
+        let eps_sub1 = u32_sub_with_borrow(t0.limb1, EPSILON_LIMB1, eps_sub0.y);
+        t0 = GoldilocksField(eps_sub0.x, eps_sub1.x);
     }
 
     // Step 3: t1 = x_hi_lo * NEG_ORDER
-    // Since x_hi_lo fits in 32 bits and NEG_ORDER = 2^32 - 1, we can optimize:
+    // NEG_ORDER = 2^32 - 1
     // x_hi_lo * (2^32 - 1) = (x_hi_lo << 32) - x_hi_lo
-    let shifted = GoldilocksField(0u, 0u, x_hi_lo.limb0, x_hi_lo.limb1);
-    let t1_sub0 = u16_sub_with_borrow(shifted.limb0, x_hi_lo.limb0, 0u);
-    let t1_sub1 = u16_sub_with_borrow(shifted.limb1, x_hi_lo.limb1, t1_sub0.y);
-    let t1_sub2 = u16_sub_with_borrow(shifted.limb2, x_hi_lo.limb2, t1_sub1.y);
-    let t1_sub3 = u16_sub_with_borrow(shifted.limb3, x_hi_lo.limb3, t1_sub2.y);
-    let t1 = GoldilocksField(t1_sub0.x, t1_sub1.x, t1_sub2.x, t1_sub3.x);
+    // x_hi_lo is [limbs[2], 0]
+    // x_hi_lo << 32 is [0, limbs[2]]
+
+    let shifted = GoldilocksField(0u, x_hi_lo.limb0);
+    let t1_sub0 = u32_sub_with_borrow(shifted.limb0, x_hi_lo.limb0, 0u);
+    let t1_sub1 = u32_sub_with_borrow(shifted.limb1, x_hi_lo.limb1, t1_sub0.y);
+    let t1 = GoldilocksField(t1_sub0.x, t1_sub1.x);
 
     // Step 4: result = t0 + t1 (with overflow handling like CPU)
-    let add0 = u16_add_with_carry(t0.limb0, t1.limb0, 0u);
-    let add1 = u16_add_with_carry(t0.limb1, t1.limb1, add0.y);
-    let add2 = u16_add_with_carry(t0.limb2, t1.limb2, add1.y);
-    let add3 = u16_add_with_carry(t0.limb3, t1.limb3, add2.y);
-    var result = GoldilocksField(add0.x, add1.x, add2.x, add3.x);
+    let add0 = u32_add_with_carry(t0.limb0, t1.limb0, 0u);
+    let add1 = u32_add_with_carry(t0.limb1, t1.limb1, add0.y);
+    var result = GoldilocksField(add0.x, add1.x);
 
-    // If overflow, add NEG_ORDER (like CPU add_no_canonicalize_trashing_input)
-    if (add3.y != 0u) {
-        let eps_add0 = u16_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-        let eps_add1 = u16_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
-        let eps_add2 = u16_add_with_carry(result.limb2, EPSILON_LIMB2, eps_add1.y);
-        let eps_add3 = u16_add_with_carry(result.limb3, EPSILON_LIMB3, eps_add2.y);
-        result = GoldilocksField(eps_add0.x, eps_add1.x, eps_add2.x, eps_add3.x);
+    // If overflow, add NEG_ORDER
+    if (add1.y != 0u) {
+        let eps_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
+        let eps_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
+        result = GoldilocksField(eps_add0.x, eps_add1.x);
     }
 
     return result;
@@ -572,16 +464,15 @@ fn gf_reduce_8limb(limbs: array<u32, 8>) -> GoldilocksField {
 // Main Goldilocks field multiplication
 fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
     // Handle special cases
-    if (a.limb0 == 0u && a.limb1 == 0u && a.limb2 == 0u && a.limb3 == 0u) { return gf_zero(); }
-    if (b.limb0 == 0u && b.limb1 == 0u && b.limb2 == 0u && b.limb3 == 0u) { return gf_zero(); }
-    if (a.limb0 == 1u && a.limb1 == 0u && a.limb2 == 0u && a.limb3 == 0u) { return b; }
-    if (b.limb0 == 1u && b.limb1 == 0u && b.limb2 == 0u && b.limb3 == 0u) { return a; }
+    if (a.limb0 == 0u && a.limb1 == 0u) { return gf_zero(); }
+    if (b.limb0 == 0u && b.limb1 == 0u) { return gf_zero(); }
+    if (a.limb0 == 1u && a.limb1 == 0u) { return b; }
+    if (b.limb0 == 1u && b.limb1 == 0u) { return a; }
 
     // General case: multiply and reduce
     let unreduced = gf_mul_unreduced(a, b);
-    return gf_reduce_8limb(unreduced);
+    return gf_reduce_4limb(unreduced);
 }
-
 
 // S-box: x^7 in Goldilocks field (efficient approach)
 fn sbox(x: GoldilocksField) -> GoldilocksField {
@@ -770,8 +661,8 @@ fn bytes_to_field_elements(input: array<u32, 24>) -> array<GoldilocksField, 25> 
 fn field_elements_to_bytes(felts: array<GoldilocksField, 4>) -> array<u32, 8> {
     var result: array<u32, 8>;
     for (var i = 0u; i < 4u; i++) {
-        result[i * 2u] = felts[i].limb0 | (felts[i].limb1 << 16u);
-        result[i * 2u + 1u] = felts[i].limb2 | (felts[i].limb3 << 16u);
+        result[i * 2u] = felts[i].limb0;
+        result[i * 2u + 1u] = felts[i].limb1;
     }
     return result;
 }
@@ -797,14 +688,12 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
         for (var i = 0u; i < 4u; i++) {
             let felt_idx = chunk * 4u + i;
             state[i] = gf_add(state[i], input_felts[felt_idx]);
-
         }
-
         // Permute after each complete chunk
         poseidon2_permute(&state);
-
     }
 
+    // Process remaining 1 element (partial chunk)
     // Now we have element 24 (the padding marker = 1) remaining
     // This simulates CPU's finalize_twice adding ONE to buffer position 0
     state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker (should be 1)
@@ -820,12 +709,8 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
         state[0], state[1], state[2], state[3]
     ));
 
-
-
     // Second squeeze
     poseidon2_permute(&state);
-
-
 
     let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
