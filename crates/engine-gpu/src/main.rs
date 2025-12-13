@@ -5,8 +5,8 @@ use qp_plonky2_field::types::{Field, PrimeField64};
 
 use wgpu::{self, util::DeviceExt};
 
-mod tests;
 mod end_to_end_tests;
+mod tests;
 
 fn u8_array_to_u32_array(bytes: &[u8; 96]) -> [u32; 24] {
     let mut result = [0u32; 24];
