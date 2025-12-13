@@ -5,8 +5,11 @@ use engine_cpu::{Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use futures::executor::block_on;
 use pow_core::JobContext;
 use primitive_types::U512;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::cell::RefCell;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Represents a single GPU device context.
 struct GpuContext {
@@ -28,6 +31,12 @@ struct GpuContext {
 
 pub struct GpuEngine {
     contexts: Vec<Arc<GpuContext>>,
+    device_counter: AtomicUsize,
+}
+
+// Thread-local storage for consistent GPU device assignment per worker thread
+thread_local! {
+    static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = RefCell::new(None);
 }
 
 impl Default for GpuEngine {
@@ -252,7 +261,15 @@ impl GpuEngine {
             }
         }
 
-        Ok(Self { contexts })
+        Ok(Self {
+            contexts,
+            device_counter: AtomicUsize::new(0),
+        })
+    }
+
+    /// Returns the number of GPU devices available
+    pub fn device_count(&self) -> usize {
+        self.contexts.len()
     }
 }
 
@@ -263,6 +280,10 @@ impl MinerEngine for GpuEngine {
 
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
         JobContext::new(header_hash, difficulty)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
@@ -276,10 +297,33 @@ impl MinerEngine for GpuEngine {
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
-        // Use first GPU only for now to simplify and avoid threading overhead
-        let gpu_ctx = &self.contexts[0];
+        // Use thread-local assignment for consistent worker-to-GPU mapping
+        let device_index = ASSIGNED_GPU_DEVICE.with(|assigned| {
+            let mut assigned_ref = assigned.borrow_mut();
+            if let Some(index) = *assigned_ref {
+                // This thread already has a GPU assigned
+                index
+            } else {
+                // First time this thread is calling search_range, assign a GPU device
+                let index = if self.contexts.len() == 1 {
+                    0
+                } else {
+                    self.device_counter.fetch_add(1, Ordering::SeqCst) % self.contexts.len()
+                };
+                *assigned_ref = Some(index);
+                log::info!(
+                    "Worker thread assigned to GPU device {} (of {} total devices)",
+                    index,
+                    self.contexts.len()
+                );
+                index
+            }
+        });
+
+        let gpu_ctx = &self.contexts[device_index];
         log::debug!(
-            "Starting GPU search on device 0 for nonce range {}..={} (inclusive)",
+            "GPU device {} processing range {}..={} (inclusive)",
+            device_index,
             range.start,
             range.end
         );

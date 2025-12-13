@@ -1276,15 +1276,6 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         workers = effective_cpus.max(1);
     }
 
-    // Force workers=1 for GPU engine to prevent concurrent buffer mapping panics
-    if matches!(config.engine, EngineSelection::Gpu) && workers > 1 {
-        log::info!(
-            "GPU engine selected. Forcing workers to 1 (was {}) to avoid buffer contention.",
-            workers
-        );
-        workers = 1;
-    }
-
     log::info!(
         "Using {workers} worker thread(s) for mining (effective logical CPUs available: {effective_cpus})"
     );
@@ -1338,6 +1329,29 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             EngineSelection::Gpu => "High-performance GPU mining",
         }
     );
+
+    // Adjust worker count for GPU engine based on available devices
+    if matches!(config.engine, EngineSelection::Gpu) {
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(gpu_engine) = engine.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
+                let gpu_device_count = gpu_engine.device_count();
+                if gpu_device_count > 0 {
+                    // Use one worker per GPU device, but don't exceed the configured worker count
+                    workers = workers.min(gpu_device_count);
+                    log::info!(
+                        "GPU engine: {} GPU devices detected, using {} workers",
+                        gpu_device_count,
+                        workers
+                    );
+                } else {
+                    log::warn!("GPU engine: No GPU devices detected, falling back to 1 worker");
+                    workers = 1;
+                }
+            }
+        }
+    }
+
     log::info!("⚙️  Service configuration: {config}");
 
     let progress_interval_ms = config.progress_interval_ms.unwrap_or(10000);

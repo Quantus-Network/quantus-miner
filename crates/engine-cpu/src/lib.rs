@@ -89,6 +89,9 @@ pub trait MinerEngine: Send + Sync {
     /// - Return `Exhausted` if the range is fully searched without a solution.
     /// - Return `Cancelled` if `cancel` was observed during the search.
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus;
+
+    /// Enable downcasting to concrete engine types.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Baseline CPU engine.
@@ -111,6 +114,10 @@ impl MinerEngine for BaselineCpuEngine {
 
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
         JobContext::new(header_hash, difficulty)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
@@ -181,6 +188,10 @@ impl MinerEngine for FastCpuEngine {
 
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
         JobContext::new(header_hash, difficulty)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
@@ -272,6 +283,10 @@ impl MinerEngine for ChainManipulatorEngine {
             self.step_batch
         );
         ctx
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
