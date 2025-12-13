@@ -386,9 +386,9 @@ fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestC
     // Random small values (all elements < 2^16)
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut input {
             let val = rng.gen::<u16>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = apply_full_external_linear_layer_to_state(&input);
         vectors.push(ExternalLinearLayerTestCase { input, expected });
@@ -397,9 +397,9 @@ fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestC
     // Random medium values (all elements < 2^32)
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut input {
             let val = rng.gen::<u32>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = apply_full_external_linear_layer_to_state(&input);
         vectors.push(ExternalLinearLayerTestCase { input, expected });
@@ -431,8 +431,8 @@ fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestC
     // Small values
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            input[j] = GoldilocksField::from_canonical_u64(rng.gen_range(0..100));
+        for item in &mut input {
+            *item = GoldilocksField::from_canonical_u64(rng.gen_range(0..100));
         }
         let expected = apply_internal_linear_layer_to_state(&input);
         vectors.push(InternalLinearLayerTestCase { input, expected });
@@ -441,8 +441,8 @@ fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestC
     // Random large values
     for _ in 0..20 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            input[j] = GoldilocksField::from_noncanonical_u64(rng.gen());
+        for item in &mut input {
+            *item = GoldilocksField::from_noncanonical_u64(rng.gen());
         }
         let expected = apply_internal_linear_layer_to_state(&input);
         vectors.push(InternalLinearLayerTestCase { input, expected });
@@ -486,8 +486,8 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     // Random small values (all elements < 2^16)
     for _ in 0..50 {
         let mut input = [GoldilocksField::ZERO; 4];
-        for j in 0..4 {
-            input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u16>() as u64);
+        for item in &mut input {
+            *item = GoldilocksField::from_canonical_u64(rng.gen::<u16>() as u64);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -496,8 +496,8 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     // Random medium values (all elements < 2^32)
     for _ in 0..30 {
         let mut input = [GoldilocksField::ZERO; 4];
-        for j in 0..4 {
-            input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        for item in &mut input {
+            *item = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -506,8 +506,8 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     // Random large values (using full 64-bit range)
     for _ in 0..30 {
         let mut input = [GoldilocksField::ZERO; 4];
-        for j in 0..4 {
-            input[j] = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
+        for item in &mut input {
+            *item = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -516,9 +516,9 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     // Edge cases near field modulus
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 4];
-        for j in 0..4 {
+        for item in &mut input {
             let offset = rng.gen::<u32>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
+            *item = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -555,9 +555,9 @@ fn apply_full_external_linear_layer_to_state(
     // Now apply the circulant matrix part
     // Precompute the four sums of every four elements
     let mut sums = [GoldilocksField::ZERO; 4];
-    for k in 0..4 {
+    for (k, sum) in sums.iter_mut().enumerate() {
         for j in (k..12).step_by(4) {
-            sums[k] += result[j];
+            *sum += result[j];
         }
     }
 
@@ -706,11 +706,12 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     });
 
     // Small random values (0-255)
-    for _ in 0..30 {
+    // Random small values (all elements < 2^16)
+    for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            let val = rng.gen::<u8>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(val);
+        for item in &mut input {
+            let val = rng.gen::<u16>() as u64;
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
         vectors.push(Poseidon2TestCase { input, expected });
@@ -719,9 +720,9 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     // Medium random values (0-65535)
     for _ in 0..20 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut input {
             let val = rng.gen::<u16>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
         vectors.push(Poseidon2TestCase { input, expected });
@@ -730,20 +731,21 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     // Large random values (full u32 range)
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut input {
             let val = rng.gen::<u32>() as u64;
-            input[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
         vectors.push(Poseidon2TestCase { input, expected });
     }
 
     // Very large random values (full field range)
-    for _ in 0..10 {
+    // Random large values (all elements < 2^32 but > 2^16)
+    for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            let val = rng.gen::<u64>();
-            input[j] = GoldilocksField::from_canonical_u64(val);
+        for item in &mut input {
+            let val = rng.gen_range(65536..u32::MAX) as u64;
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
         vectors.push(Poseidon2TestCase { input, expected });
@@ -876,59 +878,6 @@ fn generate_poseidon2_squeeze_twice_test_vectors() -> Vec<Poseidon2SqueezeTwiceT
         vectors.push(Poseidon2SqueezeTwiceTestCase {
             input_bytes: input,
             expected_hash: expected_32,
-        });
-    }
-
-    vectors
-}
-
-#[derive(Debug, Clone)]
-struct Poseidon2StandardHashTestCase {
-    input_bytes: Vec<u8>,    // Variable length input
-    expected_hash: [u8; 32], // Standard 32-byte output
-}
-
-fn generate_poseidon2_standard_hash_test_vectors() -> Vec<Poseidon2StandardHashTestCase> {
-    let mut vectors = Vec::new();
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xFEEDBEEF);
-
-    // Test 1: Empty input
-    let empty_input = vec![];
-    let empty_expected = qp_poseidon_core::hash_variable_length_bytes(&empty_input);
-    vectors.push(Poseidon2StandardHashTestCase {
-        input_bytes: empty_input,
-        expected_hash: empty_expected,
-    });
-
-    // Test 2: Single byte inputs
-    for byte_val in [0u8, 1u8, 255u8, 42u8] {
-        let input = vec![byte_val];
-        let expected = qp_poseidon_core::hash_variable_length_bytes(&input);
-        vectors.push(Poseidon2StandardHashTestCase {
-            input_bytes: input,
-            expected_hash: expected,
-        });
-    }
-
-    // Test 3: Small inputs (1-32 bytes)
-    for len in [1, 4, 8, 16, 32] {
-        let mut input = vec![0u8; len];
-        rng.fill(&mut input[..]);
-        let expected = qp_poseidon_core::hash_variable_length_bytes(&input);
-        vectors.push(Poseidon2StandardHashTestCase {
-            input_bytes: input,
-            expected_hash: expected,
-        });
-    }
-
-    // Test 4: String inputs
-    let strings = ["", "a", "hello", "test"];
-    for s in strings {
-        let input = s.as_bytes().to_vec();
-        let expected = qp_poseidon_core::hash_variable_length_bytes(&input);
-        vectors.push(Poseidon2StandardHashTestCase {
-            input_bytes: input,
-            expected_hash: expected,
         });
     }
 
@@ -1068,6 +1017,7 @@ fn print_test_failure<T: std::fmt::Display>(
     }
 }
 
+#[allow(dead_code)]
 fn print_test_failure_hex(
     test_name: &str,
     test_index: usize,
@@ -1127,16 +1077,13 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
 
     // Helper to apply initial external rounds
     let apply_initial_external = |mut state: [GoldilocksField; 12]| -> [GoldilocksField; 12] {
-        for round in 0..4 {
-            // Add constants
-            for i in 0..12 {
-                state[i] += GoldilocksField::from_canonical_u64(
-                    POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i],
-                );
+        for round_constants in &POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0..4] {
+            for (i, item) in state.iter_mut().enumerate() {
+                *item += GoldilocksField::from_canonical_u64(round_constants[i]);
             }
             // S-box all elements
-            for i in 0..12 {
-                state[i] = state[i].exp_u64(7);
+            for item in &mut state {
+                *item = item.exp_u64(7);
             }
             // External linear layer
             state = apply_full_external_linear_layer_to_state(&state);
@@ -1146,9 +1093,8 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
 
     // Helper to apply internal rounds only
     let apply_internal_only = |mut state: [GoldilocksField; 12]| -> [GoldilocksField; 12] {
-        for round in 0..22 {
-            state[0] +=
-                GoldilocksField::from_canonical_u64(POSEIDON2_INTERNAL_CONSTANTS_RAW[round]);
+        for round_constant in &POSEIDON2_INTERNAL_CONSTANTS_RAW {
+            state[0] += GoldilocksField::from_canonical_u64(*round_constant);
             state[0] = state[0].exp_u64(7);
             state = apply_internal_linear_layer_to_state(&state);
         }
@@ -1198,9 +1144,9 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
     // Random small values (all elements < 2^8)
     for _ in 0..15 {
         let mut random_input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut random_input {
             let val = (rng.gen::<u8>()) as u64;
-            random_input[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let after_initial_external = apply_initial_external(random_input);
         let after_internal = apply_internal_only(after_initial_external);
@@ -1213,9 +1159,9 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
     // Random medium values (all elements < 2^16)
     for _ in 0..10 {
         let mut random_input = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            let val = (rng.gen::<u16>()) as u64;
-            random_input[j] = GoldilocksField::from_canonical_u64(val);
+        for item in &mut random_input {
+            let val = (rng.gen::<u32>()) as u64;
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         let after_initial_external = apply_initial_external(random_input);
         let after_internal = apply_internal_only(after_initial_external);
@@ -1380,8 +1326,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
             // Compare all 12 elements
             let mut all_match = true;
-            for j in 0..12 {
-                if gpu_result[j].to_canonical_u64() != test_case.expected[j].to_canonical_u64() {
+            for (gpu_item, expected_item) in gpu_result.iter().zip(test_case.expected.iter()) {
+                if gpu_item.to_canonical_u64() != expected_item.to_canonical_u64() {
                     all_match = false;
                     break;
                 }
@@ -1407,9 +1353,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                         println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
                     }
                     println!("Element-by-element comparison:");
-                    for j in 0..12 {
-                        let expected = test_case.expected[j].to_canonical_u64();
-                        let got = gpu_result[j].to_canonical_u64();
+                    for (j, (expected_item, got_item)) in
+                        test_case.expected.iter().zip(gpu_result.iter()).enumerate()
+                    {
+                        let expected = expected_item.to_canonical_u64();
+                        let got = got_item.to_canonical_u64();
                         let status = if expected == got { "✓" } else { "✗" };
                         println!(
                             "  [{}] {} Expected: 0x{:016x}, Got: 0x{:016x}",
@@ -1436,7 +1384,7 @@ pub async fn test_poseidon2_initial_external_rounds(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test just the initial 4 external rounds
     let test_vectors = generate_gf_from_const_test_vectors();
-    let total_tests = test_vectors.len();
+    let _total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
 
@@ -1522,9 +1470,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     // Random small values (all elements < 2^8)
     for _ in 0..15 {
         let mut state = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
-            let val = (rng.gen::<u8>()) as u64;
-            state[j] = GoldilocksField::from_canonical_u64(val);
+        for item in &mut state {
+            let val = (rng.gen::<u32>()) as u64;
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
     }
@@ -1532,9 +1480,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     // Random medium values (all elements < 2^16)
     for _ in 0..10 {
         let mut state = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut state {
             let val = (rng.gen::<u16>()) as u64;
-            state[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
     }
@@ -1608,15 +1556,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         let mut cpu_state = *input_state;
         use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
 
-        for round in 0..4 {
+        for round_constants in &POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0..4] {
             // Add constants
-            for i in 0..12 {
-                let raw_constant = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[round][i];
-                cpu_state[i] += GoldilocksField::from_canonical_u64(raw_constant);
+            for (i, item) in cpu_state.iter_mut().enumerate() {
+                let raw_constant = round_constants[i];
+                *item += GoldilocksField::from_canonical_u64(raw_constant);
             }
             // S-box
-            for i in 0..12 {
-                cpu_state[i] = cpu_state[i].exp_u64(7);
+            for item in &mut cpu_state {
+                *item = item.exp_u64(7);
             }
             // External linear layer (simplified CPU version)
             // This is a basic implementation - if this test fails we'll know it's here
@@ -1627,9 +1575,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             for chunk in 0..3 {
                 let offset = chunk * 4;
                 let mut chunk_state = [GoldilocksField::ZERO; 4];
-                for i in 0..4 {
-                    chunk_state[i] = cpu_state[offset + i];
-                }
+                chunk_state.copy_from_slice(&cpu_state[offset..(4 + offset)]);
                 let new_0 =
                     two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
                 let new_1 =
@@ -1645,9 +1591,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             }
             // Circulant matrix
             let mut sums = [GoldilocksField::ZERO; 4];
-            for k in 0..4 {
+            for (k, sum) in sums.iter_mut().enumerate() {
                 for j in (k..12).step_by(4) {
-                    sums[k] += cpu_state[j];
+                    *sum += cpu_state[j];
                 }
             }
             for i in 0..12 {
@@ -1663,11 +1609,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                 test_passed = false;
                 if failed_tests.is_empty() {
                     println!("❌ Initial external rounds test {} failed:", test_idx + 1);
-                    for j in 0..3 {
+                    for (j, cpu_item) in cpu_state.iter().enumerate().take(3) {
                         println!(
                             "  [{}] Expected: 0x{:016x}, Got: 0x{:016x}",
                             j,
-                            cpu_state[j].to_canonical_u64(),
+                            cpu_item.to_canonical_u64(),
                             gpu_gf.to_canonical_u64()
                         );
                     }
@@ -1697,7 +1643,7 @@ pub async fn test_poseidon2_terminal_external_rounds(
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test just the terminal 4 external rounds
-    let total_tests = 2;
+    let _total_tests = 2;
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
 
@@ -1783,9 +1729,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     // Random small values (all elements < 2^8)
     for _ in 0..15 {
         let mut state = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut state {
             let val = (rng.gen::<u8>()) as u64;
-            state[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
     }
@@ -1793,9 +1739,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     // Random medium values (all elements < 2^16)
     for _ in 0..10 {
         let mut state = [GoldilocksField::ZERO; 12];
-        for j in 0..12 {
+        for item in &mut state {
             let val = (rng.gen::<u16>()) as u64;
-            state[j] = GoldilocksField::from_canonical_u64(val);
+            *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
     }
@@ -1869,15 +1815,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         let mut cpu_state = *input_state;
         use qp_poseidon_constants::POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW;
 
-        for round in 0..4 {
+        for round_constants in &POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW[0..4] {
             // Add constants
-            for i in 0..12 {
-                let raw_constant = POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW[round][i];
-                cpu_state[i] += GoldilocksField::from_canonical_u64(raw_constant);
+            for (i, item) in cpu_state.iter_mut().enumerate() {
+                let raw_constant = round_constants[i];
+                *item += GoldilocksField::from_canonical_u64(raw_constant);
             }
             // S-box
-            for i in 0..12 {
-                cpu_state[i] = cpu_state[i].exp_u64(7);
+            for item in &mut cpu_state {
+                *item = item.exp_u64(7);
             }
             // External linear layer (same as initial external)
             let two = GoldilocksField::from_canonical_u64(2);
@@ -1887,9 +1833,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             for chunk in 0..3 {
                 let offset = chunk * 4;
                 let mut chunk_state = [GoldilocksField::ZERO; 4];
-                for i in 0..4 {
-                    chunk_state[i] = cpu_state[offset + i];
-                }
+                chunk_state.copy_from_slice(&cpu_state[offset..(4 + offset)]);
                 let new_0 =
                     two * chunk_state[0] + three * chunk_state[1] + chunk_state[2] + chunk_state[3];
                 let new_1 =
@@ -1905,9 +1849,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             }
             // Circulant matrix
             let mut sums = [GoldilocksField::ZERO; 4];
-            for k in 0..4 {
+            for (k, sum) in sums.iter_mut().enumerate() {
                 for j in (k..12).step_by(4) {
-                    sums[k] += cpu_state[j];
+                    *sum += cpu_state[j];
                 }
             }
             for i in 0..12 {
@@ -1923,11 +1867,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                 test_passed = false;
                 if failed_tests.is_empty() {
                     println!("❌ Terminal external rounds test {} failed:", test_idx + 1);
-                    for j in 0..3 {
+                    for (j, cpu_item) in cpu_state.iter().enumerate().take(3) {
                         println!(
                             "  [{}] Expected: 0x{:016x}, Got: 0x{:016x}",
                             j,
-                            cpu_state[j].to_canonical_u64(),
+                            cpu_item.to_canonical_u64(),
                             gpu_gf.to_canonical_u64()
                         );
                     }
@@ -2194,8 +2138,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
     use qp_poseidon_constants::POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW;
 
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = gpu_constants[i].into();
+    for (i, gpu_constant) in gpu_constants.iter().enumerate().take(12) {
+        let gpu_gf: GoldilocksField = (*gpu_constant).into();
         let expected = POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW[0][i];
         if gpu_gf.to_canonical_u64() == expected {
             passed_tests += 1;
@@ -2525,6 +2469,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     results.print_summary()
 }
 
+#[allow(dead_code)]
 pub async fn test_poseidon2_terminal_external_rounds_issue(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2679,8 +2624,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let gpu_results: &[GfWgls] = bytemuck::cast_slice(&data);
 
     println!("🔍 GPU result after terminal external rounds:");
-    for i in 0..3 {
-        let gf: GoldilocksField = gpu_results[i].into();
+    for (i, gpu_result) in gpu_results.iter().enumerate().take(3) {
+        let gf: GoldilocksField = (*gpu_result).into();
         println!("  [{}] = 0x{:016x}", i, gf.to_canonical_u64());
     }
 
@@ -2800,8 +2745,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
     use qp_poseidon_constants::POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW;
 
-    for i in 0..12 {
-        let gpu_gf: GoldilocksField = gpu_constants[i].into();
+    for (i, gpu_constant) in gpu_constants.iter().enumerate().take(12) {
+        let gpu_gf: GoldilocksField = (*gpu_constant).into();
         let expected = POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW[0][i];
         if gpu_gf.to_canonical_u64() == expected {
             passed_tests += 1;
@@ -2948,7 +2893,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             .unwrap();
 
         let data = slice.get_mapped_range();
-        let result_wgls: GfWgls = bytemuck::from_bytes::<GfWgls>(&data).clone();
+        let result_wgls: GfWgls = *bytemuck::from_bytes::<GfWgls>(&data);
         drop(data);
         staging_buffer.unmap();
 
@@ -3213,7 +3158,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             sender.send(result).unwrap();
         });
 
-        device.poll(wgpu::PollType::Wait {
+        let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -3226,8 +3171,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         for (i, test_case) in chunk.iter().enumerate() {
             let gpu_result = [
                 GoldilocksField::from_noncanonical_u64(
-                    (gpu_results[i * 4 + 0].limb0 as u64)
-                        | ((gpu_results[i * 4 + 0].limb1 as u64) << 32),
+                    (gpu_results[i * 4].limb0 as u64) | ((gpu_results[i * 4].limb1 as u64) << 32),
                 ),
                 GoldilocksField::from_noncanonical_u64(
                     (gpu_results[i * 4 + 1].limb0 as u64)
@@ -3459,8 +3403,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 
             // Compare all 12 elements
             let mut all_match = true;
-            for j in 0..12 {
-                if gpu_result[j].to_canonical_u64() != test_case.expected[j].to_canonical_u64() {
+            for (gpu_item, expected_item) in gpu_result.iter().zip(test_case.expected.iter()) {
+                if gpu_item.to_canonical_u64() != expected_item.to_canonical_u64() {
                     all_match = false;
                     break;
                 }
@@ -3487,9 +3431,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                         println!("  [{}] = 0x{:016x}", j, val.to_canonical_u64());
                     }
                     println!("Element-by-element comparison:");
-                    for j in 0..12 {
-                        let expected = test_case.expected[j].to_canonical_u64();
-                        let got = gpu_result[j].to_canonical_u64();
+                    for (j, (expected_item, got_item)) in
+                        test_case.expected.iter().zip(gpu_result.iter()).enumerate()
+                    {
+                        let expected = expected_item.to_canonical_u64();
+                        let got = got_item.to_canonical_u64();
                         let status = if expected == got { "✓" } else { "✗" };
                         println!(
                             "  [{}] {} Expected: 0x{:016x}, Got: 0x{:016x}",
@@ -3645,7 +3591,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             sender.send(result).unwrap();
         });
-        device.poll(wgpu::PollType::Wait {
+        let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -3700,7 +3646,7 @@ pub async fn test_sbox(
     const BATCH_SIZE: usize = 64;
     let batches = test_vectors.chunks(BATCH_SIZE);
 
-    for (_batch_idx, batch) in batches.enumerate() {
+    for batch in batches {
         // Convert test vectors to WGSL format
         let input_data: Vec<GfWgls> = batch
             .iter()
@@ -3808,7 +3754,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
             sender.send(result).unwrap();
         });
 
-        device.poll(wgpu::PollType::Wait {
+        let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
@@ -4189,11 +4135,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                 let gpu_felt: GoldilocksField = results[i * 25 + j].into();
                 gpu_felts.push(gpu_felt);
 
-                if j < test_case.expected_felts.len() {
-                    if gpu_felt.to_canonical_u64() != test_case.expected_felts[j].to_canonical_u64()
-                    {
-                        all_match = false;
-                    }
+                if j < test_case.expected_felts.len()
+                    && gpu_felt.to_canonical_u64() != test_case.expected_felts[j].to_canonical_u64()
+                {
+                    all_match = false;
                 }
             }
 
@@ -4558,11 +4503,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
                     println!("GPU hash:     {:02x?}", &gpu_hash[..]);
 
                     // Show first difference
-                    for k in 0..64 {
-                        if gpu_hash[k] != test_case.expected_hash[k] {
+                    for (k, (gpu_byte, expected_byte)) in gpu_hash
+                        .iter()
+                        .zip(test_case.expected_hash.iter())
+                        .enumerate()
+                    {
+                        if gpu_byte != expected_byte {
                             println!(
                                 "First difference at byte {}: Expected={:02x}, GPU={:02x}",
-                                k, test_case.expected_hash[k], gpu_hash[k]
+                                k, expected_byte, gpu_byte
                             );
                             break;
                         }

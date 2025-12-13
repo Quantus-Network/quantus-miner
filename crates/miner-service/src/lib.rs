@@ -1277,14 +1277,12 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     }
 
     // Force workers=1 for GPU engine to prevent concurrent buffer mapping panics
-    if matches!(config.engine, EngineSelection::Gpu) {
-        if workers > 1 {
-            log::info!(
-                "GPU engine selected. Forcing workers to 1 (was {}) to avoid buffer contention.",
-                workers
-            );
-            workers = 1;
-        }
+    if matches!(config.engine, EngineSelection::Gpu) && workers > 1 {
+        log::info!(
+            "GPU engine selected. Forcing workers to 1 (was {}) to avoid buffer contention.",
+            workers
+        );
+        workers = 1;
     }
 
     log::info!(

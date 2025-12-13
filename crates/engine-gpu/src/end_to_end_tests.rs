@@ -30,9 +30,9 @@ pub async fn test_end_to_end_mining(
 
     // Header Buffer
     let mut header_u32s = [0u32; 8];
-    for i in 0..8 {
+    for (i, item) in header_u32s.iter_mut().enumerate() {
         let chunk = &ctx.header[i * 4..(i + 1) * 4];
-        header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     let header_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Header Buffer"),

@@ -14,7 +14,7 @@ struct GpuContext {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
-    adapter_info: wgpu::AdapterInfo,
+
     // Cached vendor configuration
     optimal_workgroups: u32,
     // Reusable buffers
@@ -28,6 +28,12 @@ struct GpuContext {
 
 pub struct GpuEngine {
     contexts: Vec<Arc<GpuContext>>,
+}
+
+impl Default for GpuEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GpuEngine {
@@ -198,7 +204,6 @@ impl GpuEngine {
                 queue,
                 pipeline,
                 bind_group,
-                adapter_info: info,
                 optimal_workgroups,
                 header_buffer,
                 target_buffer,
@@ -281,9 +286,9 @@ impl MinerEngine for GpuEngine {
 
         // Pre-convert header and target once (not per range)
         let mut header_u32s = [0u32; 8];
-        for i in 0..8 {
+        for (i, item) in header_u32s.iter_mut().enumerate() {
             let chunk = &ctx.header[i * 4..(i + 1) * 4];
-            header_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         gpu_ctx.queue.write_buffer(
             &gpu_ctx.header_buffer,
@@ -326,8 +331,7 @@ impl MinerEngine for GpuEngine {
         }
 
         // Round logical_threads up to a multiple of workgroup size so we have full workgroups.
-        let mut num_workgroups =
-            ((logical_threads as u32) + threads_per_workgroup - 1) / threads_per_workgroup;
+        let mut num_workgroups = (logical_threads as u32).div_ceil(threads_per_workgroup);
         if num_workgroups == 0 {
             num_workgroups = 1;
         }
@@ -335,8 +339,7 @@ impl MinerEngine for GpuEngine {
 
         // Derive how many nonces each logical thread should process so that the entire
         // range is covered in a single dispatch.
-        let nonces_per_thread =
-            ((total_range_size + total_threads - 1) / total_threads).max(1) as u32;
+        let nonces_per_thread = total_range_size.div_ceil(total_threads).max(1) as u32;
 
         let total_threads_u32 = total_threads as u32;
 
@@ -487,7 +490,7 @@ impl GpuEngine {
         // Vendor-specific heuristics based on architecture knowledge
         let optimal_workgroups = if vendor_name.contains("nvidia") || adapter_info.vendor == 4318 {
             // NVIDIA GPUs (vendor ID 0x10DE = 4318)
-            let workgroups = if vendor_name.contains("rtx 40") || vendor_name.contains("rtx 4090") {
+            if vendor_name.contains("rtx 40") || vendor_name.contains("rtx 4090") {
                 (max_workgroups / 8).max(4096)
             } else if vendor_name.contains("rtx 30") || vendor_name.contains("rtx 20") {
                 (max_workgroups / 12).max(2048)
@@ -495,11 +498,10 @@ impl GpuEngine {
                 (max_workgroups / 16).max(1024)
             } else {
                 (max_workgroups / 20).max(512)
-            };
-            workgroups
+            }
         } else if vendor_name.contains("amd") || adapter_info.vendor == 4098 {
             // AMD GPUs (vendor ID 0x1002 = 4098)
-            let workgroups = if vendor_name.contains("rx 7") || vendor_name.contains("rx 6900") {
+            if vendor_name.contains("rx 7") || vendor_name.contains("rx 6900") {
                 (max_workgroups / 10).max(3072)
             } else if vendor_name.contains("rx 6") || vendor_name.contains("rx 5700") {
                 (max_workgroups / 14).max(2048)
@@ -507,11 +509,10 @@ impl GpuEngine {
                 (max_workgroups / 18).max(1024)
             } else {
                 (max_workgroups / 24).max(512)
-            };
-            workgroups
+            }
         } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
             // Intel GPUs (vendor ID 0x8086 = 32902)
-            let workgroups = if vendor_name.contains("arc a7") || vendor_name.contains("arc a770") {
+            if vendor_name.contains("arc a7") || vendor_name.contains("arc a770") {
                 (max_workgroups / 12).max(2048)
             } else if vendor_name.contains("arc a5") || vendor_name.contains("arc a380") {
                 (max_workgroups / 16).max(1024)
@@ -519,8 +520,7 @@ impl GpuEngine {
                 (max_workgroups / 20).max(512)
             } else {
                 (max_workgroups / 24).max(256)
-            };
-            workgroups
+            }
         } else if adapter_info.backend == wgpu::Backend::Metal {
             // Apple GPUs (detected by Metal backend)
             let (gpu_cores, workgroups) = if vendor_name.contains("m4 max") {
@@ -549,8 +549,6 @@ impl GpuEngine {
                 (32, 640)
             } else if vendor_name.contains("m1 pro") {
                 (16, 320)
-            } else if vendor_name.contains("m1") {
-                (8, 160)
             } else {
                 (8, 160)
             };
@@ -560,8 +558,7 @@ impl GpuEngine {
             clamped_workgroups
         } else {
             // Unknown/Generic GPU - use conservative defaults
-            let workgroups = (max_workgroups / 16).max(512);
-            workgroups
+            (max_workgroups / 16).max(512)
         };
 
         log::info!(target: "gpu_engine", "Vendor-specific dispatch configuration:");

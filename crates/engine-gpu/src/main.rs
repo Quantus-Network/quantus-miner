@@ -1,32 +1,7 @@
-use bytemuck;
 use futures::executor::block_on;
-use qp_plonky2_field::goldilocks_field::GoldilocksField;
-use qp_plonky2_field::types::{Field, PrimeField64};
-
-use wgpu::{self, util::DeviceExt};
 
 mod end_to_end_tests;
 mod tests;
-
-fn u8_array_to_u32_array(bytes: &[u8; 96]) -> [u32; 24] {
-    let mut result = [0u32; 24];
-    for i in 0..24 {
-        let idx = i * 4;
-        result[i] =
-            u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
-    }
-    result
-}
-
-fn u8_array_to_u32_array_64(bytes: &[u8; 64]) -> [u32; 16] {
-    let mut result = [0u32; 16];
-    for i in 0..16 {
-        let idx = i * 4;
-        result[i] =
-            u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
-    }
-    result
-}
 
 fn main() {
     block_on(run()).unwrap();
@@ -137,6 +112,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn generate_correct_wgsl_constants() {
     use qp_poseidon_constants::*;
 

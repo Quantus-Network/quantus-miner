@@ -31,7 +31,7 @@ use prometheus::{
 };
 
 #[cfg(feature = "http-exporter")]
-use {anyhow::Result, std::net::SocketAddr, warp, warp::Filter};
+use {anyhow::Result, std::net::SocketAddr, warp::Filter};
 
 #[cfg(not(feature = "http-exporter"))]
 use anyhow::Result;
