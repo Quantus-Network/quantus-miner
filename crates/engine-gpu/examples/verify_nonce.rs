@@ -1,6 +1,5 @@
 use engine_cpu::{BaselineCpuEngine, EngineStatus, MinerEngine, Range};
 use engine_gpu::GpuEngine;
-use pow_core::JobContext;
 use primitive_types::U512;
 use std::sync::atomic::AtomicBool;
 
