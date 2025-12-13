@@ -36,7 +36,7 @@ pub struct GpuEngine {
 
 // Thread-local storage for consistent GPU device assignment per worker thread
 thread_local! {
-    static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = RefCell::new(None);
+    static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 
 impl Default for GpuEngine {
