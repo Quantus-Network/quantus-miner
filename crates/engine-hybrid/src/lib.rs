@@ -18,21 +18,12 @@ use primitive_types::U512;
 pub use engine_cpu::{Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 
 /// Configuration for hybrid mining engine worker allocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HybridConfig {
     /// Number of CPU workers to use (None = auto-detect)
     pub cpu_workers: Option<usize>,
     /// Number of GPU workers to use (None = auto-detect)
     pub gpu_workers: Option<usize>,
-}
-
-impl Default for HybridConfig {
-    fn default() -> Self {
-        Self {
-            cpu_workers: None,
-            gpu_workers: None,
-        }
-    }
 }
 
 impl HybridConfig {
@@ -46,12 +37,12 @@ impl HybridConfig {
 
     /// Get CPU worker count (with default if not set).
     pub fn cpu_workers(&self) -> usize {
-        self.cpu_workers.unwrap_or_else(|| num_cpus::get())
+        self.cpu_workers.unwrap_or_else(num_cpus::get)
     }
 
     /// Get GPU worker count (with default if not set).
     pub fn gpu_workers(&self) -> usize {
-        self.gpu_workers.unwrap_or_else(|| {
+        self.gpu_workers.unwrap_or({
             #[cfg(feature = "gpu")]
             {
                 // Auto-detect GPU device count by creating a temporary GPU engine
