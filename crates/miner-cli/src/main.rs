@@ -394,9 +394,15 @@ async fn run_benchmark_command(
         match engine_selection {
             EngineSelection::Gpu => {
                 if let Some(gpu_engine) = engine.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
-                    gpu_engine.device_count().max(1)
+                    let gpu_device_count = gpu_engine.device_count();
+                    if gpu_device_count == 0 {
+                        eprintln!("Error: GPU engine selected but no GPU devices detected");
+                        std::process::exit(1);
+                    }
+                    gpu_device_count
                 } else {
-                    1
+                    eprintln!("Error: Failed to get GPU engine instance");
+                    std::process::exit(1);
                 }
             }
             _ => num_cpus, // Use all available CPU cores for CPU engines
