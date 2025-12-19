@@ -44,18 +44,21 @@ impl HybridConfig {
         }
     }
 
-    /// Get the effective CPU worker count (with auto-detection fallback).
-    pub fn effective_cpu_workers(&self) -> usize {
+    /// Get CPU worker count (with default if not set).
+    pub fn cpu_workers(&self) -> usize {
         self.cpu_workers.unwrap_or_else(|| num_cpus::get())
     }
 
-    /// Get the effective GPU worker count (with auto-detection fallback).
-    pub fn effective_gpu_workers(&self) -> usize {
+    /// Get GPU worker count (with default if not set).
+    pub fn gpu_workers(&self) -> usize {
         self.gpu_workers.unwrap_or_else(|| {
             #[cfg(feature = "gpu")]
             {
-                // Try to detect GPU devices, fallback to 1 if detection fails
-                1 // TODO: Implement proper GPU device detection
+                // Auto-detect GPU device count by creating a temporary GPU engine
+                let gpu_engine = engine_gpu::GpuEngine::new();
+                let device_count = gpu_engine.device_count();
+                log::debug!("Auto-detected {} GPU device(s)", device_count);
+                device_count
             }
             #[cfg(not(feature = "gpu"))]
             {
@@ -66,7 +69,7 @@ impl HybridConfig {
 
     /// Check if this configuration would result in any workers.
     pub fn has_workers(&self) -> bool {
-        self.effective_cpu_workers() > 0 || self.effective_gpu_workers() > 0
+        self.cpu_workers() > 0 || self.gpu_workers() > 0
     }
 }
 
@@ -85,7 +88,7 @@ pub struct HybridEngine {
 }
 
 impl HybridEngine {
-    /// Create a new hybrid engine with the specified configuration.
+    /// Create a hybrid engine with the specified configuration.
     pub fn new(config: HybridConfig) -> anyhow::Result<Self> {
         if !config.has_workers() {
             return Err(anyhow::anyhow!(
@@ -93,8 +96,8 @@ impl HybridEngine {
             ));
         }
 
-        let cpu_workers = config.effective_cpu_workers();
-        let gpu_workers = config.effective_gpu_workers();
+        let cpu_workers = config.cpu_workers();
+        let gpu_workers = config.gpu_workers();
 
         log::info!(
             "🔀 Initializing hybrid engine: {} CPU workers, {} GPU workers",
@@ -107,8 +110,14 @@ impl HybridEngine {
             cpu_engine: Arc::new(engine_cpu::FastCpuEngine::new()),
             #[cfg(feature = "gpu")]
             gpu_engine: if gpu_workers > 0 {
-                log::info!("🎮 Creating GPU engine for hybrid mining");
-                Some(Arc::new(engine_gpu::GpuEngine::new()))
+                let gpu_engine = engine_gpu::GpuEngine::new();
+                let detected_devices = gpu_engine.device_count();
+                log::info!(
+                    "🎮 Created GPU engine: {} devices detected, {} workers configured",
+                    detected_devices,
+                    gpu_workers
+                );
+                Some(Arc::new(gpu_engine))
             } else {
                 None
             },
@@ -128,7 +137,7 @@ impl HybridEngine {
 
     /// Get the total number of workers across all engines.
     pub fn total_workers(&self) -> usize {
-        self.config.effective_cpu_workers() + self.config.effective_gpu_workers()
+        self.config.cpu_workers() + self.config.gpu_workers()
     }
 
     /// Get the configuration for this hybrid engine.
@@ -138,8 +147,8 @@ impl HybridEngine {
 
     /// Route a thread to the appropriate engine based on worker allocation.
     fn route_to_engine(&self) -> RouteDecision {
-        let cpu_workers = self.config.effective_cpu_workers();
-        let gpu_workers = self.config.effective_gpu_workers();
+        let cpu_workers = self.config.cpu_workers();
+        let gpu_workers = self.config.gpu_workers();
 
         // If only one engine type is available, route directly
         if gpu_workers == 0 {
@@ -242,8 +251,8 @@ mod tests {
     #[test]
     fn test_hybrid_config_with_workers() {
         let config = HybridConfig::new(Some(4), Some(2));
-        assert_eq!(config.effective_cpu_workers(), 4);
-        assert_eq!(config.effective_gpu_workers(), 2);
+        assert_eq!(config.cpu_workers(), 4);
+        assert_eq!(config.gpu_workers(), 2);
         assert!(config.has_workers());
     }
 

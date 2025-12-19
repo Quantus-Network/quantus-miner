@@ -734,6 +734,9 @@ fn mine_range_with_engine(
         if engine.name().contains("gpu") {
             // GPU can handle much larger chunks efficiently
             100_000_000 // 100M hashes per chunk
+        } else if engine.name() == "hybrid" {
+            // Hybrid engines use GPU-sized chunks since they route to GPU workers
+            100_000_000 // 100M hashes per chunk for hybrid
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
@@ -1391,8 +1394,8 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
                 .downcast_ref::<engine_hybrid::HybridEngine>()
             {
                 let hybrid_config = hybrid_engine.config();
-                let cpu_workers = hybrid_config.effective_cpu_workers();
-                let gpu_workers = hybrid_config.effective_gpu_workers();
+                let cpu_workers = hybrid_config.cpu_workers();
+                let gpu_workers = hybrid_config.gpu_workers();
                 workers = cpu_workers + gpu_workers;
                 log::info!(
                     "Hybrid engine: using {} CPU workers + {} GPU workers = {} total workers",
