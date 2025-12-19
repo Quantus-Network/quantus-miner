@@ -39,6 +39,10 @@ pub struct ServiceConfig {
     pub manip_throttle_cap: Option<u64>,
     /// Engine selection (future use). For now, CPU baseline/fast engines are supported.
     pub engine: EngineSelection,
+    /// Number of CPU workers for hybrid mode (None = auto-detect)
+    pub cpu_workers: Option<usize>,
+    /// Number of GPU workers for hybrid mode (None = auto-detect)
+    pub gpu_workers: Option<usize>,
 }
 
 /// Engine selection enum for future extensibility.
@@ -47,6 +51,7 @@ pub enum EngineSelection {
     Cpu,
     CpuChainManipulator,
     Gpu,
+    Hybrid,
 }
 
 impl Default for ServiceConfig {
@@ -62,6 +67,8 @@ impl Default for ServiceConfig {
             manip_step_batch: None,
             manip_throttle_cap: None,
             engine: EngineSelection::Cpu,
+            cpu_workers: None,
+            gpu_workers: None,
         }
     }
 }
@@ -72,6 +79,7 @@ impl fmt::Display for ServiceConfig {
             EngineSelection::Cpu => "cpu",
             EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
             EngineSelection::Gpu => "gpu",
+            EngineSelection::Hybrid => "hybrid",
         };
         write!(
             f,
@@ -1319,6 +1327,27 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
                 ));
             }
         }
+        EngineSelection::Hybrid => {
+            #[cfg(feature = "gpu")]
+            {
+                let hybrid_config =
+                    engine_hybrid::HybridConfig::new(config.cpu_workers, config.gpu_workers);
+                match engine_hybrid::HybridEngine::new(hybrid_config) {
+                    Ok(engine) => Arc::new(engine),
+                    Err(e) => {
+                        log::error!("Failed to create hybrid engine: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                log::error!("Requested engine hybrid, but this binary was built without the 'gpu' feature. Rebuild miner-service with --features gpu.");
+                return Err(anyhow::anyhow!(
+                    "engine 'hybrid' not built (missing 'gpu' feature)"
+                ));
+            }
+        }
     };
     log::info!(
         "🚀 Mining engine selected: {} ({})",
@@ -1327,6 +1356,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
             EngineSelection::Cpu => "Optimized multi-threaded CPU mining",
             EngineSelection::CpuChainManipulator => "Throttled CPU mining for difficulty control",
             EngineSelection::Gpu => "High-performance GPU mining",
+            EngineSelection::Hybrid => "Hybrid CPU+GPU mining",
         }
     );
 
@@ -1348,6 +1378,28 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
                     log::warn!("GPU engine: No GPU devices detected, falling back to 1 worker");
                     workers = 1;
                 }
+            }
+        }
+    }
+
+    // Adjust worker count for hybrid engine based on configured CPU/GPU workers
+    if matches!(config.engine, EngineSelection::Hybrid) {
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(hybrid_engine) = engine
+                .as_any()
+                .downcast_ref::<engine_hybrid::HybridEngine>()
+            {
+                let hybrid_config = hybrid_engine.config();
+                let cpu_workers = hybrid_config.effective_cpu_workers();
+                let gpu_workers = hybrid_config.effective_gpu_workers();
+                workers = cpu_workers + gpu_workers;
+                log::info!(
+                    "Hybrid engine: using {} CPU workers + {} GPU workers = {} total workers",
+                    cpu_workers,
+                    gpu_workers,
+                    workers
+                );
             }
         }
     }

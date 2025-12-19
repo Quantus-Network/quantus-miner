@@ -57,9 +57,17 @@ enum Command {
         manip_throttle_cap: Option<u64>,
 
         /// Mining engine to use (default: cpu).
-        /// Options: cpu, cpu-chain-manipulator, gpu
+        /// Options: cpu, cpu-chain-manipulator, gpu, hybrid
         #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::Cpu)]
         engine: EngineCli,
+
+        /// Number of CPU workers for hybrid mode (None = auto-detect)
+        #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
+        cpu_workers: Option<usize>,
+
+        /// Number of GPU workers for hybrid mode (None = auto-detect)
+        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
+        gpu_workers: Option<usize>,
 
         /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
         #[arg(long = "telemetry-endpoint", env = "MINER_TELEMETRY_ENDPOINTS", value_delimiter = ',', num_args = 0.., value_name = "URL")]
@@ -142,6 +150,8 @@ enum EngineCli {
     CpuChainManipulator,
     /// GPU engine (WGPU based)
     Gpu,
+    /// Hybrid CPU+GPU engine
+    Hybrid,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -150,6 +160,8 @@ enum BenchmarkEngine {
     Cpu,
     /// GPU engine (WGPU based)
     Gpu,
+    /// Hybrid CPU+GPU engine
+    Hybrid,
 }
 
 impl From<EngineCli> for EngineSelection {
@@ -158,6 +170,7 @@ impl From<EngineCli> for EngineSelection {
             EngineCli::Cpu => EngineSelection::Cpu,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             EngineCli::Gpu => EngineSelection::Gpu,
+            EngineCli::Hybrid => EngineSelection::Hybrid,
         }
     }
 }
@@ -167,6 +180,7 @@ impl From<BenchmarkEngine> for EngineSelection {
         match value {
             BenchmarkEngine::Cpu => EngineSelection::Cpu,
             BenchmarkEngine::Gpu => EngineSelection::Gpu,
+            BenchmarkEngine::Hybrid => EngineSelection::Hybrid,
         }
     }
 }
@@ -187,6 +201,8 @@ async fn main() {
         manip_step_batch: None,
         manip_throttle_cap: None,
         engine: EngineCli::Cpu,
+        cpu_workers: None,
+        gpu_workers: None,
         telemetry_endpoints: None,
         telemetry_enabled: None,
         telemetry_verbosity: None,
@@ -210,6 +226,8 @@ async fn main() {
             manip_step_batch,
             manip_throttle_cap,
             engine,
+            cpu_workers,
+            gpu_workers,
             telemetry_endpoints,
             telemetry_enabled,
             telemetry_verbosity,
@@ -233,6 +251,8 @@ async fn main() {
                 manip_step_batch,
                 manip_throttle_cap,
                 engine,
+                cpu_workers,
+                gpu_workers,
                 telemetry_endpoints,
                 telemetry_enabled,
                 telemetry_verbosity,
@@ -270,6 +290,8 @@ async fn run_serve_command(
     manip_step_batch: Option<u64>,
     manip_throttle_cap: Option<u64>,
     engine: EngineCli,
+    cpu_workers: Option<usize>,
+    gpu_workers: Option<usize>,
     telemetry_endpoints: Option<Vec<String>>,
     telemetry_enabled: Option<bool>,
     telemetry_verbosity: Option<u8>,
@@ -341,6 +363,8 @@ async fn run_serve_command(
         manip_step_batch,
         manip_throttle_cap,
         engine: engine.into(),
+        cpu_workers,
+        gpu_workers,
     };
     log::info!("Effective config: {config}");
 
@@ -374,6 +398,7 @@ async fn run_benchmark_command(
         match engine_cli {
             BenchmarkEngine::Cpu => "CPU",
             BenchmarkEngine::Gpu => "GPU",
+            BenchmarkEngine::Hybrid => "Hybrid",
         }
     );
     println!("Duration: {} seconds", duration_secs);
@@ -383,6 +408,13 @@ async fn run_benchmark_command(
     let engine: Arc<dyn MinerEngine> = match engine_selection {
         EngineSelection::Cpu => Arc::new(engine_cpu::FastCpuEngine::new()),
         EngineSelection::Gpu => Arc::new(engine_gpu::GpuEngine::new()),
+        EngineSelection::Hybrid => {
+            let hybrid_config = engine_hybrid::HybridConfig::new(None, None);
+            Arc::new(
+                engine_hybrid::HybridEngine::new(hybrid_config)
+                    .expect("Failed to create hybrid engine"),
+            )
+        }
         EngineSelection::CpuChainManipulator => {
             unreachable!("CPU chain manipulator not supported in benchmark")
         }
@@ -402,6 +434,17 @@ async fn run_benchmark_command(
                     gpu_device_count
                 } else {
                     eprintln!("Error: Failed to get GPU engine instance");
+                    std::process::exit(1);
+                }
+            }
+            EngineSelection::Hybrid => {
+                if let Some(hybrid_engine) = engine
+                    .as_any()
+                    .downcast_ref::<engine_hybrid::HybridEngine>()
+                {
+                    hybrid_engine.total_workers()
+                } else {
+                    eprintln!("Error: Failed to get hybrid engine instance");
                     std::process::exit(1);
                 }
             }

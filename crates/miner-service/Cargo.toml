@@ -10,7 +10,7 @@ default = ["cpu", "metrics"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
 # Enable GPU engine.
-gpu = ["engine-gpu"]
+gpu = ["engine-gpu", "engine-hybrid"]
 # Optional metrics/observability (Prometheus endpoint).
 metrics = [
 	"dep:metrics",
@@ -41,5 +41,6 @@ quantus-miner-api = { workspace = true }
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
 engine-gpu = { path = "../engine-gpu", optional = true }
+engine-hybrid = { path = "../engine-hybrid", optional = true }
 metrics = { path = "../metrics", optional = true }
 miner-telemetry = { path = "../miner-telemetry" }
