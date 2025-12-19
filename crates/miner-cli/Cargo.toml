@@ -15,6 +15,11 @@ clap = { workspace = true, features = ["derive", "env"] }
 tokio = { workspace = true, features = ["full"] }
 env_logger = { workspace = true }
 log = { workspace = true }
+engine-cpu = { path = "../engine-cpu" }
+engine-gpu = { path = "../engine-gpu" }
+primitive-types = { workspace = true }
+rand = { workspace = true }
+num_cpus = { workspace = true }
 
 [[bin]]
 name = "quantus-miner"
