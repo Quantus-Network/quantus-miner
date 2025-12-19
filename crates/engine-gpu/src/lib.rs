@@ -411,7 +411,7 @@ impl MinerEngine for GpuEngine {
         }
 
         if cancel.load(Ordering::Relaxed) {
-            log::debug!(target: "gpu_engine", "GPU 0 cancelled before dispatch.");
+            log::debug!(target: "gpu_engine", "GPU {} cancelled before dispatch.", device_index);
             return EngineStatus::Cancelled { hash_count: 0 };
         }
 
@@ -487,7 +487,7 @@ impl MinerEngine for GpuEngine {
             let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
             let work = nonce.to_big_endian();
 
-            log::info!("GPU 0 found solution! Nonce: {}, Hash: {:x}", nonce, hash);
+            log::info!("GPU {} found solution! Nonce: {}, Hash: {:x}", device_index, nonce, hash);
 
             drop(data);
             gpu_ctx.staging_buffer.unmap();
@@ -513,7 +513,7 @@ impl MinerEngine for GpuEngine {
             hash_count as f64 / total_time.as_secs_f64()
         );
 
-        log::debug!(target: "gpu_engine", "GPU 0 finished range with no solution.");
+        log::debug!(target: "gpu_engine", "GPU {} finished range with no solution.", device_index);
         EngineStatus::Exhausted { hash_count }
     }
 }
