@@ -268,10 +268,14 @@ fn u32_sub_with_borrow(a: u32, b: u32, borrow_in: u32) -> vec2<u32> {
 
 // Multiply two u32 values to get a u64 result (as vec2<u32>)
 fn u32_mul_to_u64(a: u32, b: u32) -> vec2<u32> {
-    let a_lo = a & 0xFFFFu;
-    let a_hi = a >> 16u;
-    let b_lo = b & 0xFFFFu;
-    let b_hi = b >> 16u;
+    // Use unpack2x16u to split 32-bit values into 16-bit halves efficiently
+    let a_parts = unpack2x16u(a);
+    let a_lo = a_parts.x;
+    let a_hi = a_parts.y;
+    
+    let b_parts = unpack2x16u(b);
+    let b_lo = b_parts.x;
+    let b_hi = b_parts.y;
 
     let p0 = a_lo * b_lo;
     let p1 = a_hi * b_lo;
@@ -463,12 +467,9 @@ fn gf_reduce_4limb(limbs: array<u32, 4>) -> GoldilocksField {
 
 // Main Goldilocks field multiplication
 fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // Handle special cases
-    if (a.limb0 == 0u && a.limb1 == 0u) { return gf_zero(); }
-    if (b.limb0 == 0u && b.limb1 == 0u) { return gf_zero(); }
-    if (a.limb0 == 1u && a.limb1 == 0u) { return b; }
-    if (b.limb0 == 1u && b.limb1 == 0u) { return a; }
-
+    // Removed branching checks for 0 and 1 to improve GPU uniformity.
+    // The general math handles 0 and 1 correctly.
+    
     // General case: multiply and reduce
     let unreduced = gf_mul_unreduced(a, b);
     return gf_reduce_4limb(unreduced);
@@ -618,41 +619,17 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
 fn bytes_to_field_elements(input: array<u32, 24>) -> array<GoldilocksField, 25> {
     var felts: array<GoldilocksField, 25>;
 
-    // Convert u32 array to bytes (96 bytes total)
-    var bytes: array<u32, 96>;  // Using u32s to store bytes for easier processing
+    // Optimized conversion: The input is already aligned as u32s.
+    // Bytes 0..95 correspond exactly to input[0]..input[23].
     for (var i = 0u; i < 24u; i++) {
-        let val = input[i];
-        bytes[i * 4u + 0u] = val & 0xFFu;         // byte 0
-        bytes[i * 4u + 1u] = (val >> 8u) & 0xFFu;  // byte 1
-        bytes[i * 4u + 2u] = (val >> 16u) & 0xFFu; // byte 2
-        bytes[i * 4u + 3u] = (val >> 24u) & 0xFFu; // byte 3
+        felts[i] = gf_from_u32(input[i]);
     }
 
-    // Apply injective padding: add 1 byte, then pad with zeros to 4-byte alignment
-    var padded_len = 96u + 1u; // 96 bytes + 1 marker byte = 97
-    let padding_needed = (4u - (padded_len % 4u)) % 4u;
-    padded_len = padded_len + padding_needed; // Should be 100 bytes (25 u32s worth)
-
-    // Create padded byte array
-    var padded_bytes: array<u32, 100>;
-    for (var i = 0u; i < 96u; i++) {
-        padded_bytes[i] = bytes[i];
-    }
-    padded_bytes[96] = 1u; // End marker
-    for (var i = 97u; i < 100u; i++) {
-        padded_bytes[i] = 0u; // Padding zeros
-    }
-
-    // Convert every 4 bytes to one field element (25 field elements total)
-    for (var i = 0u; i < 25u; i++) {
-        let byte_idx = i * 4u;
-        // Create u32 from 4 bytes in little-endian order
-        let val = padded_bytes[byte_idx] |
-                 (padded_bytes[byte_idx + 1u] << 8u) |
-                 (padded_bytes[byte_idx + 2u] << 16u) |
-                 (padded_bytes[byte_idx + 3u] << 24u);
-        felts[i] = gf_from_u32(val);
-    }
+    // Apply injective padding:
+    // Byte 96 is the start of the 25th element (index 24).
+    // The padding byte is 0x01, followed by 0x00s.
+    // So the 25th u32 is 0x00000001 (Little Endian).
+    felts[24] = gf_from_u32(1u);
 
     return felts;
 }
