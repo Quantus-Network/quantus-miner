@@ -4,7 +4,7 @@ This directory contains a production-friendly systemd unit and drop-in overrides
 
 Contents
 - quantus-miner.service
-  - A baseline unit file that runs the miner with journald logging and sensible security hardening.
+  - A service unit file that runs the miner with journald logging and sensible security hardening.
   - Uses environment variables for configuration (preferred for stable ExecStart).
 - overrides/
   - 10-shared-hardware.conf
@@ -31,7 +31,7 @@ Install (unit)
    - RHEL/CentOS/Fed: sudoedit /etc/sysconfig/quantus-miner
 
    Common variables (examples):
-   MINER_ENGINE=cpu-fast
+   MINER_ENGINE=cpu
    MINER_PORT=9833
    MINER_METRICS_PORT=9900         # enable Prometheus exporter
    MINER_WORKERS=4                 # leave unset to use default (50% of effective CPUs)
@@ -66,8 +66,8 @@ Dedicated hardware (miner only)
 
 Configuration reference (environment variables)
 - MINER_ENGINE
-  - cpu-fast (default), cpu-baseline, cpu-chain-manipulator
-  - gpu-cuda, gpu-opencl are placeholders; selecting them fails with a clear error.
+  - cpu (default), cpu-chain-manipulator
+  - gpu for high-performance GPU mining
 - MINER_PORT
   - HTTP API port (default 9833)
 - MINER_METRICS_PORT

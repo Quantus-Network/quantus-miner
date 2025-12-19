@@ -9,15 +9,13 @@ description = "Service layer: HTTP API, job orchestration, and engine abstractio
 default = ["cpu", "metrics"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
+# Enable GPU engine.
+gpu = ["engine-gpu"]
 # Optional metrics/observability (Prometheus endpoint).
 metrics = [
 	"dep:metrics",
-	"engine-gpu-cuda?/metrics",
 	"metrics/http-exporter",
 ]
-# Optional GPU backends (off by default).
-cuda = ["dep:engine-gpu-cuda", "engine-gpu-cuda/cuda"]
-opencl = ["engine-gpu-opencl"]
 
 [dependencies]
 # Workspace-shared deps
@@ -32,6 +30,9 @@ crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+reqwest = { version = "0.11", features = ["json"] }
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
 
 # Protocol types from the node repo (keep API compatibility)
 quantus-miner-api = { workspace = true }
@@ -39,7 +40,6 @@ quantus-miner-api = { workspace = true }
 # Local crates
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
-engine-gpu-cuda = { path = "../engine-gpu-cuda", optional = true, features = ["cuda"] }
-engine-gpu-opencl = { path = "../engine-gpu-opencl", optional = true }
+engine-gpu = { path = "../engine-gpu", optional = true }
 metrics = { path = "../metrics", optional = true }
 miner-telemetry = { path = "../miner-telemetry" }

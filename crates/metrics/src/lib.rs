@@ -31,11 +31,7 @@ use prometheus::{
 };
 
 #[cfg(feature = "http-exporter")]
-use {
-    anyhow::Result,
-    std::net::SocketAddr,
-    warp::{http::Response, Filter},
-};
+use {anyhow::Result, std::net::SocketAddr, warp::Filter};
 
 #[cfg(not(feature = "http-exporter"))]
 use anyhow::Result;
@@ -341,7 +337,7 @@ static JOB_FOUND_ORIGIN: Lazy<GaugeVec> = Lazy::new(|| {
     let g = GaugeVec::new(
         opts!(
             "miner_job_found_origin",
-            "Job found origin gauge (set to 1 for the origin that found the candidate)"
+            "Per-job found candidate origin (0=unknown, 1=cpu, 2=gpu-g1, 3=gpu-g2)"
         ),
         &["engine", "job_id", "origin"],
     )
@@ -349,6 +345,67 @@ static JOB_FOUND_ORIGIN: Lazy<GaugeVec> = Lazy::new(|| {
     REGISTRY
         .register(Box::new(g.clone()))
         .expect("register miner_job_found_origin");
+    g
+});
+
+// -------------------------------------------------------------------------------------
+// GPU-specific metrics
+// -------------------------------------------------------------------------------------
+
+static GPU_DEVICE_COUNT: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "miner_gpu_devices_total",
+        "Number of GPU devices available for mining",
+    )
+    .expect("create miner_gpu_devices_total");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_devices_total");
+    g
+});
+
+static GPU_DEVICE_INFO: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_gpu_device_info",
+            "GPU device information (label-only gauge set to 1). Labels: device_id, name, backend, vendor, device_type"
+        ),
+        &["device_id", "name", "backend", "vendor", "device_type"],
+    )
+    .expect("create miner_gpu_device_info");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_device_info");
+    g
+});
+
+static GPU_BATCH_SIZE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_gpu_batch_size",
+            "Current GPU batch size (hashes per batch) per device"
+        ),
+        &["device_id"],
+    )
+    .expect("create miner_gpu_batch_size");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_batch_size");
+    g
+});
+
+static GPU_WORKGROUPS: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        opts!(
+            "miner_gpu_workgroups",
+            "Number of GPU workgroups dispatched per device"
+        ),
+        &["device_id"],
+    )
+    .expect("create miner_gpu_workgroups");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_workgroups");
     g
 });
 
@@ -648,6 +705,42 @@ pub fn remove_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str) {
 }
 
 // -------------------------------------------------------------------------------------
+// GPU-specific metric helpers
+// -------------------------------------------------------------------------------------
+
+/// Set the total number of GPU devices available for mining
+pub fn set_gpu_device_count(count: i64) {
+    GPU_DEVICE_COUNT.set(count);
+}
+
+/// Set GPU device information (call once per device during initialization)
+pub fn set_gpu_device_info(
+    device_id: &str,
+    name: &str,
+    backend: &str,
+    vendor: &str,
+    device_type: &str,
+) {
+    GPU_DEVICE_INFO
+        .with_label_values(&[device_id, name, backend, vendor, device_type])
+        .set(1.0);
+}
+
+/// Set GPU batch size for a specific device
+pub fn set_gpu_batch_size(device_id: &str, batch_size: f64) {
+    GPU_BATCH_SIZE
+        .with_label_values(&[device_id])
+        .set(batch_size);
+}
+
+/// Set GPU workgroup count for a specific device
+pub fn set_gpu_workgroups(device_id: &str, workgroups: f64) {
+    GPU_WORKGROUPS
+        .with_label_values(&[device_id])
+        .set(workgroups);
+}
+
+// -------------------------------------------------------------------------------------
 // HTTP Exporter (feature: http-exporter)
 // -------------------------------------------------------------------------------------
 
@@ -657,6 +750,7 @@ pub fn remove_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str) {
 /// - Spawns the exporter as a background task and returns immediately.
 /// - Serves plaintext metrics at GET /metrics.
 /// - If called multiple times, multiple servers may be created (call once).
+#[cfg(feature = "http-exporter")]
 pub async fn start_http_exporter(port: u16) -> Result<()> {
     // Encoder is created inside the handler to avoid capturing non-Clone state
     // Use REGISTRY.gather() directly in the handler
@@ -670,7 +764,7 @@ pub async fn start_http_exporter(port: u16) -> Result<()> {
             .encode(&metric_families, &mut buffer)
             .unwrap_or_default();
 
-        Response::builder()
+        warp::http::Response::builder()
             .header("Content-Type", encoder.format_type())
             .body(String::from_utf8(buffer).unwrap_or_default())
     });

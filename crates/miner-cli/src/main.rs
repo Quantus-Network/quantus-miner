@@ -17,10 +17,19 @@ struct Args {
     #[arg(long, env = "MINER_METRICS_PORT")]
     metrics_port: Option<u16>,
 
-    /// Target milliseconds for per-thread progress updates (chunking).
-    /// Smaller values increase metrics freshness but add a bit of overhead.
-    #[arg(long = "progress-chunk-ms", env = "MINER_PROGRESS_CHUNK_MS")]
-    progress_chunk_ms: Option<u64>,
+    /// Enable verbose logging (shows debug info, progress details, etc.)
+    #[arg(short, long, env = "MINER_VERBOSE")]
+    verbose: bool,
+
+    /// How often to report mining progress (in milliseconds).
+    /// Smaller values give more frequent updates but slightly reduce performance.
+    #[arg(long = "progress-interval-ms", env = "MINER_PROGRESS_INTERVAL_MS")]
+    progress_interval_ms: Option<u64>,
+
+    /// Size of work chunks to process before reporting progress (number of hashes).
+    /// If omitted, uses engine-specific defaults (200K for CPU, 100M for GPU).
+    #[arg(long = "chunk-size", env = "MINER_CHUNK_SIZE")]
+    chunk_size: Option<u64>,
 
     /// For cpu-chain-manipulator: start throttle index at this many solved blocks
     /// to "pick up where we left off" after restarts.
@@ -39,10 +48,9 @@ struct Args {
     #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
     manip_throttle_cap: Option<u64>,
 
-    /// Mining engine to use (default: cpu-fast).
-    /// Options: cpu-baseline, cpu-fast, cpu-chain-manipulator, gpu-cuda, gpu-opencl
-    /// Note: GPU engines are currently unimplemented and will return a clear error at runtime.
-    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::CpuFast)]
+    /// Mining engine to use (default: cpu).
+    /// Options: cpu, cpu-chain-manipulator, gpu
+    #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::Cpu)]
     engine: EngineCli,
 
     /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
@@ -92,26 +100,20 @@ struct Args {
 #[allow(clippy::enum_variant_names)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum EngineCli {
-    /// Baseline CPU engine (reference implementation)
-    CpuBaseline,
     /// Optimized CPU engine (incremental precompute + step_mul)
-    CpuFast,
+    Cpu,
     /// Throttling CPU engine that slows per block to help reduce difficulty
     CpuChainManipulator,
-    /// CUDA GPU engine (unimplemented; selecting will return an error)
-    GpuCuda,
-    /// OpenCL GPU engine (unimplemented; selecting will return an error)
-    GpuOpencl,
+    /// GPU engine (WGPU based)
+    Gpu,
 }
 
 impl From<EngineCli> for EngineSelection {
     fn from(value: EngineCli) -> Self {
         match value {
-            EngineCli::CpuBaseline => EngineSelection::CpuBaseline,
-            EngineCli::CpuFast => EngineSelection::CpuFast,
+            EngineCli::Cpu => EngineSelection::Cpu,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
-            EngineCli::GpuCuda => EngineSelection::GpuCuda,
-            EngineCli::GpuOpencl => EngineSelection::GpuOpenCl,
+            EngineCli::Gpu => EngineSelection::Gpu,
         }
     }
 }
@@ -121,9 +123,14 @@ async fn main() {
     let args = Args::parse();
 
     // Initialize logger early to capture startup messages.
-    // If RUST_LOG is not set, default to info level for our app.
+    // If RUST_LOG is not set, default to appropriate level based on verbose flag
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        let log_level = if args.verbose {
+            "debug,miner=debug,gpu_engine=debug,engine_cpu=debug"
+        } else {
+            "info,miner=info,gpu_engine=info"
+        };
+        std::env::set_var("RUST_LOG", log_level);
     }
     env_logger::init();
 
@@ -168,7 +175,8 @@ async fn main() {
         port: args.port,
         workers: args.workers,
         metrics_port: args.metrics_port,
-        progress_chunk_ms: args.progress_chunk_ms,
+        progress_interval_ms: args.progress_interval_ms,
+        chunk_size: args.chunk_size,
         manip_solved_blocks: args.manip_solved_blocks,
         manip_base_delay_ns: args.manip_base_delay_ns,
         manip_step_batch: args.manip_step_batch,

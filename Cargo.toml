@@ -1,8 +1,7 @@
 [workspace]
 members = [
 	"crates/engine-cpu",
-	"crates/engine-gpu-cuda",
-	"crates/engine-gpu-opencl",
+	"crates/engine-gpu",
 	"crates/metrics",
 	"crates/miner-cli",
 	"crates/miner-service",
