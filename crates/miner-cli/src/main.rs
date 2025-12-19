@@ -107,9 +107,9 @@ enum Command {
     /// Run a quick benchmark of the specified mining engine
     Benchmark {
         /// Mining engine to benchmark.
-        /// Options: cpu, cpu-chain-manipulator, gpu
-        #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::Cpu)]
-        engine: EngineCli,
+        /// Options: cpu, gpu
+        #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = BenchmarkEngine::Cpu)]
+        engine: BenchmarkEngine,
 
         /// Number of worker threads (logical CPUs) to use for mining (defaults to all available)
         #[arg(long = "workers", env = "MINER_WORKERS")]
@@ -144,12 +144,29 @@ enum EngineCli {
     Gpu,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum BenchmarkEngine {
+    /// Optimized CPU engine (incremental precompute + step_mul)
+    Cpu,
+    /// GPU engine (WGPU based)
+    Gpu,
+}
+
 impl From<EngineCli> for EngineSelection {
     fn from(value: EngineCli) -> Self {
         match value {
             EngineCli::Cpu => EngineSelection::Cpu,
             EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
             EngineCli::Gpu => EngineSelection::Gpu,
+        }
+    }
+}
+
+impl From<BenchmarkEngine> for EngineSelection {
+    fn from(value: BenchmarkEngine) -> Self {
+        match value {
+            BenchmarkEngine::Cpu => EngineSelection::Cpu,
+            BenchmarkEngine::Gpu => EngineSelection::Gpu,
         }
     }
 }
@@ -334,7 +351,7 @@ async fn run_serve_command(
 }
 
 async fn run_benchmark_command(
-    engine_cli: EngineCli,
+    engine_cli: BenchmarkEngine,
     workers: Option<usize>,
     duration_secs: u64,
     verbose: bool,
@@ -355,9 +372,8 @@ async fn run_benchmark_command(
     println!(
         "Engine: {}",
         match engine_cli {
-            EngineCli::Cpu => "CPU (Fast)",
-            EngineCli::CpuChainManipulator => "CPU (Chain Manipulator)",
-            EngineCli::Gpu => "GPU",
+            BenchmarkEngine::Cpu => "CPU",
+            BenchmarkEngine::Gpu => "GPU",
         }
     );
     println!("Duration: {} seconds", duration_secs);
@@ -366,8 +382,10 @@ async fn run_benchmark_command(
     let engine_selection = EngineSelection::from(engine_cli);
     let engine: Arc<dyn MinerEngine> = match engine_selection {
         EngineSelection::Cpu => Arc::new(engine_cpu::FastCpuEngine::new()),
-        EngineSelection::CpuChainManipulator => Arc::new(engine_cpu::ChainEngine::new()),
         EngineSelection::Gpu => Arc::new(engine_gpu::GpuEngine::new()),
+        EngineSelection::CpuChainManipulator => {
+            unreachable!("CPU chain manipulator not supported in benchmark")
+        }
     };
 
     // Determine number of workers
