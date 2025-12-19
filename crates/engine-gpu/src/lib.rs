@@ -487,7 +487,12 @@ impl MinerEngine for GpuEngine {
             let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
             let work = nonce.to_big_endian();
 
-            log::info!("GPU {} found solution! Nonce: {}, Hash: {:x}", device_index, nonce, hash);
+            log::info!(
+                "GPU {} found solution! Nonce: {}, Hash: {:x}",
+                device_index,
+                nonce,
+                hash
+            );
 
             drop(data);
             gpu_ctx.staging_buffer.unmap();

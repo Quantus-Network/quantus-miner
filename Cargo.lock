@@ -1491,9 +1491,14 @@ name = "miner-cli"
 version = "1.0.0"
 dependencies = [
  "clap",
+ "engine-cpu",
+ "engine-gpu",
  "env_logger",
  "log",
  "miner-service",
+ "num_cpus",
+ "primitive-types 0.13.1",
+ "rand 0.8.5",
  "tokio",
 ]
 
