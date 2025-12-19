@@ -7,7 +7,7 @@ description = "CLI binary to run the Quantus External Miner service"
 
 [features]
 default = []
-gpu = ["miner-service/gpu", "engine-hybrid/gpu"]
+gpu = ["engine-hybrid/gpu", "miner-service/gpu"]
 
 [dependencies]
 miner-service = { path = "../miner-service" }
