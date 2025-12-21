@@ -1,173 +1,124 @@
 # External Miner Service for Quantus Network
 
-Note: This repository is now a Cargo workspace. Build and run the CLI with:
-- cargo build -p miner-cli --release
-- cargo run -p miner-cli -- --port 9833 [--metrics-port 9900] [--workers N]
-
-This crate provides an external mining service that can be used with a Quantus Network node. It exposes an HTTP API for
-managing mining jobs.
+High-performance external mining service for Quantus Network with support for CPU, GPU, and hybrid CPU+GPU mining.
 
 ## Building
 
-To build the external miner service, navigate to the `miner` directory within the repository and use Cargo:
-
 ```bash
-cd quantus-miner
-cargo build --release
-```
+# CPU-only build (default)
+cargo build -p miner-cli --release
 
-This will compile the binary and place it in the `target/release/` directory.
-
-## GPU Mining (cross-platform)
-
-The GPU engine uses WGPU for cross-platform GPU acceleration and supports:
-- **macOS**: Apple Metal (Apple Silicon & Intel Macs)  
-- **Linux**: Vulkan, OpenGL
-- **Windows**: DirectX 12, Vulkan
-
-Build with GPU support:
-```bash
-# Build the CLI with GPU feature enabled
+# With GPU support (recommended)
 cargo build -p miner-cli --features gpu --release
 ```
 
-At runtime, select the GPU engine:
-```bash
-# GPU engine will auto-detect the best available GPU backend
-./target/release/quantus-miner --engine gpu --metrics-port 9919
-```
-
-The GPU engine automatically selects the optimal backend and configuration for your hardware.
-
-### Platform-specific GPU Setup
-
-**macOS (Apple Silicon/Intel):**
-- GPU support works out-of-the-box with Metal backend
-- No additional setup required
-
-**Linux:**
-- Install graphics drivers for your GPU:
-```bash
-# For NVIDIA (Ubuntu/Debian):
-sudo ubuntu-drivers autoinstall
-
-# For AMD (Ubuntu/Debian):  
-sudo apt install mesa-vulkan-drivers
-
-# For Intel integrated graphics:
-sudo apt install intel-media-va-driver
-```
-
-**Windows:**
-- Ensure you have recent graphics drivers installed
-- DirectX 12 or Vulkan support recommended
-
-### GPU Performance Tips
-
-- GPU mining works best with large workloads - let it run on high-difficulty targets
-- Monitor GPU utilization with platform tools:
-  - **macOS**: `sudo powermetrics --samplers gpu_power -i 1000`  
-  - **Linux**: `nvidia-smi` (NVIDIA) or `radeontop` (AMD)
-  - **Windows**: Task Manager GPU tab or GPU-Z
-- The GPU engine automatically optimizes for your hardware architecture
-
-## Configuration
-
-The service can be configured using command-line arguments or environment variables.
-
-| Argument          | Environment Variable | Description                                | Default       |
-|-------------------|----------------------|--------------------------------------------|---------------|
-| `--port <PORT>`   | `MINER_PORT`         | The port for the HTTP server to listen on. | `9833`        |
-| `--workers <N>` | `MINER_WORKERS` | The number of worker threads (logical CPUs) to use for mining. | Auto-detected (leaves ~half available) |
-
-Example:
-
-```bash
-# Run on the default port 9833 using about half of total cpu resources
-../target/release/quantus-miner
-
-# Run on a custom port with 4 workers (logical CPUs)
-../target/release/quantus-miner --port 8000 --workers 4
-
-# Equivalent using environment variables
-export MINER_PORT=8000
-export MINER_WORKERS=4
-../target/release/quantus-miner
-```
+The binary will be available at `target/release/quantus-miner`.
 
 ## Running
 
-After building the service, you can run it directly from the command line:
+```bash
+# CPU-only mining (default: auto-detected CPU cores)
+./target/release/quantus-miner --cpu-workers 4
+
+# GPU-only mining (requires --features gpu build)
+./target/release/quantus-miner --gpu-workers 1
+
+# Hybrid CPU+GPU mining
+./target/release/quantus-miner --cpu-workers 4 --gpu-workers 1
+
+# Custom port and metrics
+./target/release/quantus-miner --cpu-workers 2 --port 8000 --metrics-port 9900
+```
+
+## Configuration
+
+| Argument | Environment Variable | Description | Default |
+|----------|---------------------|-------------|---------|
+| `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
+| `--gpu-workers <N>` | `MINER_GPU_WORKERS` | Number of GPU worker threads | 0 |
+| `--port <PORT>` | `MINER_PORT` | HTTP API port | 9833 |
+| `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | Disabled |
+
+## GPU Mining
+
+GPU support uses WGPU for cross-platform acceleration:
+
+- **macOS**: Metal backend (Apple Silicon & Intel)
+- **Linux**: Vulkan/OpenGL backends
+- **Windows**: DirectX 12/Vulkan backends
+
+### Setup
+
+**Build with GPU support:**
+```bash
+cargo build -p miner-cli --features gpu --release
+```
+
+**Platform requirements:**
+- **macOS**: Works out-of-the-box
+- **Linux**: Install GPU drivers (`nvidia-driver`, `mesa-vulkan-drivers`)
+- **Windows**: Ensure recent graphics drivers are installed
+
+### Performance Monitoring
+
+- **macOS**: `sudo powermetrics --samplers gpu_power -i 1000`
+- **Linux**: `nvidia-smi` (NVIDIA) or `radeontop` (AMD)  
+- **Windows**: Task Manager GPU tab
+
+## Examples
 
 ```bash
-# Run with default settings
-RUST_LOG=info ../target/release/quantus-miner
+# CPU mining with 8 workers
+./target/release/quantus-miner --cpu-workers 8
 
-# Run with a specific port and 2 workers
-RUST_LOG=info ../target/release/quantus-miner --port 12345 --workers 2
+# Pure GPU mining
+./target/release/quantus-miner --gpu-workers 1
 
-# Run in debug mode
-RUST_LOG=info,miner=debug ../target/release/quantus-miner --workers 4
+# Hybrid mining: 4 CPU + 1 GPU workers
+./target/release/quantus-miner --cpu-workers 4 --gpu-workers 1
 
+# With verbose logging
+RUST_LOG=debug ./target/release/quantus-miner --cpu-workers 2 --gpu-workers 1
+
+# Production setup with metrics
+./target/release/quantus-miner \
+  --cpu-workers 6 \
+  --gpu-workers 1 \
+  --port 9833 \
+  --metrics-port 9900
 ```
 
-The service will start and log messages to the console, indicating the port it's listening on and the number of worker threads in use.
+## API Endpoints
 
-Example output:
+- `POST /mine`: Submit mining job
+- `GET /result/{job_id}`: Get job status/result
+- `POST /cancel/{job_id}`: Cancel job
 
-```
-INFO  external_miner > Starting external miner service...
-INFO  external_miner > Using auto-detected workers (leaving headroom): 4
-INFO  external_miner > Server starting on 0.0.0.0:9833
-```
-
-## API Specification
-
-The detailed API specification is defined using OpenAPI 3.0 and can be found in the `api/openapi.yaml` file.
-
-This specification details all endpoints, request/response formats, and expected status codes.
-You can use tools like [Swagger Editor](https://editor.swagger.io/)
-or [Swagger UI](https://swagger.io/tools/swagger-ui/) to view and interact with the API definition.
-
-## A note on workers
-
-The miner previously used a flag named `--num-cores`. To better reflect intent, this has been replaced by `--workers`, which specifies the number of worker threads (logical CPUs). When not provided, the miner auto-detects an effective CPU set (honoring cgroup cpusets when present) and defaults to a value that leaves roughly half of the system resources available to other processes.
-
-## API Endpoints (Summary)
-
-* `POST /mine`: Submits a new mining job.
-* `GET /result/{job_id}`: Retrieves the status and result of a specific mining job.
-* `POST /cancel/{job_id}`: Cancels an ongoing mining job.
+Full API specification: `api/openapi.yaml`
 
 ## Docker
 
-### Quick Start
-
 ```bash
-# Pull the latest image
+# Quick start
 docker pull ghcr.io/quantus-network/quantus-miner:latest
-
-# Run with 3 workers
-docker run -d \
-  --name quantus-miner \
-  -p 9833:9833 \
-  -p 9900:9900 \
+docker run -d -p 9833:9833 -p 9900:9900 \
   ghcr.io/quantus-network/quantus-miner:latest \
-  --engine cpu --workers 3 --metrics-port 9900
+  --cpu-workers 4 --metrics-port 9900
 
-# Check logs
-docker logs -f quantus-miner
+# Build from source
+docker build -t quantus-miner .
+docker run -d -p 9833:9833 quantus-miner --cpu-workers 4
 ```
 
-### Build from Source
+## Benchmarking
 
 ```bash
-docker build -t quantus-miner .
-docker run -d -p 9833:9833 -p 9900:9900 quantus-miner --workers 3
+# Benchmark CPU performance
+./target/release/quantus-miner benchmark --cpu-workers 8 --duration 30
+
+# Benchmark GPU performance  
+./target/release/quantus-miner benchmark --gpu-workers 1 --duration 30
+
+# Benchmark hybrid performance
+./target/release/quantus-miner benchmark --cpu-workers 4 --gpu-workers 1 --duration 30
 ```
-
-## Implementation and PR review docs
-
-These documents provide reviewers with the authoritative context for changes. Commits and pull requests should link to the relevant prompt/response entry.
-
-- Authoring/process guide: agents.md
