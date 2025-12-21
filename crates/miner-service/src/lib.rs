@@ -1600,8 +1600,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mining_state_add_get_remove() {
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(2, 0, Some(cpu_engine), None, 2000, None);
 
         let job = MiningJob::new(
             [1u8; 32],
@@ -1619,8 +1619,8 @@ mod tests {
     async fn test_job_lifecycle_fail() {
         // Test that a job fails if no nonce is found (threshold too strict).
         // To make this deterministic, avoid nonce=0, which some math paths treat as special.
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(1, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(1, 0, Some(cpu_engine), None, 2000, None);
         state.start_mining_loop().await;
 
         // Impossible difficulty with a nonce range that excludes 0
@@ -1660,7 +1660,9 @@ mod tests {
         fn partitions_cover_entire_range_even_workers() {
             // Range [0, 99] split into 4 workers
             let p = compute_partitions(u(0), u(99), 4);
-            assert_eq!(p.total_range, u(100));
+            // total_range field removed, verify by checking all ranges sum to 100
+            let total: u64 = p.ranges.iter().map(|(s, e)| (e - s + 1).low_u64()).sum();
+            assert_eq!(total, 100);
             // Check coverage and ordering
             let mut covered = 0u64;
             let mut prev_end = u(0);
@@ -1682,7 +1684,9 @@ mod tests {
         fn partitions_cover_entire_range_odd_workers() {
             // Range [0, 99] split into 3 workers
             let p = compute_partitions(u(0), u(99), 3);
-            assert_eq!(p.total_range, u(100));
+            // total_range field removed, verify by checking all ranges sum to 100
+            let total: u64 = p.ranges.iter().map(|(s, e)| (e - s + 1).low_u64()).sum();
+            assert_eq!(total, 100);
             // Ensure last range takes remainder and we end exactly at 99
             assert_eq!(p.ranges.len(), 3);
             assert_eq!(p.ranges[0], (u(0), u(32)));
@@ -1694,7 +1698,19 @@ mod tests {
         fn partitions_handles_start_eq_end() {
             // Range [42, 42] split into any workers -> only last partition reaches the end
             let p = compute_partitions(u(42), u(42), 5);
-            assert_eq!(p.total_range, u(1));
+            // total_range field removed, verify by checking range sums to 1
+            let total: u64 = p
+                .ranges
+                .iter()
+                .map(|(s, e)| {
+                    if e >= s {
+                        (e - s + 1).low_u64()
+                    } else {
+                        0 // Empty range
+                    }
+                })
+                .sum();
+            assert_eq!(total, 1);
             assert_eq!(p.ranges.len(), 5);
             // All but the last partition may have end < start (empty), but no overflow, and last ends at 42
             assert_eq!(p.ranges[4].1, u(42));
@@ -1717,8 +1733,8 @@ mod tests {
     #[tokio::test]
     async fn test_job_lifecycle_success() {
         // Test that a job completes successfully
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(2, 0, Some(cpu_engine), None, 2000, None);
         state.start_mining_loop().await;
 
         // Easy difficulty
@@ -1840,8 +1856,8 @@ mod tests {
     async fn http_endpoints_handle_basic_flows() {
         use warp::test::request;
 
-        let engine: Arc<dyn engine_cpu::MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let service = MiningService::new(2, engine, 1000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let service = MiningService::new(2, 0, Some(cpu_engine), None, 1000, None);
         service.start_mining_loop().await;
 
         // Build routes
@@ -1910,10 +1926,11 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = bounded::<super::ThreadResult>(8);
 
-        super::mine_range_with_engine(
+        super::mine_range_with_engine_typed(
             0,
             "test-job".to_string(),
             &engine,
+            "CPU",
             ctx,
             range,
             cancel,
