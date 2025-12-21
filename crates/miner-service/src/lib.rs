@@ -478,79 +478,81 @@ impl MiningJob {
         );
 
         // Create CPU worker threads
-        if cpu_workers > 0 && cpu_engine.is_some() {
-            let cpu_engine = cpu_engine.unwrap();
-            let ctx = cpu_engine.prepare_context(self.header_hash, self.difficulty);
-            let cpu_partitions = compute_partitions(
-                current_start,
-                current_start
-                    .saturating_add(
-                        total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
-                            / primitive_types::U512::from(total_workers),
-                    )
-                    .saturating_sub(primitive_types::U512::from(1u64)),
-                cpu_workers,
-            );
-            current_start = current_start.saturating_add(
-                total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
-                    / primitive_types::U512::from(total_workers),
-            );
+        if cpu_workers > 0 {
+            if let Some(cpu_engine) = cpu_engine {
+                let ctx = cpu_engine.prepare_context(self.header_hash, self.difficulty);
+                let cpu_partitions = compute_partitions(
+                    current_start,
+                    current_start
+                        .saturating_add(
+                            total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
+                                / primitive_types::U512::from(total_workers),
+                        )
+                        .saturating_sub(primitive_types::U512::from(1u64)),
+                    cpu_workers,
+                );
+                current_start = current_start.saturating_add(
+                    total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
+                        / primitive_types::U512::from(total_workers),
+                );
 
-            for (_, (start, end)) in cpu_partitions.ranges.into_iter().enumerate() {
-                let cancel_flag = self.cancel_flag.clone();
-                let sender = sender.clone();
-                let ctx = ctx.clone();
-                let engine = cpu_engine.clone();
-                let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+                for (start, end) in cpu_partitions.ranges.into_iter() {
+                    let cancel_flag = self.cancel_flag.clone();
+                    let sender = sender.clone();
+                    let ctx = ctx.clone();
+                    let engine = cpu_engine.clone();
+                    let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
 
-                let handle = thread::spawn(move || {
-                    mine_range_with_engine_typed(
-                        thread_id,
-                        job_id,
-                        engine.as_ref(),
-                        "CPU",
-                        ctx,
-                        EngineRange { start, end },
-                        cancel_flag,
-                        sender,
-                        progress_interval_ms,
-                        chunk_size,
-                    );
-                });
-                self.thread_handles.push(handle);
-                thread_id += 1;
+                    let handle = thread::spawn(move || {
+                        mine_range_with_engine_typed(
+                            thread_id,
+                            job_id,
+                            engine.as_ref(),
+                            "CPU",
+                            ctx,
+                            EngineRange { start, end },
+                            cancel_flag,
+                            sender,
+                            progress_interval_ms,
+                            chunk_size,
+                        );
+                    });
+                    self.thread_handles.push(handle);
+                    thread_id += 1;
+                }
             }
         }
 
         // Create GPU worker threads
-        if gpu_workers > 0 && gpu_engine.is_some() {
-            let gpu_engine = gpu_engine.unwrap();
-            let ctx = gpu_engine.prepare_context(self.header_hash, self.difficulty);
-            let gpu_partitions = compute_partitions(current_start, self.nonce_end, gpu_workers);
+        if gpu_workers > 0 {
+            if let Some(gpu_engine) = gpu_engine {
+                let ctx = gpu_engine.prepare_context(self.header_hash, self.difficulty);
+                let gpu_partitions = compute_partitions(current_start, self.nonce_end, gpu_workers);
 
-            for (_, (start, end)) in gpu_partitions.ranges.into_iter().enumerate() {
-                let cancel_flag = self.cancel_flag.clone();
-                let sender = sender.clone();
-                let ctx = ctx.clone();
-                let engine = gpu_engine.clone();
-                let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+                for (start, end) in gpu_partitions.ranges.into_iter() {
+                    let cancel_flag = self.cancel_flag.clone();
+                    let sender = sender.clone();
+                    let ctx = ctx.clone();
+                    let engine = gpu_engine.clone();
+                    let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
 
-                let handle = thread::spawn(move || {
-                    mine_range_with_engine_typed(
-                        thread_id,
-                        job_id,
-                        engine.as_ref(),
-                        "GPU",
-                        ctx,
-                        EngineRange { start, end },
-                        cancel_flag,
-                        sender,
-                        progress_interval_ms,
-                        chunk_size,
-                    );
-                });
-                self.thread_handles.push(handle);
-                thread_id += 1;
+                    let handle = thread::spawn(move || {
+                        mine_range_with_engine_typed(
+                            thread_id,
+                            job_id,
+                            engine.as_ref(),
+                            "GPU",
+                            ctx,
+                            EngineRange { start, end },
+                            cancel_flag,
+                            sender,
+                            progress_interval_ms,
+                            chunk_size,
+                        );
+                    });
+                    self.thread_handles.push(handle);
+                    thread_id += 1;
+                }
             }
         }
     }
@@ -765,7 +767,6 @@ impl MiningJob {
 }
 
 #[allow(clippy::too_many_arguments)] // Reason: worker runner needs job_id, engine, context, range, cancel flag, sender, and chunking config
-
 fn mine_range_with_engine_typed(
     thread_id: usize,
     job_id: String,

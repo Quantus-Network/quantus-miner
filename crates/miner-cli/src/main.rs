@@ -328,7 +328,7 @@ async fn run_benchmark_command(
     }
     env_logger::init();
 
-    let effective_cpu_workers = cpu_workers.unwrap_or_else(|| num_cpus::get());
+    let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
     let effective_gpu_workers = gpu_workers.unwrap_or(0);
     let total_workers = effective_cpu_workers + effective_gpu_workers;
 
