@@ -46,9 +46,10 @@ impl HybridConfig {
             #[cfg(feature = "gpu")]
             {
                 // Auto-detect GPU device count by creating a temporary GPU engine
+                log::debug!("🔍 HybridConfig::gpu_workers() auto-detection called");
                 let gpu_engine = engine_gpu::GpuEngine::new();
                 let device_count = gpu_engine.device_count();
-                log::debug!("Auto-detected {} GPU device(s)", device_count);
+                log::debug!("🔍 Auto-detected {} GPU device(s)", device_count);
                 device_count
             }
             #[cfg(not(feature = "gpu"))]
@@ -75,7 +76,7 @@ pub struct HybridEngine {
     cpu_engine: Arc<dyn MinerEngine>,
     #[cfg(feature = "gpu")]
     gpu_engine: Option<Arc<dyn MinerEngine>>,
-    thread_counter: AtomicUsize,
+    thread_counter: Arc<AtomicUsize>,
 }
 
 impl HybridEngine {
@@ -101,6 +102,7 @@ impl HybridEngine {
             cpu_engine: Arc::new(engine_cpu::FastCpuEngine::new()),
             #[cfg(feature = "gpu")]
             gpu_engine: if gpu_workers > 0 {
+                log::info!("🎮 Creating GPU engine for hybrid mining...");
                 let gpu_engine = engine_gpu::GpuEngine::new();
                 let detected_devices = gpu_engine.device_count();
                 log::info!(
@@ -112,7 +114,7 @@ impl HybridEngine {
             } else {
                 None
             },
-            thread_counter: AtomicUsize::new(0),
+            thread_counter: Arc::new(AtomicUsize::new(0)),
         };
 
         Ok(engine)
@@ -213,18 +215,6 @@ impl MinerEngine for HybridEngine {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-}
-
-impl Clone for HybridEngine {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            cpu_engine: self.cpu_engine.clone(),
-            #[cfg(feature = "gpu")]
-            gpu_engine: self.gpu_engine.clone(),
-            thread_counter: AtomicUsize::new(0),
-        }
     }
 }
 
