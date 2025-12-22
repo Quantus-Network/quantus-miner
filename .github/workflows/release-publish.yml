@@ -38,18 +38,18 @@ jobs:
             echo "Error: Could not extract version from PR title: ${{ github.event.pull_request.title }}"
             exit 1
           fi
-          
+
           VERSION=${VERSION_TAG#v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$VERSION_TAG" >> $GITHUB_OUTPUT
-          
+
           # Check if this is a draft release
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'draft-release') }}" == "true" ]]; then
             echo "is_draft=true" >> $GITHUB_OUTPUT
           else
             echo "is_draft=false" >> $GITHUB_OUTPUT
           fi
-          
+
           echo "Extracted version: $VERSION"
           echo "Extracted tag: $VERSION_TAG"
 
@@ -66,32 +66,69 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux builds
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: quantus-miner
             asset_name: quantus-miner-linux-x86_64
+            features: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: quantus-miner
+            asset_name: quantus-miner-linux-x86_64-gpu
+            features: "gpu"
+          # Windows builds
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: quantus-miner.exe
             asset_name: quantus-miner-windows-x86_64.exe
+            features: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: quantus-miner.exe
+            asset_name: quantus-miner-windows-x86_64-gpu.exe
+            features: "gpu"
+          # macOS builds (Intel)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: quantus-miner
+            asset_name: quantus-miner-macos-x86_64
+            features: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: quantus-miner
+            asset_name: quantus-miner-macos-x86_64-gpu
+            features: "gpu"
+          # macOS builds (Apple Silicon)
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: quantus-miner
             asset_name: quantus-miner-macos-aarch64
+            features: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: quantus-miner
+            asset_name: quantus-miner-macos-aarch64-gpu
+            features: "gpu"
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.create-tag.outputs.tag }}
-      
+
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
-      
+
       - name: build binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      
+        run: |
+          if [[ -n "${{ matrix.features }}" ]]; then
+            cargo build --release --locked --target ${{ matrix.target }} --features ${{ matrix.features }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
       - name: prepare binary
         shell: bash
         run: |
@@ -102,7 +139,7 @@ jobs:
             cp ${{ matrix.binary_name }} ${{ matrix.asset_name }}
             strip ${{ matrix.asset_name }}
           fi
-      
+
       - name: upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -116,12 +153,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.create-tag.outputs.tag }}
-      
+
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,12 +171,10 @@ jobs:
           else
             DRAFT_FLAG=""
           fi
-          
+
           # Create release with all artifacts
           gh release create "$TAG" \
             --title "Release $TAG" \
             --generate-notes \
             $DRAFT_FLAG \
-            artifacts/quantus-miner-linux-x86_64/quantus-miner-linux-x86_64 \
-            artifacts/quantus-miner-windows-x86_64.exe/quantus-miner-windows-x86_64.exe \
-            artifacts/quantus-miner-macos-aarch64/quantus-miner-macos-aarch64
+            artifacts/*/quantus-miner-*

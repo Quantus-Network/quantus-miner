@@ -8,14 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       target_branch:
-        description: 'Target branch for the PR (default: main)'
+        description: "Target branch for the PR (default: main)"
         required: false
         type: string
-        default: 'main'
+        default: "main"
       version_type:
-        description: 'Type of version bump'
+        description: "Type of version bump"
         required: true
-        default: 'patch'
+        default: "patch"
         type: choice
         options:
           - patch
@@ -26,7 +26,7 @@ on:
         description: 'Custom version string (e.g., 1.2.3). Only used if version_type is "custom".'
         required: false
       is_draft:
-        description: 'Is this a draft release?'
+        description: "Is this a draft release?"
         required: true
         type: boolean
         default: false
@@ -58,12 +58,12 @@ jobs:
         run: |
           # Get all version tags and sort them by version
           latest_semver_tag=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
-          
+
           # If no tags found, use default
           if [ -z "$latest_semver_tag" ]; then
             latest_semver_tag="v0.0.0"
           fi
-          
+
           echo "latest_tag_found=$latest_semver_tag" >> $GITHUB_OUTPUT
           echo "Latest semantic version tag found: $latest_semver_tag"
 
@@ -135,7 +135,7 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.calculate-next-version.outputs.new_version }}
           NEW_TAG: ${{ needs.calculate-next-version.outputs.new_tag }}
-          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
         run: |
@@ -146,11 +146,11 @@ jobs:
           # Create new branch from source branch
           git checkout "$SOURCE_BRANCH"
           git checkout -b "$branch_name"
-          
+
           # Update version in workspace Cargo.toml (safer than cargo set-version)
           echo "Updating workspace Cargo.toml to version: $new_cargo_version"
           sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" Cargo.toml
-          
+
           # Regenerate Cargo.lock with precise updates for our packages only
           cargo update -p miner-cli --precise "$new_cargo_version"
           cargo update -p miner-service --precise "$new_cargo_version"
@@ -158,16 +158,15 @@ jobs:
           cargo update -p metrics --precise "$new_cargo_version"
           cargo update -p miner-telemetry --precise "$new_cargo_version"
           cargo update -p engine-cpu --precise "$new_cargo_version"
-          cargo update -p engine-gpu-cuda --precise "$new_cargo_version"
-          cargo update -p engine-gpu-opencl --precise "$new_cargo_version"
-          
+          cargo update -p engine-gpu --precise "$new_cargo_version"
+
           # Verify everything compiles correctly
           cargo check --workspace
-          
+
           # Commit changes
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-          
+
           git add Cargo.toml Cargo.lock
           git commit -m "bump version to $NEW_VERSION"
           git push origin "$branch_name"
