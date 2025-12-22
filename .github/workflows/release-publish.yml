@@ -89,12 +89,12 @@ jobs:
             asset_name: quantus-miner-windows-x86_64-gpu.exe
             features: "gpu"
           # macOS builds (Intel)
-          - os: macos-15-large
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary_name: quantus-miner
             asset_name: quantus-miner-macos-x86_64
             features: ""
-          - os: macos-15-large
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary_name: quantus-miner
             asset_name: quantus-miner-macos-x86_64-gpu
