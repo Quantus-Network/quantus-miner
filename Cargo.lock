@@ -595,23 +595,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine-hybrid"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "crossbeam-channel",
- "engine-cpu",
- "engine-gpu",
- "log",
- "num-bigint",
- "num-traits",
- "num_cpus",
- "pow-core",
- "primitive-types 0.13.1",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "env_logger"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1510,7 +1493,6 @@ dependencies = [
  "clap",
  "engine-cpu",
  "engine-gpu",
- "engine-hybrid",
  "env_logger",
  "log",
  "miner-service",
@@ -1528,7 +1510,6 @@ dependencies = [
  "crossbeam-channel",
  "engine-cpu",
  "engine-gpu",
- "engine-hybrid",
  "hex",
  "log",
  "metrics",

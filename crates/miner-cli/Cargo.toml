@@ -7,7 +7,7 @@ description = "CLI binary to run the Quantus External Miner service"
 
 [features]
 default = []
-gpu = ["engine-hybrid/gpu", "miner-service/gpu"]
+gpu = ["miner-service/gpu"]
 
 [dependencies]
 miner-service = { path = "../miner-service" }
@@ -17,7 +17,6 @@ env_logger = { workspace = true }
 log = { workspace = true }
 engine-cpu = { path = "../engine-cpu" }
 engine-gpu = { path = "../engine-gpu" }
-engine-hybrid = { path = "../engine-hybrid" }
 primitive-types = { workspace = true }
 rand = { workspace = true }
 num_cpus = { workspace = true }
