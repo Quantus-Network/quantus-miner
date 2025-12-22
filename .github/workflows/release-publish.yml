@@ -122,6 +122,7 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: build binary
+        shell: bash
         run: |
           if [[ -n "${{ matrix.features }}" ]]; then
             cargo build --release --locked --target ${{ matrix.target }} --features ${{ matrix.features }}
