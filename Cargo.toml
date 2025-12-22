@@ -15,7 +15,7 @@ resolver = "2"
 edition = "2021"
 authors = ["Quantus Network"]
 description = "Quantus External Miner Workspace"
-version = "1.0.0"
+version = "2.0.0"
 
 [workspace.dependencies]
 anyhow = "1"
