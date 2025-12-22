@@ -21,8 +21,10 @@ const THREAD_RATE_EMA_ALPHA: f64 = 0.2;
 pub struct ServiceConfig {
     /// Port for the HTTP miner API.
     pub port: u16,
-    /// Number of worker threads (logical CPUs) to use for mining (defaults to all available if None).
-    pub workers: Option<usize>,
+    /// Number of CPU worker threads to use for mining (None = auto-detect)
+    pub cpu_workers: Option<usize>,
+    /// Number of GPU worker threads to use for mining (None = auto-detect)
+    pub gpu_workers: Option<usize>,
     /// Optional metrics port. When Some, metrics endpoint starts; when None, metrics are disabled.
     pub metrics_port: Option<u16>,
     /// How often to report mining progress (in milliseconds). If None, defaults to 10000ms.
@@ -37,23 +39,14 @@ pub struct ServiceConfig {
     pub manip_step_batch: Option<u64>,
     /// Optional cap on solved-blocks throttle index for manipulator engine.
     pub manip_throttle_cap: Option<u64>,
-    /// Engine selection (future use). For now, CPU baseline/fast engines are supported.
-    pub engine: EngineSelection,
-}
-
-/// Engine selection enum for future extensibility.
-#[derive(Clone, Debug)]
-pub enum EngineSelection {
-    Cpu,
-    CpuChainManipulator,
-    Gpu,
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             port: 9833,
-            workers: None,
+            cpu_workers: None,
+            gpu_workers: None,
             metrics_port: None,
             progress_interval_ms: None,
             chunk_size: None,
@@ -61,41 +54,37 @@ impl Default for ServiceConfig {
             manip_base_delay_ns: None,
             manip_step_batch: None,
             manip_throttle_cap: None,
-            engine: EngineSelection::Cpu,
         }
     }
 }
 
 impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let engine = match self.engine {
-            EngineSelection::Cpu => "cpu",
-            EngineSelection::CpuChainManipulator => "cpu-chain-manipulator",
-            EngineSelection::Gpu => "gpu",
-        };
         write!(
             f,
-            "port={}, workers={:?}, engine={}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            "port={}, cpu_workers={:?}, gpu_workers={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
             self.port,
-            self.workers,
-            engine,
+            self.cpu_workers,
+            self.gpu_workers,
             self.metrics_port,
             self.progress_interval_ms,
             self.chunk_size,
             self.manip_solved_blocks,
             self.manip_base_delay_ns,
             self.manip_step_batch,
-            self.manip_throttle_cap,
+            self.manip_throttle_cap
         )
     }
 }
 
-/// The core service state: job registry, chosen engine, and thread configuration.
+/// The core service state: job registry, CPU/GPU engines, and thread configuration.
 #[derive(Clone)]
 pub struct MiningService {
     pub jobs: Arc<Mutex<HashMap<String, MiningJob>>>,
-    pub workers: usize,
-    pub engine: Arc<dyn MinerEngine>,
+    pub cpu_workers: usize,
+    pub gpu_workers: usize,
+    pub cpu_engine: Option<Arc<dyn MinerEngine>>,
+    pub gpu_engine: Option<Arc<dyn MinerEngine>>,
     /// How often to report mining progress (in milliseconds).
     pub progress_interval_ms: u64,
     /// Work chunk size (number of hashes to process before progress update).
@@ -106,15 +95,19 @@ pub struct MiningService {
 
 impl MiningService {
     fn new(
-        workers: usize,
-        engine: Arc<dyn MinerEngine>,
+        cpu_workers: usize,
+        gpu_workers: usize,
+        cpu_engine: Option<Arc<dyn MinerEngine>>,
+        gpu_engine: Option<Arc<dyn MinerEngine>>,
         progress_interval_ms: u64,
         chunk_size: Option<u64>,
     ) -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            workers,
-            engine,
+            cpu_workers,
+            gpu_workers,
+            cpu_engine,
+            gpu_engine,
             progress_interval_ms,
             chunk_size,
             active_jobs_gauge: Arc::new(tokio::sync::Mutex::new(0)),
@@ -131,15 +124,22 @@ impl MiningService {
         log::info!(
             "Adding mining job: {} with {} workers",
             job_id,
-            self.workers
+            self.cpu_workers + self.gpu_workers
         );
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
-            metrics::set_job_status_gauge(self.engine.name(), &job_id, "running", 1);
-            metrics::set_job_status_gauge(self.engine.name(), &job_id, "completed", 0);
-            metrics::set_job_status_gauge(self.engine.name(), &job_id, "failed", 0);
-            metrics::set_job_status_gauge(self.engine.name(), &job_id, "cancelled", 0);
+            let engine_name = if self.cpu_workers > 0 && self.gpu_workers > 0 {
+                "hybrid"
+            } else if self.gpu_workers > 0 {
+                "gpu"
+            } else {
+                "cpu"
+            };
+            metrics::set_job_status_gauge(engine_name, &job_id, "running", 1);
+            metrics::set_job_status_gauge(engine_name, &job_id, "completed", 0);
+            metrics::set_job_status_gauge(engine_name, &job_id, "failed", 0);
+            metrics::set_job_status_gauge(engine_name, &job_id, "cancelled", 0);
             // increment active jobs
             {
                 let mut g = self.active_jobs_gauge.lock().await;
@@ -148,8 +148,10 @@ impl MiningService {
             }
         }
         job.start_mining(
-            self.engine.clone(),
-            self.workers,
+            self.cpu_workers,
+            self.gpu_workers,
+            self.cpu_engine.clone(),
+            self.gpu_engine.clone(),
             self.progress_interval_ms,
             self.chunk_size,
         );
@@ -436,54 +438,122 @@ impl MiningJob {
 
     pub fn start_mining(
         &mut self,
-        engine: Arc<dyn MinerEngine>,
-        workers: usize,
+        cpu_workers: usize,
+        gpu_workers: usize,
+        cpu_engine: Option<Arc<dyn MinerEngine>>,
+        gpu_engine: Option<Arc<dyn MinerEngine>>,
         progress_interval_ms: u64,
         chunk_size: Option<u64>,
     ) {
+        let total_workers = cpu_workers + gpu_workers;
         let chan_capacity = std::env::var("MINER_RESULT_CHANNEL_CAP")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| workers.saturating_mul(64).max(256));
+            .unwrap_or_else(|| total_workers.saturating_mul(64).max(256));
         let (sender, receiver) = bounded(chan_capacity);
         self.result_receiver = Some(receiver);
-        self.engine_name = engine.name();
 
-        // Partition nonce range safely
-        let partitions = compute_partitions(self.nonce_start, self.nonce_end, workers);
+        // Set engine name based on what's available
+        self.engine_name = if cpu_workers > 0 && gpu_workers > 0 {
+            "hybrid"
+        } else if gpu_workers > 0 {
+            "gpu"
+        } else {
+            "cpu"
+        };
+
+        // Partition nonce range between CPU and GPU workers
+        let total_range = self
+            .nonce_end
+            .saturating_sub(self.nonce_start)
+            .saturating_add(primitive_types::U512::from(1u64));
+        let mut current_start = self.nonce_start;
+        let mut thread_id = 0;
 
         log::info!(
-            "Starting mining with {} workers, total range: {} ({} partitions)",
-            workers,
-            partitions.total_range,
-            partitions.ranges.len()
+            "Starting mining with {} CPU + {} GPU workers, total range: {}",
+            cpu_workers,
+            gpu_workers,
+            total_range
         );
 
-        // Prepare shared job context once per job.
-        let ctx = engine.prepare_context(self.header_hash, self.difficulty);
-
-        for (thread_id, (start, end)) in partitions.ranges.into_iter().enumerate() {
-            let cancel_flag = self.cancel_flag.clone();
-            let sender = sender.clone();
-            let ctx = ctx.clone();
-            let engine = engine.clone();
-
-            let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
-            let handle = thread::spawn(move || {
-                mine_range_with_engine(
-                    thread_id,
-                    job_id,
-                    engine.as_ref(),
-                    ctx,
-                    EngineRange { start, end },
-                    cancel_flag,
-                    sender,
-                    progress_interval_ms,
-                    chunk_size,
+        // Create CPU worker threads
+        if cpu_workers > 0 {
+            if let Some(cpu_engine) = cpu_engine {
+                let ctx = cpu_engine.prepare_context(self.header_hash, self.difficulty);
+                let cpu_partitions = compute_partitions(
+                    current_start,
+                    current_start
+                        .saturating_add(
+                            total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
+                                / primitive_types::U512::from(total_workers),
+                        )
+                        .saturating_sub(primitive_types::U512::from(1u64)),
+                    cpu_workers,
                 );
-            });
+                current_start = current_start.saturating_add(
+                    total_range.saturating_mul(primitive_types::U512::from(cpu_workers))
+                        / primitive_types::U512::from(total_workers),
+                );
 
-            self.thread_handles.push(handle);
+                for (start, end) in cpu_partitions.ranges.into_iter() {
+                    let cancel_flag = self.cancel_flag.clone();
+                    let sender = sender.clone();
+                    let ctx = ctx.clone();
+                    let engine = cpu_engine.clone();
+                    let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+
+                    let handle = thread::spawn(move || {
+                        mine_range_with_engine_typed(
+                            thread_id,
+                            job_id,
+                            engine.as_ref(),
+                            "CPU",
+                            ctx,
+                            EngineRange { start, end },
+                            cancel_flag,
+                            sender,
+                            progress_interval_ms,
+                            chunk_size,
+                        );
+                    });
+                    self.thread_handles.push(handle);
+                    thread_id += 1;
+                }
+            }
+        }
+
+        // Create GPU worker threads
+        if gpu_workers > 0 {
+            if let Some(gpu_engine) = gpu_engine {
+                let ctx = gpu_engine.prepare_context(self.header_hash, self.difficulty);
+                let gpu_partitions = compute_partitions(current_start, self.nonce_end, gpu_workers);
+
+                for (start, end) in gpu_partitions.ranges.into_iter() {
+                    let cancel_flag = self.cancel_flag.clone();
+                    let sender = sender.clone();
+                    let ctx = ctx.clone();
+                    let engine = gpu_engine.clone();
+                    let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+
+                    let handle = thread::spawn(move || {
+                        mine_range_with_engine_typed(
+                            thread_id,
+                            job_id,
+                            engine.as_ref(),
+                            "GPU",
+                            ctx,
+                            EngineRange { start, end },
+                            cancel_flag,
+                            sender,
+                            progress_interval_ms,
+                            chunk_size,
+                        );
+                    });
+                    self.thread_handles.push(handle);
+                    thread_id += 1;
+                }
+            }
         }
     }
 
@@ -697,10 +767,11 @@ impl MiningJob {
 }
 
 #[allow(clippy::too_many_arguments)] // Reason: worker runner needs job_id, engine, context, range, cancel flag, sender, and chunking config
-fn mine_range_with_engine(
+fn mine_range_with_engine_typed(
     thread_id: usize,
     job_id: String,
     engine: &dyn MinerEngine,
+    engine_type: &str,
     ctx: pow_core::JobContext,
     range: EngineRange,
     cancel_flag: Arc<AtomicBool>,
@@ -709,8 +780,9 @@ fn mine_range_with_engine(
     chunk_size: Option<u64>,
 ) {
     log::info!(
-        "Job {} thread {} mining range {} to {} (inclusive)",
+        "⛏️  Job {} {} thread {} mining range {} to {} (inclusive)",
         job_id,
+        engine_type,
         thread_id,
         range.start,
         range.end
@@ -726,6 +798,9 @@ fn mine_range_with_engine(
         if engine.name().contains("gpu") {
             // GPU can handle much larger chunks efficiently
             100_000_000 // 100M hashes per chunk
+        } else if engine.name() == "hybrid" {
+            // Hybrid engines use GPU-sized chunks since they route to GPU workers
+            100_000_000 // 100M hashes per chunk for hybrid
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
@@ -749,8 +824,9 @@ fn mine_range_with_engine(
         };
 
         log::debug!(
-            "Job {} thread {} processing subrange {}..{} (inclusive)",
+            "Job {} {} thread {} processing subrange {}..{} (inclusive)",
             job_id,
+            engine_type,
             thread_id,
             sub_range.start,
             sub_range.end
@@ -772,8 +848,9 @@ fn mine_range_with_engine(
                     completed: true,
                 };
                 log::info!(
-                    "🎉 Solution found! Job {} thread {} - Nonce: {}, Hash: {:x}",
+                    "🎉 Solution found! Job {} {} thread {} - Nonce: {}, Hash: {:x}",
                     job_id,
+                    engine_type,
                     thread_id,
                     nonce,
                     hash
@@ -806,8 +883,9 @@ fn mine_range_with_engine(
                     break;
                 } else {
                     log::info!(
-                        "⛏️  Job {} thread {} processed {} hashes (range: {}..{})",
+                        "⛏️  Job {} {} thread {} processed {} hashes (range: {}..{})",
                         job_id,
+                        engine_type,
                         thread_id,
                         hash_count,
                         sub_range.start,
@@ -1136,7 +1214,6 @@ pub fn build_routes(
 /// Helper structures and functions for safe range partitioning (placed before use)
 #[derive(Debug, Clone)]
 struct Partitions {
-    total_range: U512,
     ranges: Vec<(U512, U512)>,
 }
 
@@ -1165,10 +1242,7 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
         ranges.push((s, e));
     }
 
-    Partitions {
-        total_range,
-        ranges,
-    }
+    Partitions { ranges }
 }
 
 /// Start the miner service with the given configuration.
@@ -1237,132 +1311,106 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         metrics::set_effective_cpus(effective_cpus as i64);
     }
 
-    // Default workers: leave at least half of resources for other processes.
-    // Use max(1, effective_cpus / 2), but also cap at effective_cpus - 1 if possible.
-    let default_workers = effective_cpus
-        .saturating_sub(effective_cpus / 2)
-        .min(effective_cpus.saturating_sub(1))
-        .max(1);
-
-    // Resolve workers from user config, clamped to [1, effective_cpus].
-    let mut workers = match config.workers {
-        Some(n) if n > 0 => {
-            if n > effective_cpus {
-                log::warn!(
-                    "Requested {n} workers exceeds available logical CPUs in cpuset ({effective_cpus}). Clamping to {effective_cpus}."
-                );
-                effective_cpus
-            } else {
-                n
-            }
-        }
-        Some(_) => {
-            log::warn!("Workers must be positive. Falling back to default.");
-            default_workers
-        }
-        None => {
+    // Calculate CPU workers
+    let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
+        if config.gpu_workers.is_none() || config.gpu_workers == Some(0) {
+            // CPU-only mode: use default CPU allocation
+            let default_cpu_workers = effective_cpus
+                .saturating_sub(effective_cpus / 2)
+                .min(effective_cpus.saturating_sub(1))
+                .max(1);
             log::info!(
-                "No --workers specified. Defaulting to {} (leaving ~{} for other processes) based on effective {} logical CPUs.",
-                default_workers,
-                effective_cpus.saturating_sub(default_workers),
-                effective_cpus
+                "No CPU workers specified. Defaulting to {} CPU workers (leaving ~{} for other processes).",
+                default_cpu_workers,
+                effective_cpus.saturating_sub(default_cpu_workers)
             );
-            default_workers
+            default_cpu_workers
+        } else {
+            // Hybrid mode: default to half of effective CPUs for CPU
+            let default_cpu_workers = effective_cpus / 2;
+            log::info!("Hybrid mode: defaulting to {} CPU workers", default_cpu_workers);
+            default_cpu_workers
         }
+    });
+
+    // Calculate GPU workers
+    let gpu_workers = config.gpu_workers.unwrap_or_else(|| {
+        if config.cpu_workers.is_some() && config.cpu_workers != Some(0) {
+            // Hybrid mode: default to 1 GPU worker
+            log::info!("Hybrid mode: defaulting to 1 GPU worker");
+            1
+        } else {
+            // CPU-only mode by default
+            0
+        }
+    });
+
+    let total_workers = cpu_workers + gpu_workers;
+
+    let (cpu_workers, gpu_workers) = if total_workers == 0 {
+        log::warn!(
+            "No workers specified. Defaulting to CPU-only mode with {} workers.",
+            effective_cpus
+        );
+        (effective_cpus, 0)
+    } else {
+        (cpu_workers, gpu_workers)
     };
 
-    // Final safety: never exceed effective_cpus.
-    if workers > effective_cpus {
-        workers = effective_cpus.max(1);
-    }
-
-    log::info!(
-        "Using {workers} worker thread(s) for mining (effective logical CPUs available: {effective_cpus})"
-    );
-
-    // Select engine
-    #[allow(unused_mut)]
-    let mut engine: Arc<dyn MinerEngine> = match config.engine {
-        EngineSelection::Cpu => Arc::new(engine_cpu::FastCpuEngine::new()),
-        EngineSelection::CpuChainManipulator => {
-            let mut eng = engine_cpu::ChainEngine::new();
-            // Apply optional throttle parameters if provided.
-            if let Some(base) = config.manip_base_delay_ns {
-                log::debug!(target: "miner", "Manipulator base_delay_ns overridden via config: {base} ns");
-                eng.base_delay_ns = base;
-            }
-            if let Some(step) = config.manip_step_batch {
-                log::debug!(target: "miner", "Manipulator step_batch overridden via config: {step}");
-                eng.step_batch = step;
-            }
-            if let Some(cap) = config.manip_throttle_cap {
-                log::debug!(target: "miner", "Manipulator throttle_cap set via config: {cap}");
-                eng.throttle_cap = Some(cap);
-            }
-            // If a starting throttle index is provided, set it here for "pick up where we left off".
-            if let Some(n) = config.manip_solved_blocks {
-                log::debug!(target: "miner", "Manipulator starting throttle index (solved_blocks) set via config: {n}");
-                eng.job_index.store(n, std::sync::atomic::Ordering::Relaxed);
-            }
-            Arc::new(eng)
-        }
-        EngineSelection::Gpu => {
-            #[cfg(feature = "gpu")]
-            {
-                Arc::new(engine_gpu::GpuEngine::new())
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                log::error!("Requested engine gpu, but this binary was built without the 'gpu' feature. Rebuild miner-service with --features gpu.");
-                return Err(anyhow::anyhow!(
-                    "engine 'gpu' not built (missing 'gpu' feature)"
-                ));
-            }
-        }
+    // Create engines based on worker configuration
+    let cpu_engine = if cpu_workers > 0 {
+        Some(Arc::new(engine_cpu::FastCpuEngine::new()) as Arc<dyn MinerEngine>)
+    } else {
+        None
     };
-    log::info!(
-        "🚀 Mining engine selected: {} ({})",
-        engine.name(),
-        match config.engine {
-            EngineSelection::Cpu => "Optimized multi-threaded CPU mining",
-            EngineSelection::CpuChainManipulator => "Throttled CPU mining for difficulty control",
-            EngineSelection::Gpu => "High-performance GPU mining",
-        }
-    );
 
-    // Adjust worker count for GPU engine based on available devices
-    if matches!(config.engine, EngineSelection::Gpu) {
+    let gpu_engine: Option<Arc<dyn MinerEngine>> = if gpu_workers > 0 {
         #[cfg(feature = "gpu")]
         {
-            if let Some(gpu_engine) = engine.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
-                let gpu_device_count = gpu_engine.device_count();
-                if gpu_device_count > 0 {
-                    // Use one worker per GPU device, but don't exceed the configured worker count
-                    workers = workers.min(gpu_device_count);
-                    log::info!(
-                        "GPU engine: {} GPU devices detected, using {} workers",
-                        gpu_device_count,
-                        workers
-                    );
-                } else {
-                    log::warn!("GPU engine: No GPU devices detected, falling back to 1 worker");
-                    workers = 1;
-                }
-            }
+            Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
         }
+        #[cfg(not(feature = "gpu"))]
+        {
+            log::error!("GPU workers requested but this binary was built without the 'gpu' feature. Rebuild with --features gpu.");
+            return Err(anyhow::anyhow!(
+                "GPU workers requested but 'gpu' feature not enabled"
+            ));
+        }
+    } else {
+        None
+    };
+
+    // Log the mining configuration
+    log::info!(
+        "🚀 Mining configuration: {} CPU workers, {} GPU workers",
+        cpu_workers,
+        gpu_workers
+    );
+
+    if let Some(ref engine) = cpu_engine {
+        log::info!("🖥️  CPU engine: {}", engine.name());
+    }
+
+    if let Some(ref engine) = gpu_engine {
+        log::info!("🎮 GPU engine: {}", engine.name());
     }
 
     log::info!("⚙️  Service configuration: {config}");
 
     let progress_interval_ms = config.progress_interval_ms.unwrap_or(10000);
     let service = MiningService::new(
-        workers,
-        engine.clone(),
+        cpu_workers,
+        gpu_workers,
+        cpu_engine,
+        gpu_engine,
         progress_interval_ms,
         config.chunk_size,
     );
 
-    log::info!("⛏️  Mining service ready with {} worker threads", workers);
+    log::info!(
+        "⛏️  Mining service ready with {} total worker threads",
+        total_workers
+    );
     if let Some(chunk_size) = config.chunk_size {
         log::info!(
             "📦 Custom chunk size: {} hashes per progress update",
@@ -1452,7 +1500,13 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
         let telemetry_handle = telemetry.clone();
         let svc = service.clone();
-        let engine_name_str = engine.name().to_string();
+        let engine_name_str = if cpu_workers > 0 && gpu_workers > 0 {
+            "hybrid".to_string()
+        } else if gpu_workers > 0 {
+            "gpu".to_string()
+        } else {
+            "cpu".to_string()
+        };
         let interval_secs = std::env::var("MINER_TELEMETRY_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -1479,7 +1533,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
                 let interval = miner_telemetry::SystemInterval {
                     uptime_ms,
                     engine: Some(engine_name_str.clone()),
-                    workers: Some(svc.workers as u32),
+                    workers: Some((svc.cpu_workers + svc.gpu_workers) as u32),
                     hash_rate: Some(total_rate),
                     active_jobs: Some(active_jobs),
                     linked_node_hint: None,
@@ -1547,8 +1601,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mining_state_add_get_remove() {
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(2, 0, Some(cpu_engine), None, 2000, None);
 
         let job = MiningJob::new(
             [1u8; 32],
@@ -1566,8 +1620,8 @@ mod tests {
     async fn test_job_lifecycle_fail() {
         // Test that a job fails if no nonce is found (threshold too strict).
         // To make this deterministic, avoid nonce=0, which some math paths treat as special.
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(1, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(1, 0, Some(cpu_engine), None, 2000, None);
         state.start_mining_loop().await;
 
         // Impossible difficulty with a nonce range that excludes 0
@@ -1607,7 +1661,9 @@ mod tests {
         fn partitions_cover_entire_range_even_workers() {
             // Range [0, 99] split into 4 workers
             let p = compute_partitions(u(0), u(99), 4);
-            assert_eq!(p.total_range, u(100));
+            // total_range field removed, verify by checking all ranges sum to 100
+            let total: u64 = p.ranges.iter().map(|(s, e)| (e - s + 1).low_u64()).sum();
+            assert_eq!(total, 100);
             // Check coverage and ordering
             let mut covered = 0u64;
             let mut prev_end = u(0);
@@ -1629,7 +1685,9 @@ mod tests {
         fn partitions_cover_entire_range_odd_workers() {
             // Range [0, 99] split into 3 workers
             let p = compute_partitions(u(0), u(99), 3);
-            assert_eq!(p.total_range, u(100));
+            // total_range field removed, verify by checking all ranges sum to 100
+            let total: u64 = p.ranges.iter().map(|(s, e)| (e - s + 1).low_u64()).sum();
+            assert_eq!(total, 100);
             // Ensure last range takes remainder and we end exactly at 99
             assert_eq!(p.ranges.len(), 3);
             assert_eq!(p.ranges[0], (u(0), u(32)));
@@ -1641,7 +1699,19 @@ mod tests {
         fn partitions_handles_start_eq_end() {
             // Range [42, 42] split into any workers -> only last partition reaches the end
             let p = compute_partitions(u(42), u(42), 5);
-            assert_eq!(p.total_range, u(1));
+            // total_range field removed, verify by checking range sums to 1
+            let total: u64 = p
+                .ranges
+                .iter()
+                .map(|(s, e)| {
+                    if e >= s {
+                        (e - s + 1).low_u64()
+                    } else {
+                        0 // Empty range
+                    }
+                })
+                .sum();
+            assert_eq!(total, 1);
             assert_eq!(p.ranges.len(), 5);
             // All but the last partition may have end < start (empty), but no overflow, and last ends at 42
             assert_eq!(p.ranges[4].1, u(42));
@@ -1664,8 +1734,8 @@ mod tests {
     #[tokio::test]
     async fn test_job_lifecycle_success() {
         // Test that a job completes successfully
-        let engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let state = MiningService::new(2, engine, 2000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
+        let state = MiningService::new(2, 0, Some(cpu_engine), None, 2000, None);
         state.start_mining_loop().await;
 
         // Easy difficulty
@@ -1787,8 +1857,8 @@ mod tests {
     async fn http_endpoints_handle_basic_flows() {
         use warp::test::request;
 
-        let engine: Arc<dyn engine_cpu::MinerEngine> = Arc::new(engine_cpu::FastCpuEngine::new());
-        let service = MiningService::new(2, engine, 1000, None);
+        let cpu_engine: Arc<dyn MinerEngine> = Arc::new(engine_cpu::BaselineCpuEngine::new());
+        let service = MiningService::new(2, 0, Some(cpu_engine), None, 1000, None);
         service.start_mining_loop().await;
 
         // Build routes
@@ -1857,10 +1927,11 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = bounded::<super::ThreadResult>(8);
 
-        super::mine_range_with_engine(
+        super::mine_range_with_engine_typed(
             0,
             "test-job".to_string(),
             &engine,
+            "CPU",
             ctx,
             range,
             cancel,

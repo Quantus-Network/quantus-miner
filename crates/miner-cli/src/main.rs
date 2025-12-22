@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use engine_cpu::{EngineRange, MinerEngine};
-use miner_service::{run, EngineSelection, ServiceConfig};
+use miner_service::{run, ServiceConfig};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
@@ -17,9 +17,13 @@ enum Command {
         #[arg(short, long, env = "MINER_PORT", default_value_t = 9833)]
         port: u16,
 
-        /// Number of worker threads (logical CPUs) to use for mining (defaults to all available)
-        #[arg(long = "workers", env = "MINER_WORKERS")]
-        workers: Option<usize>,
+        /// Number of CPU worker threads to use for mining (None = auto-detect)
+        #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
+        cpu_workers: Option<usize>,
+
+        /// Number of GPU worker threads to use for mining (None = auto-detect)
+        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
+        gpu_workers: Option<usize>,
 
         /// Optional Prometheus metrics exporter port; if omitted, metrics are disabled
         #[arg(long, env = "MINER_METRICS_PORT")]
@@ -55,11 +59,6 @@ enum Command {
         /// For cpu-chain-manipulator: optional cap on solved-blocks throttle index
         #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
         manip_throttle_cap: Option<u64>,
-
-        /// Mining engine to use (default: cpu).
-        /// Options: cpu, cpu-chain-manipulator, gpu
-        #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = EngineCli::Cpu)]
-        engine: EngineCli,
 
         /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
         #[arg(long = "telemetry-endpoint", env = "MINER_TELEMETRY_ENDPOINTS", value_delimiter = ',', num_args = 0.., value_name = "URL")]
@@ -104,16 +103,15 @@ enum Command {
         #[arg(long = "telemetry-node-version", env = "MINER_TELEMETRY_NODE_VERSION")]
         telemetry_node_version: Option<String>,
     },
-    /// Run a quick benchmark of the specified mining engine
+    /// Run a quick benchmark of the mining engines
     Benchmark {
-        /// Mining engine to benchmark.
-        /// Options: cpu, gpu
-        #[arg(long, env = "MINER_ENGINE", value_enum, default_value_t = BenchmarkEngine::Cpu)]
-        engine: BenchmarkEngine,
+        /// Number of CPU workers to use for benchmark
+        #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
+        cpu_workers: Option<usize>,
 
-        /// Number of worker threads (logical CPUs) to use for mining (defaults to all available)
-        #[arg(long = "workers", env = "MINER_WORKERS")]
-        workers: Option<usize>,
+        /// Number of GPU workers to use for benchmark
+        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
+        gpu_workers: Option<usize>,
 
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
@@ -134,50 +132,14 @@ struct Args {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum EngineCli {
-    /// Optimized CPU engine (incremental precompute + step_mul)
-    Cpu,
-    /// Throttling CPU engine that slows per block to help reduce difficulty
-    CpuChainManipulator,
-    /// GPU engine (WGPU based)
-    Gpu,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum BenchmarkEngine {
-    /// Optimized CPU engine (incremental precompute + step_mul)
-    Cpu,
-    /// GPU engine (WGPU based)
-    Gpu,
-}
-
-impl From<EngineCli> for EngineSelection {
-    fn from(value: EngineCli) -> Self {
-        match value {
-            EngineCli::Cpu => EngineSelection::Cpu,
-            EngineCli::CpuChainManipulator => EngineSelection::CpuChainManipulator,
-            EngineCli::Gpu => EngineSelection::Gpu,
-        }
-    }
-}
-
-impl From<BenchmarkEngine> for EngineSelection {
-    fn from(value: BenchmarkEngine) -> Self {
-        match value {
-            BenchmarkEngine::Cpu => EngineSelection::Cpu,
-            BenchmarkEngine::Gpu => EngineSelection::Gpu,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
     match args.command.unwrap_or(Command::Serve {
         port: 9833,
-        workers: None,
+        cpu_workers: None,
+        gpu_workers: None,
         metrics_port: None,
         verbose: false,
         progress_interval_ms: None,
@@ -186,7 +148,6 @@ async fn main() {
         manip_base_delay_ns: None,
         manip_step_batch: None,
         manip_throttle_cap: None,
-        engine: EngineCli::Cpu,
         telemetry_endpoints: None,
         telemetry_enabled: None,
         telemetry_verbosity: None,
@@ -200,7 +161,8 @@ async fn main() {
     }) {
         Command::Serve {
             port,
-            workers,
+            cpu_workers,
+            gpu_workers,
             metrics_port,
             verbose,
             progress_interval_ms,
@@ -209,7 +171,6 @@ async fn main() {
             manip_base_delay_ns,
             manip_step_batch,
             manip_throttle_cap,
-            engine,
             telemetry_endpoints,
             telemetry_enabled,
             telemetry_verbosity,
@@ -223,7 +184,8 @@ async fn main() {
         } => {
             run_serve_command(
                 port,
-                workers,
+                cpu_workers,
+                gpu_workers,
                 metrics_port,
                 verbose,
                 progress_interval_ms,
@@ -232,7 +194,6 @@ async fn main() {
                 manip_base_delay_ns,
                 manip_step_batch,
                 manip_throttle_cap,
-                engine,
                 telemetry_endpoints,
                 telemetry_enabled,
                 telemetry_verbosity,
@@ -247,12 +208,12 @@ async fn main() {
             .await;
         }
         Command::Benchmark {
-            engine,
-            workers,
+            cpu_workers,
+            gpu_workers,
             duration,
             verbose,
         } => {
-            run_benchmark_command(engine, workers, duration, verbose).await;
+            run_benchmark_command(cpu_workers, gpu_workers, duration, verbose).await;
         }
     }
 }
@@ -260,7 +221,8 @@ async fn main() {
 #[allow(clippy::too_many_arguments)]
 async fn run_serve_command(
     port: u16,
-    workers: Option<usize>,
+    cpu_workers: Option<usize>,
+    gpu_workers: Option<usize>,
     metrics_port: Option<u16>,
     verbose: bool,
     progress_interval_ms: Option<u64>,
@@ -269,7 +231,6 @@ async fn run_serve_command(
     manip_base_delay_ns: Option<u64>,
     manip_step_batch: Option<u64>,
     manip_throttle_cap: Option<u64>,
-    engine: EngineCli,
     telemetry_endpoints: Option<Vec<String>>,
     telemetry_enabled: Option<bool>,
     telemetry_verbosity: Option<u8>,
@@ -332,7 +293,8 @@ async fn run_serve_command(
 
     let config = ServiceConfig {
         port,
-        workers,
+        cpu_workers,
+        gpu_workers,
         metrics_port,
         progress_interval_ms,
         chunk_size,
@@ -340,7 +302,6 @@ async fn run_serve_command(
         manip_base_delay_ns,
         manip_step_batch,
         manip_throttle_cap,
-        engine: engine.into(),
     };
     log::info!("Effective config: {config}");
 
@@ -351,9 +312,9 @@ async fn run_serve_command(
 }
 
 async fn run_benchmark_command(
-    engine_cli: BenchmarkEngine,
-    workers: Option<usize>,
-    duration_secs: u64,
+    cpu_workers: Option<usize>,
+    gpu_workers: Option<usize>,
+    duration: u64,
     verbose: bool,
 ) {
     // Initialize logger early to capture startup messages.
@@ -367,50 +328,51 @@ async fn run_benchmark_command(
     }
     env_logger::init();
 
+    let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
+    let effective_gpu_workers = gpu_workers.unwrap_or(0);
+    let total_workers = effective_cpu_workers + effective_gpu_workers;
+
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
     println!(
-        "Engine: {}",
-        match engine_cli {
-            BenchmarkEngine::Cpu => "CPU",
-            BenchmarkEngine::Gpu => "GPU",
-        }
+        "Configuration: {} CPU workers, {} GPU workers",
+        effective_cpu_workers, effective_gpu_workers
     );
-    println!("Duration: {} seconds", duration_secs);
+    println!("Duration: {} seconds", duration);
+    println!("Total Workers: {}", total_workers);
+    println!("Available CPUs: {}", num_cpus::get());
 
-    // Create the engine
-    let engine_selection = EngineSelection::from(engine_cli);
-    let engine: Arc<dyn MinerEngine> = match engine_selection {
-        EngineSelection::Cpu => Arc::new(engine_cpu::FastCpuEngine::new()),
-        EngineSelection::Gpu => Arc::new(engine_gpu::GpuEngine::new()),
-        EngineSelection::CpuChainManipulator => {
-            unreachable!("CPU chain manipulator not supported in benchmark")
-        }
+    // Create engines based on configuration
+    let cpu_engine = if effective_cpu_workers > 0 {
+        Some(Arc::new(engine_cpu::FastCpuEngine::new()) as Arc<dyn MinerEngine>)
+    } else {
+        None
     };
 
-    // Determine number of workers
-    let num_cpus = num_cpus::get();
-    let workers = workers.unwrap_or({
-        match engine_selection {
-            EngineSelection::Gpu => {
-                if let Some(gpu_engine) = engine.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
-                    let gpu_device_count = gpu_engine.device_count();
-                    if gpu_device_count == 0 {
-                        eprintln!("Error: GPU engine selected but no GPU devices detected");
-                        std::process::exit(1);
-                    }
-                    gpu_device_count
-                } else {
-                    eprintln!("Error: Failed to get GPU engine instance");
-                    std::process::exit(1);
-                }
-            }
-            _ => num_cpus, // Use all available CPU cores for CPU engines
+    let gpu_engine = if effective_gpu_workers > 0 {
+        #[cfg(feature = "gpu")]
+        {
+            Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
         }
-    });
+        #[cfg(not(feature = "gpu"))]
+        {
+            eprintln!("Error: GPU workers requested but this binary was built without GPU support");
+            std::process::exit(1);
+        }
+    } else {
+        None
+    };
 
-    println!("Workers: {}", workers);
-    println!("Available CPUs: {}", num_cpus);
+    // For benchmark, we'll use CPU engine as primary for simplicity
+    let engine = cpu_engine
+        .or(gpu_engine)
+        .expect("At least one engine must be available");
+
+    if total_workers == 0 {
+        eprintln!("Error: No workers specified");
+        std::process::exit(1);
+    }
+    println!("Workers: {}", total_workers);
     println!();
 
     // Run benchmark
@@ -435,12 +397,13 @@ async fn run_benchmark_command(
     let total_hashes_arc = Arc::new(std::sync::Mutex::new(0u64));
 
     // Use larger ranges for GPU (1M) vs CPU (10K)
-    let nonces_per_worker = match engine_selection {
-        EngineSelection::Gpu => 1_000_000u64, // 1M nonces per GPU worker
-        _ => 10_000u64,                       // 10K nonces per CPU worker
+    let nonces_per_worker = if effective_gpu_workers > 0 {
+        1_000_000u64 // 1M nonces per GPU worker
+    } else {
+        10_000u64 // 10K nonces per CPU worker
     };
 
-    for worker_id in 0..workers {
+    for worker_id in 0..total_workers {
         let engine = engine.clone();
         let ctx = ctx.clone();
         let cancel_flag = cancel_flag.clone();
@@ -461,7 +424,6 @@ async fn run_benchmark_command(
             };
 
             let mut worker_hashes = 0u64;
-            let worker_start = Instant::now();
 
             loop {
                 if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -481,7 +443,7 @@ async fn run_benchmark_command(
                 }
 
                 // Check if we've exceeded the time limit
-                if worker_start.elapsed() >= Duration::from_secs(duration_secs) {
+                if benchmark_start.elapsed() >= Duration::from_secs(duration) {
                     break;
                 }
             }
@@ -498,7 +460,7 @@ async fn run_benchmark_command(
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if benchmark_start.elapsed() >= Duration::from_secs(duration_secs) {
+        if benchmark_start.elapsed() >= Duration::from_secs(duration) {
             cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             break;
         }
@@ -518,7 +480,7 @@ async fn run_benchmark_command(
                     format!("{:.0}", hash_rate)
                 };
                 println!("⏱️  {:.1}s - {} H/s", elapsed, hash_rate_str);
-            } else if matches!(engine_selection, EngineSelection::Gpu) {
+            } else if effective_gpu_workers > 0 {
                 println!("⏱️  {:.1}s - processing...", elapsed);
             } else {
                 println!("⏱️  {:.1}s - starting...", elapsed);
@@ -553,8 +515,8 @@ async fn run_benchmark_command(
 
     println!("Average hash rate: {}", hash_rate_str);
 
-    if workers > 1 {
-        let per_worker_rate = avg_hash_rate / workers as f64;
+    if total_workers > 1 {
+        let per_worker_rate = avg_hash_rate / total_workers as f64;
         let per_worker_str = if per_worker_rate >= 1_000_000.0 {
             format!("{:.2}M H/s", per_worker_rate / 1_000_000.0)
         } else if per_worker_rate >= 1_000.0 {
@@ -564,7 +526,7 @@ async fn run_benchmark_command(
         };
         println!(
             "Per-worker rate: {} (across {} workers)",
-            per_worker_str, workers
+            per_worker_str, total_workers
         );
     }
 
