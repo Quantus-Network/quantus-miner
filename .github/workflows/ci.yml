@@ -51,11 +51,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: compile (gpu)
         run: |
-          cargo build --locked --workspace 
+          cargo build --locked --workspace
         timeout-minutes: 90
       - name: test (gpu)
         run: |
-          cargo test --locked --workspace 
+          cargo test --locked --workspace
         timeout-minutes: 15
 
   analysis:
@@ -84,8 +84,8 @@ jobs:
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: build benchmark binary
-        run: cargo build -p miner-cli --release 
+        run: cargo build -p miner-cli --release
         timeout-minutes: 60
       - name: run cpu benchmark
-        run: ./target/release/quantus-miner benchmark --cpu-workers 2 --duration 5
+        run: ./target/release/quantus-miner --cpu-workers 2 benchmark --duration 5
         timeout-minutes: 10
