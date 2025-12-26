@@ -473,7 +473,7 @@ async fn run_benchmark_command(
             }
 
             engine_gpu::GpuEngine::clear_worker_resources();
-            
+
             worker_hashes
         });
 
