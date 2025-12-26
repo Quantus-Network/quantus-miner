@@ -6,7 +6,7 @@ publish = false
 description = "Service layer: HTTP API, job orchestration, and engine abstraction for the Quantus External Miner"
 
 [features]
-default = ["cpu", "metrics"]
+default = ["cpu", "gpu", "metrics"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
 # Enable GPU engine.

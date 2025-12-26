@@ -402,7 +402,28 @@ async fn run_benchmark_command(
 
     // Chunk sizes
     let cpu_chunk = 10_000u64;
+    // Increase GPU chunk size to amortize submission overhead (10M)
+    // 1M might be too small for fast GPUs, 100M might be too large for short benchmarks.
     let gpu_chunk = 1_000_000u64;
+
+    if effective_gpu_workers > 0 {
+        if let Some(gpu_engine_arc) = &gpu_engine {
+             // We can't easily get device count from MinerEngine trait without downcasting or extending trait.
+             // But we know it's GpuEngine here if feature=gpu is enabled.
+             #[cfg(feature = "gpu")]
+             {
+                 if let Some(gpu_ptr) = gpu_engine_arc.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
+                     let device_count = gpu_ptr.device_count();
+                     if effective_gpu_workers > device_count {
+                         println!("⚠️  WARNING: You have requested {} GPU workers for {} device(s).", effective_gpu_workers, device_count);
+                         println!("   Multiple workers per device creates contention and typically reduces hashrate.");
+                         println!("   Recommended: 1 worker per GPU device.");
+                         println!();
+                     }
+                 }
+             }
+        }
+    }
 
     for worker_id in 0..total_workers {
         // Determine type and engine
@@ -486,6 +507,10 @@ async fn run_benchmark_command(
                     break;
                 }
             }
+
+            // Cleanup TLS resources explicitly to avoid panic on exit
+            #[cfg(feature = "gpu")]
+            engine_gpu::GpuEngine::clear_worker_resources();
 
             worker_hashes
         });

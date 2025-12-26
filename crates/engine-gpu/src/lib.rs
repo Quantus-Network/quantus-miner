@@ -281,6 +281,14 @@ impl GpuEngine {
     pub fn device_count(&self) -> usize {
         self.contexts.len()
     }
+
+    /// Explicitly clear thread-local GPU resources.
+    /// Call this before thread exit to avoid TLS destruction order issues with wgpu.
+    pub fn clear_worker_resources() {
+        WORKER_RESOURCES.with(|resources| {
+            *resources.borrow_mut() = None;
+        });
+    }
 }
 
 impl MinerEngine for GpuEngine {

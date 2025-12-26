@@ -6,7 +6,7 @@ publish = false
 description = "CLI binary to run the Quantus External Miner service"
 
 [features]
-default = []
+default = ["gpu"]
 gpu = ["miner-service/gpu"]
 
 [dependencies]

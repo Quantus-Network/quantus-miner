@@ -933,6 +933,12 @@ fn mine_range_with_engine_typed(
         }
     }
 
+    // Explicitly clear thread-local GPU resources to avoid TLS order panic
+    #[cfg(feature = "gpu")]
+    if engine_type == "GPU" {
+        engine_gpu::GpuEngine::clear_worker_resources();
+    }
+
     log::debug!(target: "miner", "Job {job_id} thread {thread_id} completed.");
 }
 
