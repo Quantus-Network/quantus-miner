@@ -35,7 +35,7 @@ The binary will be available at `target/release/quantus-miner`.
 | Argument | Environment Variable | Description | Default |
 |----------|---------------------|-------------|---------|
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
-| `--gpu-devices <N>` | `MINER_GPU_WORKERS` | Number of GPU worker threads | 0 |
+| `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | 0 |
 | `--port <PORT>` | `MINER_PORT` | HTTP API port | 9833 |
 | `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | Disabled |
 
