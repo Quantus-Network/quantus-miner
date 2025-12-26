@@ -18,16 +18,16 @@ The binary will be available at `target/release/quantus-miner`.
 
 ```bash
 # CPU-only mining (default: auto-detected CPU cores)
-./target/release/quantus-miner --cpu-workers 4
+./target/release/quantus-miner serve --cpu-workers 4
 
 # GPU-only mining 
-./target/release/quantus-miner --gpu-devices 1
+./target/release/quantus-miner serve --gpu-devices 1
 
 # Hybrid CPU+GPU mining
-./target/release/quantus-miner --cpu-workers 4 --gpu-devices 1
+./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
 
 # Custom port and metrics
-./target/release/quantus-miner --cpu-workers 2 --port 8000 --metrics-port 9900
+./target/release/quantus-miner serve --cpu-workers 2 --port 8000 --metrics-port 9900
 ```
 
 ## Configuration
@@ -69,16 +69,16 @@ cargo build -p miner-cli --release
 
 ```bash
 # CPU mining with 8 workers
-./target/release/quantus-miner --cpu-workers 8
+./target/release/quantus-miner serve --cpu-workers 8
 
 # Pure GPU mining
-./target/release/quantus-miner --gpu-devices 1
+./target/release/quantus-miner serve --gpu-devices 1
 
 # Hybrid mining: 4 CPU + 1 GPU workers
-./target/release/quantus-miner --cpu-workers 4 --gpu-devices 1
+./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
 
 # With verbose logging
-RUST_LOG=debug ./target/release/quantus-miner --cpu-workers 2 --gpu-devices 1
+RUST_LOG=debug ./target/release/quantus-miner serve --cpu-workers 2 --gpu-devices 1
 
 # Production setup with metrics
 ./target/release/quantus-miner \
@@ -107,7 +107,7 @@ docker run -d -p 9833:9833 -p 9900:9900 \
 
 # Build from source
 docker build -t quantus-miner .
-docker run -d -p 9833:9833 quantus-miner --cpu-workers 4
+docker run -d -p 9833:9833 quantus-miner serve --cpu-workers 4
 ```
 
 ## Benchmarking
