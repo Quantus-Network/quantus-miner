@@ -21,9 +21,9 @@ enum Command {
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
         cpu_workers: Option<usize>,
 
-        /// Number of GPU worker threads to use for mining (None = auto-detect)
-        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
-        gpu_workers: Option<usize>,
+        /// Number of GPU devices to use for mining (None = auto-detect)
+        #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
+        gpu_devices: Option<usize>,
 
         /// Optional Prometheus metrics exporter port; if omitted, metrics are disabled
         #[arg(long, env = "MINER_METRICS_PORT")]
@@ -109,9 +109,9 @@ enum Command {
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
         cpu_workers: Option<usize>,
 
-        /// Number of GPU workers to use for benchmark
-        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
-        gpu_workers: Option<usize>,
+        /// Number of GPU devices to use for benchmark
+        #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
+        gpu_devices: Option<usize>,
 
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
@@ -139,7 +139,7 @@ async fn main() {
     match args.command.unwrap_or(Command::Serve {
         port: 9833,
         cpu_workers: None,
-        gpu_workers: None,
+        gpu_devices: None,
         metrics_port: None,
         verbose: false,
         progress_interval_ms: None,
@@ -162,7 +162,7 @@ async fn main() {
         Command::Serve {
             port,
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             metrics_port,
             verbose,
             progress_interval_ms,
@@ -185,7 +185,7 @@ async fn main() {
             run_serve_command(
                 port,
                 cpu_workers,
-                gpu_workers,
+                gpu_devices,
                 metrics_port,
                 verbose,
                 progress_interval_ms,
@@ -209,11 +209,11 @@ async fn main() {
         }
         Command::Benchmark {
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             duration,
             verbose,
         } => {
-            run_benchmark_command(cpu_workers, gpu_workers, duration, verbose).await;
+            run_benchmark_command(cpu_workers, gpu_devices, duration, verbose).await;
         }
     }
 }
@@ -222,7 +222,7 @@ async fn main() {
 async fn run_serve_command(
     port: u16,
     cpu_workers: Option<usize>,
-    gpu_workers: Option<usize>,
+    gpu_devices: Option<usize>,
     metrics_port: Option<u16>,
     verbose: bool,
     progress_interval_ms: Option<u64>,
@@ -294,7 +294,7 @@ async fn run_serve_command(
     let config = ServiceConfig {
         port,
         cpu_workers,
-        gpu_workers,
+        gpu_devices,
         metrics_port,
         progress_interval_ms,
         chunk_size,
@@ -313,7 +313,7 @@ async fn run_serve_command(
 
 async fn run_benchmark_command(
     cpu_workers: Option<usize>,
-    gpu_workers: Option<usize>,
+    gpu_devices: Option<usize>,
     duration: u64,
     verbose: bool,
 ) {
@@ -329,8 +329,8 @@ async fn run_benchmark_command(
     env_logger::init();
 
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
-    let effective_gpu_workers = gpu_workers.unwrap_or(0);
-    let total_workers = effective_cpu_workers + effective_gpu_workers;
+    let effective_gpu_devices = gpu_devices.unwrap_or(0);
+    let total_workers = effective_cpu_workers + effective_gpu_devices;
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
@@ -340,7 +340,7 @@ async fn run_benchmark_command(
         effective_cpu_workers,
         num_cpus::get()
     );
-    println!("  GPU Workers: {}", effective_gpu_workers);
+    println!("  GPU Devices: {}", effective_gpu_devices);
     println!("Duration: {} seconds", duration);
     println!("Total Workers: {}", total_workers);
 
@@ -351,16 +351,8 @@ async fn run_benchmark_command(
         None
     };
 
-    let gpu_engine = if effective_gpu_workers > 0 {
-        #[cfg(feature = "gpu")]
-        {
-            Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            eprintln!("Error: GPU workers requested but this binary was built without GPU support");
-            std::process::exit(1);
-        }
+    let gpu_engine = if effective_gpu_devices > 0 {
+        Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
     } else {
         None
     };
@@ -400,26 +392,22 @@ async fn run_benchmark_command(
     // GPU chunk size from 1 - 10M is good
     let gpu_chunk = 1_000_000u64;
 
-    if effective_gpu_workers > 0 {
+    if effective_gpu_devices > 0 {
         if let Some(gpu_engine_arc) = &gpu_engine {
             // We can't easily get device count from MinerEngine trait without downcasting or extending trait.
-            // But we know it's GpuEngine here if feature=gpu is enabled.
-            #[cfg(feature = "gpu")]
+            // But we know it's GpuEngine here.
+            if let Some(gpu_ptr) = gpu_engine_arc
+                .as_any()
+                .downcast_ref::<engine_gpu::GpuEngine>()
             {
-                if let Some(gpu_ptr) = gpu_engine_arc
-                    .as_any()
-                    .downcast_ref::<engine_gpu::GpuEngine>()
-                {
-                    let device_count = gpu_ptr.device_count();
-                    if effective_gpu_workers > device_count {
-                        println!(
-                            "⚠️  WARNING: You have requested {} GPU workers for {} device(s).",
-                            effective_gpu_workers, device_count
-                        );
-                        println!("   Multiple workers per device creates contention and typically reduces hashrate.");
-                        println!("   Recommended: 1 worker per GPU device.");
-                        println!();
-                    }
+                let device_count = gpu_ptr.device_count();
+                if effective_gpu_devices > device_count {
+                    eprintln!(
+                        "❌ ERROR: You have requested {} GPU devices but only {} device(s) are available.",
+                        effective_gpu_devices, device_count
+                    );
+                    eprintln!("   Please check your --gpu-devices setting or GPU hardware.");
+                    std::process::exit(1);
                 }
             }
         }
@@ -484,10 +472,8 @@ async fn run_benchmark_command(
                 }
             }
 
-            // Cleanup TLS resources explicitly to avoid panic on exit
-            #[cfg(feature = "gpu")]
             engine_gpu::GpuEngine::clear_worker_resources();
-
+            
             worker_hashes
         });
 
@@ -520,7 +506,7 @@ async fn run_benchmark_command(
                     format!("{:.0}", hash_rate)
                 };
                 println!("⏱️  {:.1}s - {} H/s", elapsed, hash_rate_str);
-            } else if effective_gpu_workers > 0 {
+            } else if effective_gpu_devices > 0 {
                 println!("⏱️  {:.1}s - processing...", elapsed);
             } else {
                 println!("⏱️  {:.1}s - starting...", elapsed);
