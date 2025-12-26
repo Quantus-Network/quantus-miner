@@ -334,13 +334,15 @@ async fn run_benchmark_command(
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
+    println!("Configuration:");
     println!(
-        "Configuration: {} CPU workers, {} GPU workers",
-        effective_cpu_workers, effective_gpu_workers
+        "  CPU Workers: {} (Available Cores: {})",
+        effective_cpu_workers,
+        num_cpus::get()
     );
+    println!("  GPU Workers: {}", effective_gpu_workers);
     println!("Duration: {} seconds", duration);
     println!("Total Workers: {}", total_workers);
-    println!("Available CPUs: {}", num_cpus::get());
 
     // Create engines based on configuration
     let cpu_engine = if effective_cpu_workers > 0 {
@@ -363,16 +365,10 @@ async fn run_benchmark_command(
         None
     };
 
-    // For benchmark, we'll use CPU engine as primary for simplicity
-    let engine = cpu_engine
-        .or(gpu_engine)
-        .expect("At least one engine must be available");
-
     if total_workers == 0 {
         eprintln!("Error: No workers specified");
         std::process::exit(1);
     }
-    println!("Workers: {}", total_workers);
     println!();
 
     // Run benchmark
@@ -380,15 +376,23 @@ async fn run_benchmark_command(
     let benchmark_start = Instant::now();
 
     // Create a large range that should take the full duration
+    // 100M is definitely not enough for modern GPUs. 
+    // Let's make it huge so we don't run out of range logic in this simple benchmark.
+    // However, the worker range logic below relies on fixed offsets.
+    // If we want correct benchmarking, we should ideally dynamic dispatch, but fixed ranges are okay for short duration.
     let benchmark_range = EngineRange {
         start: U512::from(0u64),
-        end: U512::from(100_000_000u64), // 100M nonces - should be plenty
+        end: U512::MAX, // Effectively infinite
     };
 
     let mut header = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut header);
     let difficulty = U512::MAX; // High difficulty - no solutions expected
-    let ctx = engine.prepare_context(header, difficulty);
+    
+    // We need a context from *some* engine. They should be compatible (same job).
+    // Just pick one.
+    let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
+    let ctx = ref_engine.prepare_context(header, difficulty);
 
     println!("⛏️  Starting benchmark...");
 
@@ -396,31 +400,66 @@ async fn run_benchmark_command(
     let mut handles = Vec::new();
     let total_hashes_arc = Arc::new(std::sync::Mutex::new(0u64));
 
-    // Use larger ranges for GPU (1M) vs CPU (10K)
-    let nonces_per_worker = if effective_gpu_workers > 0 {
-        1_000_000u64 // 1M nonces per GPU worker
-    } else {
-        10_000u64 // 10K nonces per CPU worker
-    };
+    // Chunk sizes
+    let cpu_chunk = 10_000u64;
+    let gpu_chunk = 1_000_000u64;
 
     for worker_id in 0..total_workers {
-        let engine = engine.clone();
+        // Determine type and engine
+        let (engine, nonces_per_worker) = if worker_id < effective_cpu_workers {
+            (
+                cpu_engine.as_ref().expect("CPU engine missing").clone(),
+                cpu_chunk,
+            )
+        } else {
+            (
+                gpu_engine.as_ref().expect("GPU engine missing").clone(),
+                gpu_chunk,
+            )
+        };
+
         let ctx = ctx.clone();
         let cancel_flag = cancel_flag.clone();
         let total_hashes = total_hashes_arc.clone();
 
+        // Calculate a disjoint range for this worker.
+        // Simple strategy: Worker K gets [K*chunk, (K+1)*chunk] repeatedly?
+        // The original code was: 
+        // worker_range = start + id*chunk .. start + (id+1)*chunk
+        // And then loop engine.search_range inside.
+        // Wait, the original code Loop:
+        //    loop { ... search_range ... }
+        // BUT it doesn't advance the range in the loop!
+        // It keeps searching the SAME range?
+        //
+        // Original:
+        // let worker_range = ... (calculated once)
+        // loop { engine.search_range(&ctx, worker_range.clone(), ...) }
+        //
+        // If search_range returns Exhausted, it just searches it again?
+        // That's fine for benchmarking hash rate (doing same work repeatedly).
+        // But for "Total hashes", we are counting correctly.
+        //
+        // However, if we mix CPU and GPU, we have different chunk sizes.
+        // We need to make sure ranges don't overlap if that matters? 
+        // For benchmarking hash rate, overlap doesn't matter (we just want to burn cycles).
+        // But to be clean:
+        // Let's just give each worker a dedicated slice of the huge space.
+        // Or just stick to the "loop same small range" approach which fits CPU cache better maybe?
+        // Actually, for GPU, repeatedly doing same range is fine.
+        
         let handle = thread::spawn(move || {
+            // We'll just define a range based on worker ID and a large multiplier
+            // so they don't overlap easily, though it doesn't matter for pure hashrate.
+            // Use a large stride to separate workers.
+            let stride = U512::from(1_000_000_000_000u64); 
+            let worker_start = benchmark_range.start.saturating_add(
+                U512::from(worker_id as u64).saturating_mul(stride)
+            );
+            
             let worker_range = EngineRange {
-                start: benchmark_range.start.saturating_add(
-                    U512::from(worker_id as u64).saturating_mul(U512::from(nonces_per_worker)),
-                ),
-                end: benchmark_range
-                    .start
-                    .saturating_add(
-                        U512::from((worker_id + 1) as u64)
-                            .saturating_mul(U512::from(nonces_per_worker)),
-                    )
-                    .saturating_sub(U512::from(1u64)),
+                start: worker_start,
+                end: worker_start.saturating_add(U512::from(nonces_per_worker)).saturating_sub(U512::from(1u64)),
             };
 
             let mut worker_hashes = 0u64;

@@ -16,17 +16,20 @@ struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
 
     // Cached vendor configuration
     optimal_workgroups: u32,
-    // Reusable buffers
+}
+
+#[derive(Clone)]
+struct GpuResources {
     header_buffer: wgpu::Buffer,
     target_buffer: wgpu::Buffer,
     start_nonce_buffer: wgpu::Buffer,
     results_buffer: wgpu::Buffer,
     dispatch_config_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 pub struct GpuEngine {
@@ -37,6 +40,100 @@ pub struct GpuEngine {
 // Thread-local storage for consistent GPU device assignment per worker thread
 thread_local! {
     static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = const { RefCell::new(None) };
+    static WORKER_RESOURCES: RefCell<Option<GpuResources>> = const { RefCell::new(None) };
+}
+
+impl GpuContext {
+    fn create_resources(&self) -> GpuResources {
+        let bind_group_layout = self.pipeline.get_bind_group_layout(0);
+
+        // Header: 8 u32s
+        let header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Header Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Target: 16 u32s
+        let target_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Target Buffer"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Start Nonce: 16 u32s
+        let start_nonce_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Start Nonce Buffer"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Results: [flag (1), nonce (16), hash (16)] = 33 u32s
+        let results_size = (1 + 16 + 16) * 4;
+        let results_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Results Buffer"),
+            size: results_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Dispatch config: [total_threads, nonces_per_thread, workgroups, threads_per_workgroup] = 4 u32s
+        let dispatch_config_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dispatch Config Buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: results_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Mining Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: results_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: header_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: start_nonce_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: target_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: dispatch_config_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        GpuResources {
+            header_buffer,
+            target_buffer,
+            start_nonce_buffer,
+            results_buffer,
+            dispatch_config_buffer,
+            staging_buffer,
+            bind_group,
+        }
+    }
 }
 
 impl Default for GpuEngine {
@@ -123,87 +220,7 @@ impl GpuEngine {
                 cache: None,
             });
 
-            let bind_group_layout = pipeline.get_bind_group_layout(0);
-
-            // Pre-allocate buffers
-            // Header: 8 u32s
-            let header_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Header Buffer"),
-                size: 32,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            // Target: 16 u32s
-            let target_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Target Buffer"),
-                size: 64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            // Start Nonce: 16 u32s
-            let start_nonce_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Start Nonce Buffer"),
-                size: 64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            // Results: [flag (1), nonce (16), hash (16)] = 33 u32s
-            let results_size = (1 + 16 + 16) * 4;
-            let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Results Buffer"),
-                size: results_size,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            // Dispatch config: [total_threads, nonces_per_thread, workgroups, threads_per_workgroup] = 4 u32s
-            let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Dispatch Config Buffer"),
-                size: 16,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Staging Buffer"),
-                size: results_size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Mining Bind Group"),
-                layout: &bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: results_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: header_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: start_nonce_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: target_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: dispatch_config_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
-            log::debug!(target: "gpu_engine", "Buffers and bind group initialized for adapter {}", i);
+            log::debug!(target: "gpu_engine", "Pipeline initialized for adapter {}", i);
 
             // Calculate vendor-specific configuration once during initialization
             let optimal_workgroups = Self::get_vendor_specific_dispatch(&info, &device);
@@ -212,14 +229,7 @@ impl GpuEngine {
                 device,
                 queue,
                 pipeline,
-                bind_group,
                 optimal_workgroups,
-                header_buffer,
-                target_buffer,
-                start_nonce_buffer,
-                results_buffer,
-                dispatch_config_buffer,
-                staging_buffer,
             }));
         }
 
@@ -328,6 +338,19 @@ impl MinerEngine for GpuEngine {
             range.end
         );
 
+        // Ensure resources are initialized for this thread
+        WORKER_RESOURCES.with(|resources_cell| {
+            let mut resources = resources_cell.borrow_mut();
+            if resources.is_none() {
+                *resources = Some(gpu_ctx.create_resources());
+            }
+        });
+
+        // Clone resources to use outside the closure (they are cheap handles)
+        let resources = WORKER_RESOURCES.with(|resources_cell| {
+            resources_cell.borrow().as_ref().unwrap().clone()
+        });
+
         // Pre-convert header and target once (not per range)
         let mut header_u32s = [0u32; 8];
         for (i, item) in header_u32s.iter_mut().enumerate() {
@@ -335,7 +358,7 @@ impl MinerEngine for GpuEngine {
             *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         gpu_ctx.queue.write_buffer(
-            &gpu_ctx.header_buffer,
+            &resources.header_buffer,
             0,
             bytemuck::cast_slice(&header_u32s),
         );
@@ -347,7 +370,7 @@ impl MinerEngine for GpuEngine {
             target_u32s[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         gpu_ctx.queue.write_buffer(
-            &gpu_ctx.target_buffer,
+            &resources.target_buffer,
             0,
             bytemuck::cast_slice(&target_u32s),
         );
@@ -425,7 +448,7 @@ impl MinerEngine for GpuEngine {
             threads_per_workgroup,
         ];
         gpu_ctx.queue.write_buffer(
-            &gpu_ctx.dispatch_config_buffer,
+            &resources.dispatch_config_buffer,
             0,
             bytemuck::cast_slice(&dispatch_config),
         );
@@ -434,12 +457,12 @@ impl MinerEngine for GpuEngine {
         let start_nonce_bytes = range.start.to_little_endian();
         gpu_ctx
             .queue
-            .write_buffer(&gpu_ctx.start_nonce_buffer, 0, &start_nonce_bytes);
+            .write_buffer(&resources.start_nonce_buffer, 0, &start_nonce_bytes);
 
         // Reset results buffer to detect solutions from this dispatch.
         gpu_ctx
             .queue
-            .write_buffer(&gpu_ctx.results_buffer, 0, &ZEROS);
+            .write_buffer(&resources.results_buffer, 0, &ZEROS);
 
         let total_start = std::time::Instant::now();
 
@@ -453,13 +476,13 @@ impl MinerEngine for GpuEngine {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&gpu_ctx.pipeline);
-            cpass.set_bind_group(0, &gpu_ctx.bind_group, &[]);
+            cpass.set_bind_group(0, &resources.bind_group, &[]);
             cpass.dispatch_workgroups(num_workgroups, 1, 1);
         }
         encoder.copy_buffer_to_buffer(
-            &gpu_ctx.results_buffer,
+            &resources.results_buffer,
             0,
-            &gpu_ctx.staging_buffer,
+            &resources.staging_buffer,
             0,
             RESULTS_SIZE as u64,
         );
@@ -467,7 +490,7 @@ impl MinerEngine for GpuEngine {
         // Submit and wait for completion
         gpu_ctx.queue.submit(Some(encoder.finish()));
 
-        let buffer_slice = gpu_ctx.staging_buffer.slice(..);
+        let buffer_slice = resources.staging_buffer.slice(..);
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
 
         let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
@@ -495,7 +518,7 @@ impl MinerEngine for GpuEngine {
             );
 
             drop(data);
-            gpu_ctx.staging_buffer.unmap();
+            resources.staging_buffer.unmap();
 
             return EngineStatus::Found {
                 candidate: Candidate { nonce, work, hash },
@@ -507,7 +530,7 @@ impl MinerEngine for GpuEngine {
         }
 
         drop(data);
-        gpu_ctx.staging_buffer.unmap();
+        resources.staging_buffer.unmap();
 
         let total_time = total_start.elapsed();
         log::info!(
