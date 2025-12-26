@@ -87,5 +87,5 @@ jobs:
         run: cargo build -p miner-cli --release
         timeout-minutes: 60
       - name: run cpu benchmark
-        run: ./target/release/quantus-miner serve --cpu-workers 2 benchmark --duration 5
+        run: ./target/release/quantus-miner benchmark --cpu-workers 2 --duration 5
         timeout-minutes: 10
