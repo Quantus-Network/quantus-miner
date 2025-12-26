@@ -376,7 +376,7 @@ async fn run_benchmark_command(
     let benchmark_start = Instant::now();
 
     // Create a large range that should take the full duration
-    // 100M is definitely not enough for modern GPUs. 
+    // 100M is definitely not enough for modern GPUs.
     // Let's make it huge so we don't run out of range logic in this simple benchmark.
     // However, the worker range logic below relies on fixed offsets.
     // If we want correct benchmarking, we should ideally dynamic dispatch, but fixed ranges are okay for short duration.
@@ -388,7 +388,7 @@ async fn run_benchmark_command(
     let mut header = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut header);
     let difficulty = U512::MAX; // High difficulty - no solutions expected
-    
+
     // We need a context from *some* engine. They should be compatible (same job).
     // Just pick one.
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
@@ -408,20 +408,26 @@ async fn run_benchmark_command(
 
     if effective_gpu_workers > 0 {
         if let Some(gpu_engine_arc) = &gpu_engine {
-             // We can't easily get device count from MinerEngine trait without downcasting or extending trait.
-             // But we know it's GpuEngine here if feature=gpu is enabled.
-             #[cfg(feature = "gpu")]
-             {
-                 if let Some(gpu_ptr) = gpu_engine_arc.as_any().downcast_ref::<engine_gpu::GpuEngine>() {
-                     let device_count = gpu_ptr.device_count();
-                     if effective_gpu_workers > device_count {
-                         println!("⚠️  WARNING: You have requested {} GPU workers for {} device(s).", effective_gpu_workers, device_count);
-                         println!("   Multiple workers per device creates contention and typically reduces hashrate.");
-                         println!("   Recommended: 1 worker per GPU device.");
-                         println!();
-                     }
-                 }
-             }
+            // We can't easily get device count from MinerEngine trait without downcasting or extending trait.
+            // But we know it's GpuEngine here if feature=gpu is enabled.
+            #[cfg(feature = "gpu")]
+            {
+                if let Some(gpu_ptr) = gpu_engine_arc
+                    .as_any()
+                    .downcast_ref::<engine_gpu::GpuEngine>()
+                {
+                    let device_count = gpu_ptr.device_count();
+                    if effective_gpu_workers > device_count {
+                        println!(
+                            "⚠️  WARNING: You have requested {} GPU workers for {} device(s).",
+                            effective_gpu_workers, device_count
+                        );
+                        println!("   Multiple workers per device creates contention and typically reduces hashrate.");
+                        println!("   Recommended: 1 worker per GPU device.");
+                        println!();
+                    }
+                }
+            }
         }
     }
 
@@ -445,7 +451,7 @@ async fn run_benchmark_command(
 
         // Calculate a disjoint range for this worker.
         // Simple strategy: Worker K gets [K*chunk, (K+1)*chunk] repeatedly?
-        // The original code was: 
+        // The original code was:
         // worker_range = start + id*chunk .. start + (id+1)*chunk
         // And then loop engine.search_range inside.
         // Wait, the original code Loop:
@@ -462,25 +468,27 @@ async fn run_benchmark_command(
         // But for "Total hashes", we are counting correctly.
         //
         // However, if we mix CPU and GPU, we have different chunk sizes.
-        // We need to make sure ranges don't overlap if that matters? 
+        // We need to make sure ranges don't overlap if that matters?
         // For benchmarking hash rate, overlap doesn't matter (we just want to burn cycles).
         // But to be clean:
         // Let's just give each worker a dedicated slice of the huge space.
         // Or just stick to the "loop same small range" approach which fits CPU cache better maybe?
         // Actually, for GPU, repeatedly doing same range is fine.
-        
+
         let handle = thread::spawn(move || {
             // We'll just define a range based on worker ID and a large multiplier
             // so they don't overlap easily, though it doesn't matter for pure hashrate.
             // Use a large stride to separate workers.
-            let stride = U512::from(1_000_000_000_000u64); 
-            let worker_start = benchmark_range.start.saturating_add(
-                U512::from(worker_id as u64).saturating_mul(stride)
-            );
-            
+            let stride = U512::from(1_000_000_000_000u64);
+            let worker_start = benchmark_range
+                .start
+                .saturating_add(U512::from(worker_id as u64).saturating_mul(stride));
+
             let worker_range = EngineRange {
                 start: worker_start,
-                end: worker_start.saturating_add(U512::from(nonces_per_worker)).saturating_sub(U512::from(1u64)),
+                end: worker_start
+                    .saturating_add(U512::from(nonces_per_worker))
+                    .saturating_sub(U512::from(1u64)),
             };
 
             let mut worker_hashes = 0u64;

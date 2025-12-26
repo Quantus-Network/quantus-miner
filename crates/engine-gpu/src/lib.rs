@@ -355,9 +355,8 @@ impl MinerEngine for GpuEngine {
         });
 
         // Clone resources to use outside the closure (they are cheap handles)
-        let resources = WORKER_RESOURCES.with(|resources_cell| {
-            resources_cell.borrow().as_ref().unwrap().clone()
-        });
+        let resources = WORKER_RESOURCES
+            .with(|resources_cell| resources_cell.borrow().as_ref().unwrap().clone());
 
         // Pre-convert header and target once (not per range)
         let mut header_u32s = [0u32; 8];
