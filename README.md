@@ -9,7 +9,7 @@ High-performance external mining service for Quantus Network with support for CP
 cargo build -p miner-cli --release
 
 # With GPU support (recommended)
-cargo build -p miner-cli --features gpu --release
+cargo build -p miner-cli --release
 ```
 
 The binary will be available at `target/release/quantus-miner`.
@@ -20,11 +20,11 @@ The binary will be available at `target/release/quantus-miner`.
 # CPU-only mining (default: auto-detected CPU cores)
 ./target/release/quantus-miner --cpu-workers 4
 
-# GPU-only mining (requires --features gpu build)
-./target/release/quantus-miner --gpu-workers 1
+# GPU-only mining 
+./target/release/quantus-miner --gpu-devices 1
 
 # Hybrid CPU+GPU mining
-./target/release/quantus-miner --cpu-workers 4 --gpu-workers 1
+./target/release/quantus-miner --cpu-workers 4 --gpu-devices 1
 
 # Custom port and metrics
 ./target/release/quantus-miner --cpu-workers 2 --port 8000 --metrics-port 9900
@@ -35,7 +35,7 @@ The binary will be available at `target/release/quantus-miner`.
 | Argument | Environment Variable | Description | Default |
 |----------|---------------------|-------------|---------|
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
-| `--gpu-workers <N>` | `MINER_GPU_WORKERS` | Number of GPU worker threads | 0 |
+| `--gpu-devices <N>` | `MINER_GPU_WORKERS` | Number of GPU worker threads | 0 |
 | `--port <PORT>` | `MINER_PORT` | HTTP API port | 9833 |
 | `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | Disabled |
 
@@ -51,7 +51,7 @@ GPU support uses WGPU for cross-platform acceleration:
 
 **Build with GPU support:**
 ```bash
-cargo build -p miner-cli --features gpu --release
+cargo build -p miner-cli --release
 ```
 
 **Platform requirements:**
@@ -72,18 +72,18 @@ cargo build -p miner-cli --features gpu --release
 ./target/release/quantus-miner --cpu-workers 8
 
 # Pure GPU mining
-./target/release/quantus-miner --gpu-workers 1
+./target/release/quantus-miner --gpu-devices 1
 
 # Hybrid mining: 4 CPU + 1 GPU workers
-./target/release/quantus-miner --cpu-workers 4 --gpu-workers 1
+./target/release/quantus-miner --cpu-workers 4 --gpu-devices 1
 
 # With verbose logging
-RUST_LOG=debug ./target/release/quantus-miner --cpu-workers 2 --gpu-workers 1
+RUST_LOG=debug ./target/release/quantus-miner --cpu-workers 2 --gpu-devices 1
 
 # Production setup with metrics
 ./target/release/quantus-miner \
   --cpu-workers 6 \
-  --gpu-workers 1 \
+  --gpu-devices 1 \
   --port 9833 \
   --metrics-port 9900
 ```
@@ -117,8 +117,8 @@ docker run -d -p 9833:9833 quantus-miner --cpu-workers 4
 ./target/release/quantus-miner benchmark --cpu-workers 8 --duration 30
 
 # Benchmark GPU performance  
-./target/release/quantus-miner benchmark --gpu-workers 1 --duration 30
+./target/release/quantus-miner benchmark --gpu-devices 1 --duration 30
 
 # Benchmark hybrid performance
-./target/release/quantus-miner benchmark --cpu-workers 4 --gpu-workers 1 --duration 30
+./target/release/quantus-miner benchmark --cpu-workers 4 --gpu-devices 1 --duration 30
 ```
