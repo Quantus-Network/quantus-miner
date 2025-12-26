@@ -375,14 +375,9 @@ async fn run_benchmark_command(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let benchmark_start = Instant::now();
 
-    // Create a large range that should take the full duration
-    // 100M is definitely not enough for modern GPUs.
-    // Let's make it huge so we don't run out of range logic in this simple benchmark.
-    // However, the worker range logic below relies on fixed offsets.
-    // If we want correct benchmarking, we should ideally dynamic dispatch, but fixed ranges are okay for short duration.
     let benchmark_range = EngineRange {
         start: U512::from(0u64),
-        end: U512::MAX, // Effectively infinite
+        end: U512::from(100_000_000u64), // 100M nonces
     };
 
     let mut header = [0u8; 32];
@@ -402,8 +397,7 @@ async fn run_benchmark_command(
 
     // Chunk sizes
     let cpu_chunk = 10_000u64;
-    // Increase GPU chunk size to amortize submission overhead (10M)
-    // 1M might be too small for fast GPUs, 100M might be too large for short benchmarks.
+    // GPU chunk size from 1 - 10M is good
     let gpu_chunk = 1_000_000u64;
 
     if effective_gpu_workers > 0 {
@@ -448,32 +442,6 @@ async fn run_benchmark_command(
         let ctx = ctx.clone();
         let cancel_flag = cancel_flag.clone();
         let total_hashes = total_hashes_arc.clone();
-
-        // Calculate a disjoint range for this worker.
-        // Simple strategy: Worker K gets [K*chunk, (K+1)*chunk] repeatedly?
-        // The original code was:
-        // worker_range = start + id*chunk .. start + (id+1)*chunk
-        // And then loop engine.search_range inside.
-        // Wait, the original code Loop:
-        //    loop { ... search_range ... }
-        // BUT it doesn't advance the range in the loop!
-        // It keeps searching the SAME range?
-        //
-        // Original:
-        // let worker_range = ... (calculated once)
-        // loop { engine.search_range(&ctx, worker_range.clone(), ...) }
-        //
-        // If search_range returns Exhausted, it just searches it again?
-        // That's fine for benchmarking hash rate (doing same work repeatedly).
-        // But for "Total hashes", we are counting correctly.
-        //
-        // However, if we mix CPU and GPU, we have different chunk sizes.
-        // We need to make sure ranges don't overlap if that matters?
-        // For benchmarking hash rate, overlap doesn't matter (we just want to burn cycles).
-        // But to be clean:
-        // Let's just give each worker a dedicated slice of the huge space.
-        // Or just stick to the "loop same small range" approach which fits CPU cache better maybe?
-        // Actually, for GPU, repeatedly doing same range is fine.
 
         let handle = thread::spawn(move || {
             // We'll just define a range based on worker ID and a large multiplier
