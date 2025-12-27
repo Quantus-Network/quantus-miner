@@ -1250,7 +1250,9 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
     Partitions { ranges }
 }
 
-pub fn resolve_gpu_configuration(requested_devices: Option<usize>) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+pub fn resolve_gpu_configuration(
+    requested_devices: Option<usize>,
+) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     if let Some(req_count) = requested_devices {
         if req_count == 0 {
             return Ok((None, 0));
@@ -1258,10 +1260,14 @@ pub fn resolve_gpu_configuration(requested_devices: Option<usize>) -> anyhow::Re
         // Explicit request > 0
         let engine = engine_gpu::GpuEngine::try_new()
             .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
-        
+
         let available = engine.device_count();
         if req_count > available {
-            return Err(anyhow::anyhow!("Requested {} GPU devices but only {} device(s) are available.", req_count, available));
+            return Err(anyhow::anyhow!(
+                "Requested {} GPU devices but only {} device(s) are available.",
+                req_count,
+                available
+            ));
         }
         Ok((Some(Arc::new(engine)), req_count))
     } else {
@@ -1270,7 +1276,10 @@ pub fn resolve_gpu_configuration(requested_devices: Option<usize>) -> anyhow::Re
             Ok(engine) => {
                 let available = engine.device_count();
                 if available > 0 {
-                    log::info!("Auto-detected {} GPU device(s). Using all available GPUs.", available);
+                    log::info!(
+                        "Auto-detected {} GPU device(s). Using all available GPUs.",
+                        available
+                    );
                     Ok((Some(Arc::new(engine)), available))
                 } else {
                     log::info!("GPU auto-detection found 0 devices. Defaulting to CPU only.");
