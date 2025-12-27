@@ -329,7 +329,18 @@ async fn run_benchmark_command(
     env_logger::init();
 
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
-    let effective_gpu_devices = gpu_devices.unwrap_or(0);
+
+    // Initialize GPU engine and determine effective GPU devices
+    let (gpu_engine, effective_gpu_devices) =
+        match miner_service::resolve_gpu_configuration(gpu_devices) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                eprintln!("❌ ERROR: {}", e);
+                eprintln!("   Please check your --gpu-devices setting or GPU hardware.");
+                std::process::exit(1);
+            }
+        };
+
     let total_workers = effective_cpu_workers + effective_gpu_devices;
 
     println!("🚀 Quantus Miner Benchmark");
@@ -347,12 +358,6 @@ async fn run_benchmark_command(
     // Create engines based on configuration
     let cpu_engine = if effective_cpu_workers > 0 {
         Some(Arc::new(engine_cpu::FastCpuEngine::new()) as Arc<dyn MinerEngine>)
-    } else {
-        None
-    };
-
-    let gpu_engine = if effective_gpu_devices > 0 {
-        Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
     } else {
         None
     };
@@ -391,27 +396,6 @@ async fn run_benchmark_command(
     let cpu_chunk = 10_000u64;
     // GPU chunk size from 1 - 10M is good
     let gpu_chunk = 1_000_000u64;
-
-    if effective_gpu_devices > 0 {
-        if let Some(gpu_engine_arc) = &gpu_engine {
-            // We can't easily get device count from MinerEngine trait without downcasting or extending trait.
-            // But we know it's GpuEngine here.
-            if let Some(gpu_ptr) = gpu_engine_arc
-                .as_any()
-                .downcast_ref::<engine_gpu::GpuEngine>()
-            {
-                let device_count = gpu_ptr.device_count();
-                if effective_gpu_devices > device_count {
-                    eprintln!(
-                        "❌ ERROR: You have requested {} GPU devices but only {} device(s) are available.",
-                        effective_gpu_devices, device_count
-                    );
-                    eprintln!("   Please check your --gpu-devices setting or GPU hardware.");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
 
     for worker_id in 0..total_workers {
         // Determine type and engine

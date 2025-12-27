@@ -147,6 +147,11 @@ impl GpuEngine {
         block_on(Self::init()).expect("Failed to initialize GPU engine")
     }
 
+    /// Try to initialize the GPU engine, returning an error if initialization fails.
+    pub fn try_new() -> Result<Self, Box<dyn std::error::Error>> {
+        block_on(Self::init())
+    }
+
     async fn init() -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {

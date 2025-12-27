@@ -1250,6 +1250,41 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
     Partitions { ranges }
 }
 
+pub fn resolve_gpu_configuration(requested_devices: Option<usize>) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+    if let Some(req_count) = requested_devices {
+        if req_count == 0 {
+            return Ok((None, 0));
+        }
+        // Explicit request > 0
+        let engine = engine_gpu::GpuEngine::try_new()
+            .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
+        
+        let available = engine.device_count();
+        if req_count > available {
+            return Err(anyhow::anyhow!("Requested {} GPU devices but only {} device(s) are available.", req_count, available));
+        }
+        Ok((Some(Arc::new(engine)), req_count))
+    } else {
+        // Auto-detect
+        match engine_gpu::GpuEngine::try_new() {
+            Ok(engine) => {
+                let available = engine.device_count();
+                if available > 0 {
+                    log::info!("Auto-detected {} GPU device(s). Using all available GPUs.", available);
+                    Ok((Some(Arc::new(engine)), available))
+                } else {
+                    log::info!("GPU auto-detection found 0 devices. Defaulting to CPU only.");
+                    Ok((None, 0))
+                }
+            }
+            Err(e) => {
+                log::info!("GPU auto-detection failed (no suitable GPU found): {}. Defaulting to CPU only.", e);
+                Ok((None, 0))
+            }
+        }
+    }
+}
+
 /// Start the miner service with the given configuration.
 /// - Spawns the mining loop.
 /// - Optionally exposes a metrics endpoint if `metrics_port` is provided and the `metrics` feature is enabled.
@@ -1316,9 +1351,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         metrics::set_effective_cpus(effective_cpus as i64);
     }
 
+    // Initialize GPU engine if requested or for auto-detection
+    let (gpu_engine, gpu_devices): (Option<Arc<dyn MinerEngine>>, usize) =
+        match resolve_gpu_configuration(config.gpu_devices) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                log::error!("❌ ERROR: {}", e);
+                if config.gpu_devices.is_some() {
+                    log::error!("   Please check your --gpu-devices setting or GPU hardware.");
+                    std::process::exit(1);
+                } else {
+                    (None, 0)
+                }
+            }
+        };
+
     // Calculate CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
-        if config.gpu_devices.is_none() || config.gpu_devices == Some(0) {
+        if gpu_devices == 0 {
             // CPU-only mode: use default CPU allocation
             let default_cpu_workers = effective_cpus
                 .saturating_sub(effective_cpus / 2)
@@ -1333,20 +1383,11 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         } else {
             // Hybrid mode: default to half of effective CPUs for CPU
             let default_cpu_workers = effective_cpus / 2;
-            log::info!("Hybrid mode: defaulting to {} CPU workers", default_cpu_workers);
+            log::info!(
+                "Hybrid mode: defaulting to {} CPU workers",
+                default_cpu_workers
+            );
             default_cpu_workers
-        }
-    });
-
-    // Calculate GPU workers
-    let gpu_devices = config.gpu_devices.unwrap_or_else(|| {
-        if config.cpu_workers.is_some() && config.cpu_workers != Some(0) {
-            // Hybrid mode: default to 1 GPU worker
-            log::info!("Hybrid mode: defaulting to 1 GPU device");
-            1
-        } else {
-            // CPU-only mode by default
-            0
         }
     });
 
@@ -1368,33 +1409,6 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     } else {
         None
     };
-
-    let gpu_engine: Option<Arc<dyn MinerEngine>> = if gpu_devices > 0 {
-        Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
-    } else {
-        None
-    };
-
-    // Validate GPU device count if requesting GPU devices
-    if gpu_devices > 0 {
-        if let Some(gpu_engine_arc) = &gpu_engine {
-            if let Some(gpu_ptr) = gpu_engine_arc
-                .as_any()
-                .downcast_ref::<engine_gpu::GpuEngine>()
-            {
-                let device_count = gpu_ptr.device_count();
-                if gpu_devices > device_count {
-                    log::error!(
-                        "❌ ERROR: Requested {} GPU devices but only {} device(s) are available.",
-                        gpu_devices,
-                        device_count
-                    );
-                    log::error!("   Please check your --gpu-devices setting or GPU hardware.");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
 
     // Log the mining configuration
     log::info!(
