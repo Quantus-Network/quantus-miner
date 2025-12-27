@@ -81,7 +81,7 @@ cargo build -p miner-cli --release
 RUST_LOG=debug ./target/release/quantus-miner serve --cpu-workers 2 --gpu-devices 1
 
 # Production setup with metrics
-./target/release/quantus-miner \
+./target/release/quantus-miner serve \
   --cpu-workers 6 \
   --gpu-devices 1 \
   --port 9833 \
