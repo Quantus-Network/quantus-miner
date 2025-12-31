@@ -23,8 +23,8 @@ pub struct ServiceConfig {
     pub port: u16,
     /// Number of CPU worker threads to use for mining (None = auto-detect)
     pub cpu_workers: Option<usize>,
-    /// Number of GPU worker threads to use for mining (None = auto-detect)
-    pub gpu_workers: Option<usize>,
+    /// Number of GPU devices to use for mining (None = auto-detect)
+    pub gpu_devices: Option<usize>,
     /// Optional metrics port. When Some, metrics endpoint starts; when None, metrics are disabled.
     pub metrics_port: Option<u16>,
     /// How often to report mining progress (in milliseconds). If None, defaults to 10000ms.
@@ -46,7 +46,7 @@ impl Default for ServiceConfig {
         Self {
             port: 9833,
             cpu_workers: None,
-            gpu_workers: None,
+            gpu_devices: None,
             metrics_port: None,
             progress_interval_ms: None,
             chunk_size: None,
@@ -62,10 +62,10 @@ impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "port={}, cpu_workers={:?}, gpu_workers={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
             self.port,
             self.cpu_workers,
-            self.gpu_workers,
+            self.gpu_devices,
             self.metrics_port,
             self.progress_interval_ms,
             self.chunk_size,
@@ -82,7 +82,7 @@ impl fmt::Display for ServiceConfig {
 pub struct MiningService {
     pub jobs: Arc<Mutex<HashMap<String, MiningJob>>>,
     pub cpu_workers: usize,
-    pub gpu_workers: usize,
+    pub gpu_devices: usize,
     pub cpu_engine: Option<Arc<dyn MinerEngine>>,
     pub gpu_engine: Option<Arc<dyn MinerEngine>>,
     /// How often to report mining progress (in milliseconds).
@@ -96,7 +96,7 @@ pub struct MiningService {
 impl MiningService {
     fn new(
         cpu_workers: usize,
-        gpu_workers: usize,
+        gpu_devices: usize,
         cpu_engine: Option<Arc<dyn MinerEngine>>,
         gpu_engine: Option<Arc<dyn MinerEngine>>,
         progress_interval_ms: u64,
@@ -105,7 +105,7 @@ impl MiningService {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             cpu_engine,
             gpu_engine,
             progress_interval_ms,
@@ -124,14 +124,14 @@ impl MiningService {
         log::info!(
             "Adding mining job: {} with {} workers",
             job_id,
-            self.cpu_workers + self.gpu_workers
+            self.cpu_workers + self.gpu_devices
         );
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
-            let engine_name = if self.cpu_workers > 0 && self.gpu_workers > 0 {
+            let engine_name = if self.cpu_workers > 0 && self.gpu_devices > 0 {
                 "hybrid"
-            } else if self.gpu_workers > 0 {
+            } else if self.gpu_devices > 0 {
                 "gpu"
             } else {
                 "cpu"
@@ -149,7 +149,7 @@ impl MiningService {
         }
         job.start_mining(
             self.cpu_workers,
-            self.gpu_workers,
+            self.gpu_devices,
             self.cpu_engine.clone(),
             self.gpu_engine.clone(),
             self.progress_interval_ms,
@@ -439,13 +439,13 @@ impl MiningJob {
     pub fn start_mining(
         &mut self,
         cpu_workers: usize,
-        gpu_workers: usize,
+        gpu_devices: usize,
         cpu_engine: Option<Arc<dyn MinerEngine>>,
         gpu_engine: Option<Arc<dyn MinerEngine>>,
         progress_interval_ms: u64,
         chunk_size: Option<u64>,
     ) {
-        let total_workers = cpu_workers + gpu_workers;
+        let total_workers = cpu_workers + gpu_devices;
         let chan_capacity = std::env::var("MINER_RESULT_CHANNEL_CAP")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -454,9 +454,9 @@ impl MiningJob {
         self.result_receiver = Some(receiver);
 
         // Set engine name based on what's available
-        self.engine_name = if cpu_workers > 0 && gpu_workers > 0 {
+        self.engine_name = if cpu_workers > 0 && gpu_devices > 0 {
             "hybrid"
-        } else if gpu_workers > 0 {
+        } else if gpu_devices > 0 {
             "gpu"
         } else {
             "cpu"
@@ -473,7 +473,7 @@ impl MiningJob {
         log::info!(
             "Starting mining with {} CPU + {} GPU workers, total range: {}",
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             total_range
         );
 
@@ -524,10 +524,10 @@ impl MiningJob {
         }
 
         // Create GPU worker threads
-        if gpu_workers > 0 {
+        if gpu_devices > 0 {
             if let Some(gpu_engine) = gpu_engine {
                 let ctx = gpu_engine.prepare_context(self.header_hash, self.difficulty);
-                let gpu_partitions = compute_partitions(current_start, self.nonce_end, gpu_workers);
+                let gpu_partitions = compute_partitions(current_start, self.nonce_end, gpu_devices);
 
                 for (start, end) in gpu_partitions.ranges.into_iter() {
                     let cancel_flag = self.cancel_flag.clone();
@@ -933,6 +933,11 @@ fn mine_range_with_engine_typed(
         }
     }
 
+    // Explicitly clear thread-local GPU resources to avoid TLS order panic
+    if engine_type == "GPU" {
+        engine_gpu::GpuEngine::clear_worker_resources();
+    }
+
     log::debug!(target: "miner", "Job {job_id} thread {thread_id} completed.");
 }
 
@@ -1245,6 +1250,50 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
     Partitions { ranges }
 }
 
+pub fn resolve_gpu_configuration(
+    requested_devices: Option<usize>,
+) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+    if let Some(req_count) = requested_devices {
+        if req_count == 0 {
+            return Ok((None, 0));
+        }
+        // Explicit request > 0
+        let engine = engine_gpu::GpuEngine::try_new()
+            .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
+
+        let available = engine.device_count();
+        if req_count > available {
+            return Err(anyhow::anyhow!(
+                "Requested {} GPU devices but only {} device(s) are available.",
+                req_count,
+                available
+            ));
+        }
+        Ok((Some(Arc::new(engine)), req_count))
+    } else {
+        // Auto-detect
+        match engine_gpu::GpuEngine::try_new() {
+            Ok(engine) => {
+                let available = engine.device_count();
+                if available > 0 {
+                    log::info!(
+                        "Auto-detected {} GPU device(s). Using all available GPUs.",
+                        available
+                    );
+                    Ok((Some(Arc::new(engine)), available))
+                } else {
+                    log::info!("GPU auto-detection found 0 devices. Defaulting to CPU only.");
+                    Ok((None, 0))
+                }
+            }
+            Err(e) => {
+                log::info!("GPU auto-detection failed (no suitable GPU found): {}. Defaulting to CPU only.", e);
+                Ok((None, 0))
+            }
+        }
+    }
+}
+
 /// Start the miner service with the given configuration.
 /// - Spawns the mining loop.
 /// - Optionally exposes a metrics endpoint if `metrics_port` is provided and the `metrics` feature is enabled.
@@ -1311,9 +1360,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         metrics::set_effective_cpus(effective_cpus as i64);
     }
 
+    // Initialize GPU engine if requested or for auto-detection
+    let (gpu_engine, gpu_devices): (Option<Arc<dyn MinerEngine>>, usize) =
+        match resolve_gpu_configuration(config.gpu_devices) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                log::error!("❌ ERROR: {}", e);
+                if config.gpu_devices.is_some() {
+                    log::error!("   Please check your --gpu-devices setting or GPU hardware.");
+                    std::process::exit(1);
+                } else {
+                    (None, 0)
+                }
+            }
+        };
+
     // Calculate CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
-        if config.gpu_workers.is_none() || config.gpu_workers == Some(0) {
+        if gpu_devices == 0 {
             // CPU-only mode: use default CPU allocation
             let default_cpu_workers = effective_cpus
                 .saturating_sub(effective_cpus / 2)
@@ -1328,33 +1392,24 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         } else {
             // Hybrid mode: default to half of effective CPUs for CPU
             let default_cpu_workers = effective_cpus / 2;
-            log::info!("Hybrid mode: defaulting to {} CPU workers", default_cpu_workers);
+            log::info!(
+                "Hybrid mode: defaulting to {} CPU workers",
+                default_cpu_workers
+            );
             default_cpu_workers
         }
     });
 
-    // Calculate GPU workers
-    let gpu_workers = config.gpu_workers.unwrap_or_else(|| {
-        if config.cpu_workers.is_some() && config.cpu_workers != Some(0) {
-            // Hybrid mode: default to 1 GPU worker
-            log::info!("Hybrid mode: defaulting to 1 GPU worker");
-            1
-        } else {
-            // CPU-only mode by default
-            0
-        }
-    });
+    let total_workers = cpu_workers + gpu_devices;
 
-    let total_workers = cpu_workers + gpu_workers;
-
-    let (cpu_workers, gpu_workers) = if total_workers == 0 {
+    let (cpu_workers, gpu_devices) = if total_workers == 0 {
         log::warn!(
             "No workers specified. Defaulting to CPU-only mode with {} workers.",
             effective_cpus
         );
         (effective_cpus, 0)
     } else {
-        (cpu_workers, gpu_workers)
+        (cpu_workers, gpu_devices)
     };
 
     // Create engines based on worker configuration
@@ -1364,27 +1419,11 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         None
     };
 
-    let gpu_engine: Option<Arc<dyn MinerEngine>> = if gpu_workers > 0 {
-        #[cfg(feature = "gpu")]
-        {
-            Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            log::error!("GPU workers requested but this binary was built without the 'gpu' feature. Rebuild with --features gpu.");
-            return Err(anyhow::anyhow!(
-                "GPU workers requested but 'gpu' feature not enabled"
-            ));
-        }
-    } else {
-        None
-    };
-
     // Log the mining configuration
     log::info!(
-        "🚀 Mining configuration: {} CPU workers, {} GPU workers",
+        "🚀 Mining configuration: {} CPU workers, {} GPU devices",
         cpu_workers,
-        gpu_workers
+        gpu_devices
     );
 
     if let Some(ref engine) = cpu_engine {
@@ -1400,7 +1439,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let progress_interval_ms = config.progress_interval_ms.unwrap_or(10000);
     let service = MiningService::new(
         cpu_workers,
-        gpu_workers,
+        gpu_devices,
         cpu_engine,
         gpu_engine,
         progress_interval_ms,
@@ -1500,9 +1539,9 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
         let telemetry_handle = telemetry.clone();
         let svc = service.clone();
-        let engine_name_str = if cpu_workers > 0 && gpu_workers > 0 {
+        let engine_name_str = if cpu_workers > 0 && gpu_devices > 0 {
             "hybrid".to_string()
-        } else if gpu_workers > 0 {
+        } else if gpu_devices > 0 {
             "gpu".to_string()
         } else {
             "cpu".to_string()
@@ -1533,7 +1572,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
                 let interval = miner_telemetry::SystemInterval {
                     uptime_ms,
                     engine: Some(engine_name_str.clone()),
-                    workers: Some((svc.cpu_workers + svc.gpu_workers) as u32),
+                    workers: Some((svc.cpu_workers + svc.gpu_devices) as u32),
                     hash_rate: Some(total_rate),
                     active_jobs: Some(active_jobs),
                     linked_node_hint: None,

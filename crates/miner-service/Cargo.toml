@@ -9,8 +9,6 @@ description = "Service layer: HTTP API, job orchestration, and engine abstractio
 default = ["cpu", "metrics"]
 # Enable CPU engine by default.
 cpu = ["engine-cpu"]
-# Enable GPU engine.
-gpu = ["engine-gpu"]
 # Optional metrics/observability (Prometheus endpoint).
 metrics = [
 	"dep:metrics",
@@ -40,6 +38,6 @@ quantus-miner-api = { workspace = true }
 # Local crates
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
-engine-gpu = { path = "../engine-gpu", optional = true }
+engine-gpu = { path = "../engine-gpu" }
 metrics = { path = "../metrics", optional = true }
 miner-telemetry = { path = "../miner-telemetry" }

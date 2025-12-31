@@ -45,28 +45,17 @@ jobs:
     name: 🛠️ Build & Test
     needs: fast-checks
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        features: ["", "gpu"]
     steps:
       - uses: actions/checkout@v4
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: compile (${{ matrix.features || 'cpu-only' }})
+      - name: compile (gpu)
         run: |
-          if [ -n "${{ matrix.features }}" ]; then
-            cargo build --locked --workspace --features ${{ matrix.features }}
-          else
-            cargo build --locked --workspace
-          fi
+          cargo build --locked --workspace
         timeout-minutes: 90
-      - name: test (${{ matrix.features || 'cpu-only' }})
+      - name: test (gpu)
         run: |
-          if [ -n "${{ matrix.features }}" ]; then
-            cargo test --locked --workspace --features ${{ matrix.features }}
-          else
-            cargo test --locked --workspace
-          fi
+          cargo test --locked --workspace
         timeout-minutes: 15
 
   analysis:
@@ -95,7 +84,7 @@ jobs:
       - name: setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: build benchmark binary
-        run: cargo build -p miner-cli --release --features gpu
+        run: cargo build -p miner-cli --release
         timeout-minutes: 60
       - name: run cpu benchmark
         run: ./target/release/quantus-miner benchmark --cpu-workers 2 --duration 5

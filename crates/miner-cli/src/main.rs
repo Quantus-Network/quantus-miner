@@ -21,9 +21,9 @@ enum Command {
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
         cpu_workers: Option<usize>,
 
-        /// Number of GPU worker threads to use for mining (None = auto-detect)
-        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
-        gpu_workers: Option<usize>,
+        /// Number of GPU devices to use for mining (None = auto-detect)
+        #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
+        gpu_devices: Option<usize>,
 
         /// Optional Prometheus metrics exporter port; if omitted, metrics are disabled
         #[arg(long, env = "MINER_METRICS_PORT")]
@@ -109,9 +109,9 @@ enum Command {
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
         cpu_workers: Option<usize>,
 
-        /// Number of GPU workers to use for benchmark
-        #[arg(long = "gpu-workers", env = "MINER_GPU_WORKERS")]
-        gpu_workers: Option<usize>,
+        /// Number of GPU devices to use for benchmark
+        #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
+        gpu_devices: Option<usize>,
 
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
@@ -139,7 +139,7 @@ async fn main() {
     match args.command.unwrap_or(Command::Serve {
         port: 9833,
         cpu_workers: None,
-        gpu_workers: None,
+        gpu_devices: None,
         metrics_port: None,
         verbose: false,
         progress_interval_ms: None,
@@ -162,7 +162,7 @@ async fn main() {
         Command::Serve {
             port,
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             metrics_port,
             verbose,
             progress_interval_ms,
@@ -185,7 +185,7 @@ async fn main() {
             run_serve_command(
                 port,
                 cpu_workers,
-                gpu_workers,
+                gpu_devices,
                 metrics_port,
                 verbose,
                 progress_interval_ms,
@@ -209,11 +209,11 @@ async fn main() {
         }
         Command::Benchmark {
             cpu_workers,
-            gpu_workers,
+            gpu_devices,
             duration,
             verbose,
         } => {
-            run_benchmark_command(cpu_workers, gpu_workers, duration, verbose).await;
+            run_benchmark_command(cpu_workers, gpu_devices, duration, verbose).await;
         }
     }
 }
@@ -222,7 +222,7 @@ async fn main() {
 async fn run_serve_command(
     port: u16,
     cpu_workers: Option<usize>,
-    gpu_workers: Option<usize>,
+    gpu_devices: Option<usize>,
     metrics_port: Option<u16>,
     verbose: bool,
     progress_interval_ms: Option<u64>,
@@ -294,7 +294,7 @@ async fn run_serve_command(
     let config = ServiceConfig {
         port,
         cpu_workers,
-        gpu_workers,
+        gpu_devices,
         metrics_port,
         progress_interval_ms,
         chunk_size,
@@ -313,7 +313,7 @@ async fn run_serve_command(
 
 async fn run_benchmark_command(
     cpu_workers: Option<usize>,
-    gpu_workers: Option<usize>,
+    gpu_devices: Option<usize>,
     duration: u64,
     verbose: bool,
 ) {
@@ -329,18 +329,31 @@ async fn run_benchmark_command(
     env_logger::init();
 
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
-    let effective_gpu_workers = gpu_workers.unwrap_or(0);
-    let total_workers = effective_cpu_workers + effective_gpu_workers;
+
+    // Initialize GPU engine and determine effective GPU devices
+    let (gpu_engine, effective_gpu_devices) =
+        match miner_service::resolve_gpu_configuration(gpu_devices) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                eprintln!("❌ ERROR: {}", e);
+                eprintln!("   Please check your --gpu-devices setting or GPU hardware.");
+                std::process::exit(1);
+            }
+        };
+
+    let total_workers = effective_cpu_workers + effective_gpu_devices;
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
+    println!("Configuration:");
     println!(
-        "Configuration: {} CPU workers, {} GPU workers",
-        effective_cpu_workers, effective_gpu_workers
+        "  CPU Workers: {} (Available Cores: {})",
+        effective_cpu_workers,
+        num_cpus::get()
     );
+    println!("  GPU Devices: {}", effective_gpu_devices);
     println!("Duration: {} seconds", duration);
     println!("Total Workers: {}", total_workers);
-    println!("Available CPUs: {}", num_cpus::get());
 
     // Create engines based on configuration
     let cpu_engine = if effective_cpu_workers > 0 {
@@ -349,46 +362,29 @@ async fn run_benchmark_command(
         None
     };
 
-    let gpu_engine = if effective_gpu_workers > 0 {
-        #[cfg(feature = "gpu")]
-        {
-            Some(Arc::new(engine_gpu::GpuEngine::new()) as Arc<dyn MinerEngine>)
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            eprintln!("Error: GPU workers requested but this binary was built without GPU support");
-            std::process::exit(1);
-        }
-    } else {
-        None
-    };
-
-    // For benchmark, we'll use CPU engine as primary for simplicity
-    let engine = cpu_engine
-        .or(gpu_engine)
-        .expect("At least one engine must be available");
-
     if total_workers == 0 {
         eprintln!("Error: No workers specified");
         std::process::exit(1);
     }
-    println!("Workers: {}", total_workers);
     println!();
 
     // Run benchmark
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let benchmark_start = Instant::now();
 
-    // Create a large range that should take the full duration
     let benchmark_range = EngineRange {
         start: U512::from(0u64),
-        end: U512::from(100_000_000u64), // 100M nonces - should be plenty
+        end: U512::from(100_000_000u64), // 100M nonces
     };
 
     let mut header = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut header);
     let difficulty = U512::MAX; // High difficulty - no solutions expected
-    let ctx = engine.prepare_context(header, difficulty);
+
+    // We need a context from *some* engine. They should be compatible (same job).
+    // Just pick one.
+    let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
+    let ctx = ref_engine.prepare_context(header, difficulty);
 
     println!("⛏️  Starting benchmark...");
 
@@ -396,30 +392,42 @@ async fn run_benchmark_command(
     let mut handles = Vec::new();
     let total_hashes_arc = Arc::new(std::sync::Mutex::new(0u64));
 
-    // Use larger ranges for GPU (1M) vs CPU (10K)
-    let nonces_per_worker = if effective_gpu_workers > 0 {
-        1_000_000u64 // 1M nonces per GPU worker
-    } else {
-        10_000u64 // 10K nonces per CPU worker
-    };
+    // Chunk sizes
+    let cpu_chunk = 10_000u64;
+    // GPU chunk size from 1 - 10M is good
+    let gpu_chunk = 1_000_000u64;
 
     for worker_id in 0..total_workers {
-        let engine = engine.clone();
+        // Determine type and engine
+        let (engine, nonces_per_worker) = if worker_id < effective_cpu_workers {
+            (
+                cpu_engine.as_ref().expect("CPU engine missing").clone(),
+                cpu_chunk,
+            )
+        } else {
+            (
+                gpu_engine.as_ref().expect("GPU engine missing").clone(),
+                gpu_chunk,
+            )
+        };
+
         let ctx = ctx.clone();
         let cancel_flag = cancel_flag.clone();
         let total_hashes = total_hashes_arc.clone();
 
         let handle = thread::spawn(move || {
+            // We'll just define a range based on worker ID and a large multiplier
+            // so they don't overlap easily, though it doesn't matter for pure hashrate.
+            // Use a large stride to separate workers.
+            let stride = U512::from(1_000_000_000_000u64);
+            let worker_start = benchmark_range
+                .start
+                .saturating_add(U512::from(worker_id as u64).saturating_mul(stride));
+
             let worker_range = EngineRange {
-                start: benchmark_range.start.saturating_add(
-                    U512::from(worker_id as u64).saturating_mul(U512::from(nonces_per_worker)),
-                ),
-                end: benchmark_range
-                    .start
-                    .saturating_add(
-                        U512::from((worker_id + 1) as u64)
-                            .saturating_mul(U512::from(nonces_per_worker)),
-                    )
+                start: worker_start,
+                end: worker_start
+                    .saturating_add(U512::from(nonces_per_worker))
                     .saturating_sub(U512::from(1u64)),
             };
 
@@ -447,6 +455,8 @@ async fn run_benchmark_command(
                     break;
                 }
             }
+
+            engine_gpu::GpuEngine::clear_worker_resources();
 
             worker_hashes
         });
@@ -480,7 +490,7 @@ async fn run_benchmark_command(
                     format!("{:.0}", hash_rate)
                 };
                 println!("⏱️  {:.1}s - {} H/s", elapsed, hash_rate_str);
-            } else if effective_gpu_workers > 0 {
+            } else if effective_gpu_devices > 0 {
                 println!("⏱️  {:.1}s - processing...", elapsed);
             } else {
                 println!("⏱️  {:.1}s - starting...", elapsed);
