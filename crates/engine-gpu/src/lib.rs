@@ -173,7 +173,7 @@ impl GpuEngine {
         let mut adapter_infos = Vec::new();
         for (i, adapter) in adapters.into_iter().enumerate() {
             let info = adapter.get_info();
-            
+
             // Skip software/CPU adapters (e.g. Microsoft Basic Render Driver / WARP)
             // unless forced via env var, as they are significantly slower than the CPU engine.
             if info.device_type == wgpu::DeviceType::Cpu {
