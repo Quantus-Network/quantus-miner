@@ -1272,7 +1272,7 @@ pub async fn handle_cancel_request(
                 job_id,
                 message: Some("Job not found".to_string()),
             }),
-            warp::http::StatusCode::OK, // nothing to do when job not found.
+            warp::http::StatusCode::NOT_FOUND,
         ))
     }
 }
