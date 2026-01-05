@@ -125,10 +125,7 @@ impl MiningService {
             return Err("Job already exists".to_string());
         }
 
-        log::info!(
-            "Adding mining job: {}",
-            job_id,
-        );
+        log::info!("Adding mining job: {}", job_id,);
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
@@ -815,17 +812,17 @@ fn mine_range_with_engine_typed(
         if engine.name().contains("gpu") {
             // GPU can handle much larger chunks efficiently.
             // Increased to 4B to allow auto-tuned batches (e.g. 3s @ 1GH/s = 3B) to grow sufficiently.
-            4_000_000_000 
+            4_000_000_000
         } else if engine.name() == "hybrid" {
             // Hybrid engines use GPU-sized chunks since they route to GPU workers
-            4_000_000_000 
+            4_000_000_000
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
             ((est_ops_per_sec.saturating_mul(target_ms)) / 1000).max(5_000)
         }
     });
-    
+
     // Log the effective chunk size to assist in debugging/tuning
     if engine_type == "GPU" {
         log::info!(
@@ -2139,12 +2136,7 @@ mod tests {
         let engine = Arc::new(SlowEngine);
         let service = MiningService::new(1, 0, Some(engine), None, 10000, None);
 
-        let job = MiningJob::new(
-            [0u8; 32],
-            U512::MAX,
-            U512::zero(),
-            U512::from(1000u64),
-        );
+        let job = MiningJob::new([0u8; 32], U512::MAX, U512::zero(), U512::from(1000u64));
 
         service
             .add_job("slow-job".to_string(), job)

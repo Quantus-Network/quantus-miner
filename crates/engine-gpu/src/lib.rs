@@ -20,7 +20,7 @@ struct GpuContext {
 
     // Cached vendor configuration
     optimal_workgroups: u32,
-    
+
     // Dynamic batch size tuning
     batch_size: AtomicU64,
 }
@@ -419,7 +419,7 @@ impl MinerEngine for GpuEngine {
 
             // Determine dynamic batch size for this iteration
             let batch_size = gpu_ctx.batch_size.load(Ordering::Relaxed);
-            
+
             log::debug!(
                 target: "gpu_engine",
                 "GPU {} starting batch: nonce {}..{}, batch size: {}",
@@ -598,16 +598,16 @@ impl MinerEngine for GpuEngine {
                 // Also clamp to avoid drastic changes (0.5x to 2.0x)
                 let min_clamp = old_size / 2;
                 let max_clamp = old_size * 2;
-                
+
                 // Ensure we don't go below a reasonable minimum (e.g. 100k) to avoid overhead dominance
                 let clamped_ideal = ideal_batch_size.clamp(min_clamp, max_clamp).max(100_000);
-                
+
                 // Simple moving average
                 let new_size = (old_size + clamped_ideal) / 2;
 
                 if new_size != old_size {
-                     gpu_ctx.batch_size.store(new_size, Ordering::Relaxed);
-                     log::debug!(
+                    gpu_ctx.batch_size.store(new_size, Ordering::Relaxed);
+                    log::debug!(
                         target: "gpu_engine",
                         "GPU {} auto-tune: batch {} -> {} (elapsed: {:.3}s, target: {:.1}s, rate: {:.1} MH/s)",
                         device_index,
