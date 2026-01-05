@@ -60,6 +60,10 @@ enum Command {
         #[arg(long = "manip-throttle-cap", env = "MINER_MANIP_THROTTLE_CAP")]
         manip_throttle_cap: Option<u64>,
 
+        /// Target duration for GPU mining batches in milliseconds (default: 3000)
+        #[arg(long = "gpu-batch-duration-ms", env = "MINER_GPU_BATCH_DURATION_MS")]
+        gpu_batch_duration_ms: Option<u64>,
+
         /// Telemetry endpoints (repeat --telemetry-endpoint or comma-separated)
         #[arg(long = "telemetry-endpoint", env = "MINER_TELEMETRY_ENDPOINTS", value_delimiter = ',', num_args = 0.., value_name = "URL")]
         telemetry_endpoints: Option<Vec<String>>,
@@ -148,6 +152,7 @@ async fn main() {
         manip_base_delay_ns: None,
         manip_step_batch: None,
         manip_throttle_cap: None,
+        gpu_batch_duration_ms: None,
         telemetry_endpoints: None,
         telemetry_enabled: None,
         telemetry_verbosity: None,
@@ -171,6 +176,7 @@ async fn main() {
             manip_base_delay_ns,
             manip_step_batch,
             manip_throttle_cap,
+            gpu_batch_duration_ms,
             telemetry_endpoints,
             telemetry_enabled,
             telemetry_verbosity,
@@ -194,6 +200,7 @@ async fn main() {
                 manip_base_delay_ns,
                 manip_step_batch,
                 manip_throttle_cap,
+                gpu_batch_duration_ms,
                 telemetry_endpoints,
                 telemetry_enabled,
                 telemetry_verbosity,
@@ -231,6 +238,7 @@ async fn run_serve_command(
     manip_base_delay_ns: Option<u64>,
     manip_step_batch: Option<u64>,
     manip_throttle_cap: Option<u64>,
+    gpu_batch_duration_ms: Option<u64>,
     telemetry_endpoints: Option<Vec<String>>,
     telemetry_enabled: Option<bool>,
     telemetry_verbosity: Option<u8>,
@@ -302,6 +310,7 @@ async fn run_serve_command(
         manip_base_delay_ns,
         manip_step_batch,
         manip_throttle_cap,
+        gpu_batch_duration_ms,
     };
     log::info!("Effective config: {config}");
 
@@ -332,7 +341,7 @@ async fn run_benchmark_command(
 
     // Initialize GPU engine and determine effective GPU devices
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices) {
+        match miner_service::resolve_gpu_configuration(gpu_devices, None) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);

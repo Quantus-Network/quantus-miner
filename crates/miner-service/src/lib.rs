@@ -39,6 +39,8 @@ pub struct ServiceConfig {
     pub manip_step_batch: Option<u64>,
     /// Optional cap on solved-blocks throttle index for manipulator engine.
     pub manip_throttle_cap: Option<u64>,
+    /// Optional target duration for GPU batches in milliseconds.
+    pub gpu_batch_duration_ms: Option<u64>,
 }
 
 impl Default for ServiceConfig {
@@ -54,6 +56,7 @@ impl Default for ServiceConfig {
             manip_base_delay_ns: None,
             manip_step_batch: None,
             manip_throttle_cap: None,
+            gpu_batch_duration_ms: None,
         }
     }
 }
@@ -62,7 +65,7 @@ impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}, gpu_batch_duration_ms={:?}",
             self.port,
             self.cpu_workers,
             self.gpu_devices,
@@ -72,7 +75,8 @@ impl fmt::Display for ServiceConfig {
             self.manip_solved_blocks,
             self.manip_base_delay_ns,
             self.manip_step_batch,
-            self.manip_throttle_cap
+            self.manip_throttle_cap,
+            self.gpu_batch_duration_ms
         )
     }
 }
@@ -588,7 +592,9 @@ impl MiningJob {
         }
 
         while let Some(handle) = self.thread_handles.pop() {
-            let _ = handle.join();
+            // Do not wait for threads to finish; detach them so they can exit gracefully
+            // when they detect the cancellation flag. This prevents blocking the control loop.
+            drop(handle);
         }
     }
 
@@ -796,11 +802,12 @@ fn mine_range_with_engine_typed(
     let chunk_size_u64 = chunk_size.unwrap_or_else(|| {
         // Use engine-specific defaults if not configured
         if engine.name().contains("gpu") {
-            // GPU can handle much larger chunks efficiently
-            100_000_000 // 100M hashes per chunk
+            // GPU can handle much larger chunks efficiently.
+            // Increased to 4B to allow auto-tuned batches (e.g. 3s @ 1GH/s = 3B) to grow sufficiently.
+            4_000_000_000 
         } else if engine.name() == "hybrid" {
             // Hybrid engines use GPU-sized chunks since they route to GPU workers
-            100_000_000 // 100M hashes per chunk for hybrid
+            4_000_000_000 
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
@@ -1252,13 +1259,17 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
 
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
+    gpu_batch_duration_ms: Option<u64>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+    // Default to 3000ms if not specified
+    let duration = std::time::Duration::from_millis(gpu_batch_duration_ms.unwrap_or(3000));
+
     if let Some(req_count) = requested_devices {
         if req_count == 0 {
             return Ok((None, 0));
         }
         // Explicit request > 0
-        let engine = engine_gpu::GpuEngine::try_new()
+        let engine = engine_gpu::GpuEngine::try_new(duration)
             .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
 
         let available = engine.device_count();
@@ -1272,7 +1283,7 @@ pub fn resolve_gpu_configuration(
         Ok((Some(Arc::new(engine)), req_count))
     } else {
         // Auto-detect
-        match engine_gpu::GpuEngine::try_new() {
+        match engine_gpu::GpuEngine::try_new(duration) {
             Ok(engine) => {
                 let available = engine.device_count();
                 if available > 0 {
@@ -1362,7 +1373,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     // Initialize GPU engine if requested or for auto-detection
     let (gpu_engine, gpu_devices): (Option<Arc<dyn MinerEngine>>, usize) =
-        match resolve_gpu_configuration(config.gpu_devices) {
+        match resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_duration_ms) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 log::error!("❌ ERROR: {}", e);
@@ -2003,5 +2014,77 @@ mod tests {
             final_msg.hash_count, 0,
             "final completion message carries zero hash_count"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_returns_immediately() {
+        use engine_cpu::{EngineRange, EngineStatus, MinerEngine};
+        use pow_core::JobContext;
+        use std::any::Any;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        struct SlowEngine;
+
+        impl MinerEngine for SlowEngine {
+            fn name(&self) -> &'static str {
+                "slow-engine"
+            }
+            fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+                JobContext::new(header_hash, difficulty)
+            }
+            fn search_range(
+                &self,
+                _ctx: &JobContext,
+                _range: EngineRange,
+                cancel: &AtomicBool,
+            ) -> EngineStatus {
+                // Sleep to simulate a long-running batch on GPU
+                std::thread::sleep(Duration::from_secs(2));
+
+                if cancel.load(Ordering::Relaxed) {
+                    EngineStatus::Cancelled { hash_count: 0 }
+                } else {
+                    EngineStatus::Exhausted { hash_count: 0 }
+                }
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let engine = Arc::new(SlowEngine);
+        let service = MiningService::new(1, 0, Some(engine), None, 10000, None);
+
+        let job = MiningJob::new(
+            [0u8; 32],
+            U512::MAX,
+            U512::zero(),
+            U512::from(1000u64),
+        );
+
+        service
+            .add_job("slow-job".to_string(), job)
+            .await
+            .expect("Failed to add job");
+
+        // Give thread a moment to start and enter sleep
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = Instant::now();
+        service.cancel_job("slow-job").await;
+        let elapsed = start.elapsed();
+
+        // Cancel should be near-instant (<< 2 seconds)
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Cancel took too long: {:?} (expected < 500ms)",
+            elapsed
+        );
+
+        // Verify job is actually cancelled
+        let job = service.get_job("slow-job").await.unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
     }
 }
