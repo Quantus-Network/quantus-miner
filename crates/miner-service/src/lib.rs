@@ -39,6 +39,8 @@ pub struct ServiceConfig {
     pub manip_step_batch: Option<u64>,
     /// Optional cap on solved-blocks throttle index for manipulator engine.
     pub manip_throttle_cap: Option<u64>,
+    /// Optional target duration for GPU batches in milliseconds.
+    pub gpu_batch_duration_ms: Option<u64>,
 }
 
 impl Default for ServiceConfig {
@@ -54,6 +56,7 @@ impl Default for ServiceConfig {
             manip_base_delay_ns: None,
             manip_step_batch: None,
             manip_throttle_cap: None,
+            gpu_batch_duration_ms: None,
         }
     }
 }
@@ -62,7 +65,7 @@ impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}",
+            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}, gpu_batch_duration_ms={:?}",
             self.port,
             self.cpu_workers,
             self.gpu_devices,
@@ -72,7 +75,8 @@ impl fmt::Display for ServiceConfig {
             self.manip_solved_blocks,
             self.manip_base_delay_ns,
             self.manip_step_batch,
-            self.manip_throttle_cap
+            self.manip_throttle_cap,
+            self.gpu_batch_duration_ms
         )
     }
 }
@@ -121,11 +125,7 @@ impl MiningService {
             return Err("Job already exists".to_string());
         }
 
-        log::info!(
-            "Adding mining job: {} with {} workers",
-            job_id,
-            self.cpu_workers + self.gpu_devices
-        );
+        log::info!("Adding mining job: {}", job_id,);
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
         {
@@ -588,7 +588,9 @@ impl MiningJob {
         }
 
         while let Some(handle) = self.thread_handles.pop() {
-            let _ = handle.join();
+            // Do not wait for threads to finish; detach them so they can exit gracefully
+            // when they detect the cancellation flag. This prevents blocking the control loop.
+            drop(handle);
         }
     }
 
@@ -779,14 +781,26 @@ fn mine_range_with_engine_typed(
     progress_interval_ms: u64,
     chunk_size: Option<u64>,
 ) {
-    log::info!(
-        "⛏️  Job {} {} thread {} mining range {} to {} (inclusive)",
-        job_id,
-        engine_type,
-        thread_id,
-        range.start,
-        range.end
-    );
+    if engine_type == "CPU" {
+        log::info!(
+            target: "miner-service",
+            "CPU thread {} search started: Job {} range {} to {} (inclusive)",
+            thread_id,
+            job_id,
+            range.start,
+            range.end
+        );
+    } else {
+        log::debug!(
+            target: "miner-service",
+            "⛏️  Job {} {} thread {} mining range {} to {} (inclusive)",
+            job_id,
+            engine_type,
+            thread_id,
+            range.start,
+            range.end
+        );
+    }
 
     // Chunk the range into subranges to emit periodic progress updates for metrics
     let mut current_start = range.start;
@@ -796,19 +810,42 @@ fn mine_range_with_engine_typed(
     let chunk_size_u64 = chunk_size.unwrap_or_else(|| {
         // Use engine-specific defaults if not configured
         if engine.name().contains("gpu") {
-            // GPU can handle much larger chunks efficiently
-            100_000_000 // 100M hashes per chunk
+            // GPU can handle much larger chunks efficiently.
+            // Increased to 4B to allow auto-tuned batches (e.g. 3s @ 1GH/s = 3B) to grow sufficiently.
+            4_000_000_000
         } else if engine.name() == "hybrid" {
             // Hybrid engines use GPU-sized chunks since they route to GPU workers
-            100_000_000 // 100M hashes per chunk for hybrid
+            4_000_000_000
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
             ((est_ops_per_sec.saturating_mul(target_ms)) / 1000).max(5_000)
         }
     });
+
+    // Log the effective chunk size to assist in debugging/tuning
+    if engine_type == "GPU" {
+        log::info!(
+            target: "miner-service",
+            "Job {} GPU thread {} configured with chunk size: {}",
+            job_id,
+            thread_id,
+            chunk_size_u64
+        );
+    } else {
+        log::debug!(
+            target: "miner-service",
+            "Job {} {} thread {} configured with chunk size: {}",
+            job_id,
+            engine_type,
+            thread_id,
+            chunk_size_u64
+        );
+    }
+
     let chunk_size = U512::from(chunk_size_u64);
     let mut done = false;
+    let mut total_hashes_processed = 0u64;
 
     while current_start <= end && !cancel_flag.load(Ordering::Relaxed) {
         let mut current_end = current_start
@@ -824,7 +861,7 @@ fn mine_range_with_engine_typed(
         };
 
         log::debug!(
-            "Job {} {} thread {} processing subrange {}..{} (inclusive)",
+            "Job {} {} thread {} starting search on subrange {}..{} (inclusive)",
             job_id,
             engine_type,
             thread_id,
@@ -832,6 +869,20 @@ fn mine_range_with_engine_typed(
             sub_range.end
         );
         let status = engine.search_range(&ctx, sub_range.clone(), &cancel_flag);
+        let status_str = match status {
+            engine_cpu::EngineStatus::Found { .. } => "found",
+            engine_cpu::EngineStatus::Exhausted { .. } => "exhausted",
+            engine_cpu::EngineStatus::Cancelled { .. } => "cancelled",
+            engine_cpu::EngineStatus::Running { .. } => "running",
+        };
+        log::info!(
+            target: "miner-service",
+            "{} thread {} finished search, status: {} job: {}",
+            engine_type,
+            thread_id,
+            status_str,
+            job_id,
+        );
 
         match status {
             engine_cpu::EngineStatus::Found {
@@ -866,6 +917,7 @@ fn mine_range_with_engine_typed(
                 break;
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
+                total_hashes_processed += hash_count;
                 // Send intermediate progress update for this chunk
                 let update = ThreadResult {
                     thread_id,
@@ -894,6 +946,7 @@ fn mine_range_with_engine_typed(
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
+                total_hashes_processed += hash_count;
                 // Send last progress update and stop
                 let update = ThreadResult {
                     thread_id,
@@ -904,6 +957,16 @@ fn mine_range_with_engine_typed(
                 };
                 if sender.try_send(update).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
+                }
+                if engine_type == "CPU" {
+                    log::info!(
+                        target: "miner-service",
+                        "CPU thread {} search cancelled: Job {} processed {} hashes (total: {})",
+                        thread_id,
+                        job_id,
+                        hash_count,
+                        total_hashes_processed
+                    );
                 }
                 done = true;
                 break;
@@ -919,6 +982,20 @@ fn mine_range_with_engine_typed(
         current_start = current_end.saturating_add(U512::from(1u64));
     }
 
+    // Check if loop exited due to cancellation flag
+    if !done && cancel_flag.load(Ordering::Relaxed) {
+        if engine_type == "CPU" {
+            log::info!(
+                target: "miner-service",
+                "CPU thread {} search cancelled (flag set): Job {} processed {} hashes",
+                thread_id,
+                job_id,
+                total_hashes_processed
+            );
+        }
+        done = true;
+    }
+
     if !done {
         // Signal thread completion with no final candidate
         let final_result = ThreadResult {
@@ -930,6 +1007,15 @@ fn mine_range_with_engine_typed(
         };
         if sender.try_send(final_result).is_err() {
             log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send completion status after chunked search");
+        }
+        if engine_type == "CPU" {
+            log::info!(
+                target: "miner-service",
+                "CPU thread {} search completed: Job {} exhausted range, processed {} hashes",
+                thread_id,
+                job_id,
+                total_hashes_processed
+            );
         }
     }
 
@@ -982,7 +1068,7 @@ pub async fn handle_mine_request(
     request: MiningRequest,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received mine request: {request:?}");
+    log::debug!(target: "miner-servce", "Mine request: {request:?}");
     if let Err(e) = validate_mining_request(&request) {
         log::warn!("Invalid mine request ({}): {}", request.job_id, e);
         #[cfg(feature = "metrics")]
@@ -1011,7 +1097,7 @@ pub async fn handle_mine_request(
 
     match state.add_job(request.job_id.clone(), job).await {
         Ok(_) => {
-            log::debug!(target: "miner", "Accepted mine request for job ID: {}", request.job_id);
+            log::debug!(target: "miner-servce", "Accepted mine request for job ID: {}", request.job_id);
             #[cfg(feature = "metrics")]
             {
                 metrics::inc_mine_requests("accepted");
@@ -1053,7 +1139,7 @@ pub async fn handle_result_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received result request for job: {job_id}");
+    log::debug!(target: "miner-servce", "Result request: {job_id}");
 
     let job = match state.get_job(&job_id).await {
         Some(job) => job,
@@ -1163,7 +1249,7 @@ pub async fn handle_cancel_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received cancel request for job: {job_id}");
+    log::info!(target: "miner-servce", "Cancel job: {job_id}");
 
     if state.cancel_job(&job_id).await {
         log::debug!(target: "miner", "Successfully cancelled job: {job_id}");
@@ -1252,13 +1338,17 @@ fn compute_partitions(start: U512, end: U512, workers: usize) -> Partitions {
 
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
+    gpu_batch_duration_ms: Option<u64>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+    // Default to 3000ms if not specified
+    let duration = std::time::Duration::from_millis(gpu_batch_duration_ms.unwrap_or(3000));
+
     if let Some(req_count) = requested_devices {
         if req_count == 0 {
             return Ok((None, 0));
         }
         // Explicit request > 0
-        let engine = engine_gpu::GpuEngine::try_new()
+        let engine = engine_gpu::GpuEngine::try_new(duration)
             .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
 
         let available = engine.device_count();
@@ -1272,7 +1362,7 @@ pub fn resolve_gpu_configuration(
         Ok((Some(Arc::new(engine)), req_count))
     } else {
         // Auto-detect
-        match engine_gpu::GpuEngine::try_new() {
+        match engine_gpu::GpuEngine::try_new(duration) {
             Ok(engine) => {
                 let available = engine.device_count();
                 if available > 0 {
@@ -1362,7 +1452,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     // Initialize GPU engine if requested or for auto-detection
     let (gpu_engine, gpu_devices): (Option<Arc<dyn MinerEngine>>, usize) =
-        match resolve_gpu_configuration(config.gpu_devices) {
+        match resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_duration_ms) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 log::error!("❌ ERROR: {}", e);
@@ -2003,5 +2093,72 @@ mod tests {
             final_msg.hash_count, 0,
             "final completion message carries zero hash_count"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_returns_immediately() {
+        use engine_cpu::{EngineRange, EngineStatus, MinerEngine};
+        use pow_core::JobContext;
+        use std::any::Any;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        struct SlowEngine;
+
+        impl MinerEngine for SlowEngine {
+            fn name(&self) -> &'static str {
+                "slow-engine"
+            }
+            fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext {
+                JobContext::new(header_hash, difficulty)
+            }
+            fn search_range(
+                &self,
+                _ctx: &JobContext,
+                _range: EngineRange,
+                cancel: &AtomicBool,
+            ) -> EngineStatus {
+                // Sleep to simulate a long-running batch on GPU
+                std::thread::sleep(Duration::from_secs(2));
+
+                if cancel.load(Ordering::Relaxed) {
+                    EngineStatus::Cancelled { hash_count: 0 }
+                } else {
+                    EngineStatus::Exhausted { hash_count: 0 }
+                }
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let engine = Arc::new(SlowEngine);
+        let service = MiningService::new(1, 0, Some(engine), None, 10000, None);
+
+        let job = MiningJob::new([0u8; 32], U512::MAX, U512::zero(), U512::from(1000u64));
+
+        service
+            .add_job("slow-job".to_string(), job)
+            .await
+            .expect("Failed to add job");
+
+        // Give thread a moment to start and enter sleep
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = Instant::now();
+        service.cancel_job("slow-job").await;
+        let elapsed = start.elapsed();
+
+        // Cancel should be near-instant (<< 2 seconds)
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Cancel took too long: {:?} (expected < 500ms)",
+            elapsed
+        );
+
+        // Verify job is actually cancelled
+        let job = service.get_job("slow-job").await.unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
     }
 }

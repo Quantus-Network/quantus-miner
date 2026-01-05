@@ -2,6 +2,7 @@ use engine_cpu::{BaselineCpuEngine, EngineStatus, MinerEngine, Range};
 use engine_gpu::GpuEngine;
 use primitive_types::U512;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 fn main() {
     // Initialize logging
@@ -25,7 +26,7 @@ fn main() {
 
     // 3. Verify with GPU engine
     log::info!("Initializing GPU engine...");
-    let gpu_engine = GpuEngine::new();
+    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
 
     // Search a small range around the valid nonce
     let gpu_range = Range {
