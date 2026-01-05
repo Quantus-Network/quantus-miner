@@ -796,11 +796,12 @@ fn mine_range_with_engine_typed(
     let chunk_size_u64 = chunk_size.unwrap_or_else(|| {
         // Use engine-specific defaults if not configured
         if engine.name().contains("gpu") {
-            // GPU can handle much larger chunks efficiently
-            100_000_000 // 100M hashes per chunk
+            // GPU can handle much larger chunks efficiently, but keep it responsive
+            // 20M hashes is a good balance between overhead and cancellation latency
+            20_000_000 
         } else if engine.name() == "hybrid" {
             // Hybrid engines use GPU-sized chunks since they route to GPU workers
-            100_000_000 // 100M hashes per chunk for hybrid
+            20_000_000 
         } else {
             // CPU uses time-based chunks
             let est_ops_per_sec = 100_000u64; // 100K ops/sec for CPU
