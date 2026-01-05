@@ -126,9 +126,8 @@ impl MiningService {
         }
 
         log::info!(
-            "Adding mining job: {} with {} workers",
+            "Adding mining job: {}",
             job_id,
-            self.cpu_workers + self.gpu_devices
         );
         job.job_id = Some(job_id.clone());
         #[cfg(feature = "metrics")]
@@ -785,14 +784,26 @@ fn mine_range_with_engine_typed(
     progress_interval_ms: u64,
     chunk_size: Option<u64>,
 ) {
-    log::info!(
-        "⛏️  Job {} {} thread {} mining range {} to {} (inclusive)",
-        job_id,
-        engine_type,
-        thread_id,
-        range.start,
-        range.end
-    );
+    if engine_type == "CPU" {
+        log::info!(
+            target: "miner-service",
+            "CPU thread {} search started: Job {} range {} to {} (inclusive)",
+            thread_id,
+            job_id,
+            range.start,
+            range.end
+        );
+    } else {
+        log::debug!(
+            target: "miner-service",
+            "⛏️  Job {} {} thread {} mining range {} to {} (inclusive)",
+            job_id,
+            engine_type,
+            thread_id,
+            range.start,
+            range.end
+        );
+    }
 
     // Chunk the range into subranges to emit periodic progress updates for metrics
     let mut current_start = range.start;
@@ -814,8 +825,30 @@ fn mine_range_with_engine_typed(
             ((est_ops_per_sec.saturating_mul(target_ms)) / 1000).max(5_000)
         }
     });
+    
+    // Log the effective chunk size to assist in debugging/tuning
+    if engine_type == "GPU" {
+        log::info!(
+            target: "miner-service",
+            "Job {} GPU thread {} configured with chunk size: {}",
+            job_id,
+            thread_id,
+            chunk_size_u64
+        );
+    } else {
+        log::debug!(
+            target: "miner-service",
+            "Job {} {} thread {} configured with chunk size: {}",
+            job_id,
+            engine_type,
+            thread_id,
+            chunk_size_u64
+        );
+    }
+
     let chunk_size = U512::from(chunk_size_u64);
     let mut done = false;
+    let mut total_hashes_processed = 0u64;
 
     while current_start <= end && !cancel_flag.load(Ordering::Relaxed) {
         let mut current_end = current_start
@@ -831,7 +864,7 @@ fn mine_range_with_engine_typed(
         };
 
         log::debug!(
-            "Job {} {} thread {} processing subrange {}..{} (inclusive)",
+            "Job {} {} thread {} starting search on subrange {}..{} (inclusive)",
             job_id,
             engine_type,
             thread_id,
@@ -839,6 +872,20 @@ fn mine_range_with_engine_typed(
             sub_range.end
         );
         let status = engine.search_range(&ctx, sub_range.clone(), &cancel_flag);
+        let status_str = match status {
+            engine_cpu::EngineStatus::Found { .. } => "found",
+            engine_cpu::EngineStatus::Exhausted { .. } => "exhausted",
+            engine_cpu::EngineStatus::Cancelled { .. } => "cancelled",
+            engine_cpu::EngineStatus::Running { .. } => "running",
+        };
+        log::info!(
+            target: "miner-service",
+            "{} thread {} finished search, status: {} job: {}",
+            engine_type,
+            thread_id,
+            status_str,
+            job_id,
+        );
 
         match status {
             engine_cpu::EngineStatus::Found {
@@ -873,6 +920,7 @@ fn mine_range_with_engine_typed(
                 break;
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
+                total_hashes_processed += hash_count;
                 // Send intermediate progress update for this chunk
                 let update = ThreadResult {
                     thread_id,
@@ -901,6 +949,7 @@ fn mine_range_with_engine_typed(
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
+                total_hashes_processed += hash_count;
                 // Send last progress update and stop
                 let update = ThreadResult {
                     thread_id,
@@ -911,6 +960,16 @@ fn mine_range_with_engine_typed(
                 };
                 if sender.try_send(update).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
+                }
+                if engine_type == "CPU" {
+                    log::info!(
+                        target: "miner-service",
+                        "CPU thread {} search cancelled: Job {} processed {} hashes (total: {})",
+                        thread_id,
+                        job_id,
+                        hash_count,
+                        total_hashes_processed
+                    );
                 }
                 done = true;
                 break;
@@ -926,6 +985,20 @@ fn mine_range_with_engine_typed(
         current_start = current_end.saturating_add(U512::from(1u64));
     }
 
+    // Check if loop exited due to cancellation flag
+    if !done && cancel_flag.load(Ordering::Relaxed) {
+        if engine_type == "CPU" {
+            log::info!(
+                target: "miner-service",
+                "CPU thread {} search cancelled (flag set): Job {} processed {} hashes",
+                thread_id,
+                job_id,
+                total_hashes_processed
+            );
+        }
+        done = true;
+    }
+
     if !done {
         // Signal thread completion with no final candidate
         let final_result = ThreadResult {
@@ -937,6 +1010,15 @@ fn mine_range_with_engine_typed(
         };
         if sender.try_send(final_result).is_err() {
             log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send completion status after chunked search");
+        }
+        if engine_type == "CPU" {
+            log::info!(
+                target: "miner-service",
+                "CPU thread {} search completed: Job {} exhausted range, processed {} hashes",
+                thread_id,
+                job_id,
+                total_hashes_processed
+            );
         }
     }
 
@@ -989,7 +1071,7 @@ pub async fn handle_mine_request(
     request: MiningRequest,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received mine request: {request:?}");
+    log::debug!(target: "miner-servce", "Mine request: {request:?}");
     if let Err(e) = validate_mining_request(&request) {
         log::warn!("Invalid mine request ({}): {}", request.job_id, e);
         #[cfg(feature = "metrics")]
@@ -1018,7 +1100,7 @@ pub async fn handle_mine_request(
 
     match state.add_job(request.job_id.clone(), job).await {
         Ok(_) => {
-            log::debug!(target: "miner", "Accepted mine request for job ID: {}", request.job_id);
+            log::debug!(target: "miner-servce", "Accepted mine request for job ID: {}", request.job_id);
             #[cfg(feature = "metrics")]
             {
                 metrics::inc_mine_requests("accepted");
@@ -1060,7 +1142,7 @@ pub async fn handle_result_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received result request for job: {job_id}");
+    log::debug!(target: "miner-servce", "Result request: {job_id}");
 
     let job = match state.get_job(&job_id).await {
         Some(job) => job,
@@ -1170,7 +1252,7 @@ pub async fn handle_cancel_request(
     job_id: String,
     state: MiningService,
 ) -> Result<impl Reply, Rejection> {
-    log::debug!("Received cancel request for job: {job_id}");
+    log::info!(target: "miner-servce", "Cancel job: {job_id}");
 
     if state.cancel_job(&job_id).await {
         log::debug!(target: "miner", "Successfully cancelled job: {job_id}");
@@ -1190,7 +1272,7 @@ pub async fn handle_cancel_request(
                 job_id,
                 message: Some("Job not found".to_string()),
             }),
-            warp::http::StatusCode::NOT_FOUND,
+            warp::http::StatusCode::OK, // nothing to do when job not found.
         ))
     }
 }

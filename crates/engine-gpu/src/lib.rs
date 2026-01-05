@@ -352,11 +352,14 @@ impl MinerEngine for GpuEngine {
         });
 
         let gpu_ctx = &self.contexts[device_index];
-        log::debug!(
-            "GPU device {} processing range {}..={} (inclusive)",
+        let initial_batch_size = gpu_ctx.batch_size.load(Ordering::Relaxed);
+        log::info!(
+            target: "gpu_engine",
+            "GPU {} search started: range {}..={} (inclusive), initial batch size: {}",
             device_index,
             range.start,
-            range.end
+            range.end,
+            initial_batch_size
         );
 
         // Ensure resources are initialized for this thread
@@ -403,7 +406,12 @@ impl MinerEngine for GpuEngine {
         while current_nonce <= range.end {
             // Check for cancellation between batches to ensure responsiveness
             if cancel.load(Ordering::Relaxed) {
-                log::debug!(target: "gpu_engine", "GPU {} cancelled between batches.", device_index);
+                log::info!(
+                    target: "gpu_engine",
+                    "GPU {} search cancelled: processed {} hashes",
+                    device_index,
+                    total_hashes_processed
+                );
                 return EngineStatus::Cancelled {
                     hash_count: total_hashes_processed,
                 };
@@ -411,6 +419,15 @@ impl MinerEngine for GpuEngine {
 
             // Determine dynamic batch size for this iteration
             let batch_size = gpu_ctx.batch_size.load(Ordering::Relaxed);
+            
+            log::debug!(
+                target: "gpu_engine",
+                "GPU {} starting batch: nonce {}..{}, batch size: {}",
+                device_index,
+                current_nonce,
+                current_nonce.saturating_add(U512::from(batch_size)).saturating_sub(U512::from(1u64)).min(range.end),
+                batch_size
+            );
 
             // Calculate inclusive end for this batch
             let batch_end = current_nonce
@@ -533,6 +550,7 @@ impl MinerEngine for GpuEngine {
                 let work = nonce.to_big_endian();
 
                 log::info!(
+                    target: "gpu_engine",
                     "GPU {} found solution! Nonce: {}, Hash: {:x}",
                     device_index,
                     nonce,
@@ -541,6 +559,13 @@ impl MinerEngine for GpuEngine {
 
                 drop(data);
                 resources.staging_buffer.unmap();
+
+                log::info!(
+                    target: "gpu_engine",
+                    "GPU {} search ended (solution found): processed {} hashes",
+                    device_index,
+                    total_hashes_processed + range_size
+                );
 
                 // Even if found, return total hashes processed including this batch
                 return EngineStatus::Found {
@@ -600,6 +625,13 @@ impl MinerEngine for GpuEngine {
         }
 
         // Finished entire range without solution
+        log::info!(
+            target: "gpu_engine",
+            "GPU {} search completed: processed {} hashes, final batch size: {}",
+            device_index,
+            total_hashes_processed,
+            gpu_ctx.batch_size.load(Ordering::Relaxed)
+        );
         EngineStatus::Exhausted {
             hash_count: total_hashes_processed,
         }
