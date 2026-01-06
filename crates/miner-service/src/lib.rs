@@ -14,8 +14,6 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use warp::{Filter, Rejection, Reply};
 
-const THREAD_RATE_EMA_ALPHA: f64 = 0.2;
-
 /// Service runtime configuration provided by the CLI/binary.
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
@@ -212,7 +210,12 @@ impl MiningService {
                 let mut jobs_guard = jobs.lock().await;
 
                 jobs_guard.retain(|job_id, job| {
-                    if job.status == JobStatus::Running && job.update_from_results() {
+                    let was_running = job.status == JobStatus::Running;
+                    // Always update from results to drain thread completion messages
+                    // regardless of job status (until we decide to drop the job)
+                    let now_not_running = job.update_from_results();
+
+                    if was_running && now_not_running {
                         log::info!(
                             "Mining job {} finished with status {:?}, hashes: {}, time: {:?}",
                             job_id,
@@ -234,52 +237,36 @@ impl MiningService {
 
                 #[cfg(feature = "metrics")]
                 {
-                    // Aggregate and per-job hash-rate estimate across running jobs (nonces/sec)
-                    // Aggregate hash-rate across running jobs from last recorded per-job rates
-                    let mut total_rate = 0.0;
+                    // Update active jobs gauge
                     let mut running_jobs = 0i64;
-                    for (job_id, job) in jobs_guard.iter() {
+                    for (_job_id, job) in jobs_guard.iter() {
                         if job.status == JobStatus::Running {
                             running_jobs += 1;
-                            total_rate += job.last_hash_rate;
-                            metrics::set_job_hash_rate(job.engine_name, job_id, job.last_hash_rate);
                         }
                     }
-                    metrics::set_hash_rate(total_rate);
                     metrics::set_active_jobs(running_jobs);
                 }
                 let do_watchdog = last_watchdog.elapsed().as_secs() >= 30;
-                let (total, running, completed, failed, cancelled, total_hash_rate) = if do_watchdog
-                {
+                let (total, running, completed, failed, cancelled) = if do_watchdog {
                     let mut running = 0usize;
                     let mut completed = 0usize;
                     let mut cancelled = 0usize;
                     let mut failed = 0usize;
-                    let mut total_hash_rate = 0.0;
                     let total = jobs_guard.len();
                     for (_id, job) in jobs_guard.iter() {
                         match job.status {
-                            JobStatus::Running => {
-                                running += 1;
-                                total_hash_rate += job.last_hash_rate;
-                            }
+                            JobStatus::Running => running += 1,
                             JobStatus::Completed => completed += 1,
                             JobStatus::Cancelled => cancelled += 1,
                             JobStatus::Failed => failed += 1,
                         }
                     }
-                    (
-                        total,
-                        running,
-                        completed,
-                        failed,
-                        cancelled,
-                        total_hash_rate,
-                    )
+                    (total, running, completed, failed, cancelled)
                 } else {
-                    (0, 0, 0, 0, 0, 0.0)
+                    (0, 0, 0, 0, 0)
                 };
                 drop(jobs_guard);
+
                 if do_watchdog {
                     let uptime = service_start.elapsed();
                     let uptime_str = if uptime.as_secs() < 60 {
@@ -293,6 +280,11 @@ impl MiningService {
                             (uptime.as_secs() % 3600) / 60
                         )
                     };
+
+                    #[cfg(feature = "metrics")]
+                    let total_hash_rate = metrics::get_hash_rate();
+                    #[cfg(not(feature = "metrics"))]
+                    let total_hash_rate = 0.0;
 
                     if total == 0 {
                         log::info!(
@@ -364,8 +356,8 @@ pub struct MiningJob {
     pub cancel_flag: Arc<AtomicBool>,
     pub result_receiver: Option<Receiver<ThreadResult>>,
     pub thread_handles: Vec<thread::JoinHandle<()>>,
-    pub thread_last_update: std::collections::HashMap<usize, std::time::Instant>,
-    pub thread_rate_ema: std::collections::HashMap<usize, f64>,
+    pub thread_total_hashes: std::collections::HashMap<usize, u64>,
+    pub thread_final_rates: Vec<f64>,
     completed_threads: usize,
     pub result_served: bool,
 }
@@ -390,8 +382,8 @@ impl Clone for MiningJob {
             // Do not clone crossbeam receiver or thread handles; they are runtime artifacts.
             result_receiver: None,
             thread_handles: Vec::new(),
-            thread_last_update: self.thread_last_update.clone(),
-            thread_rate_ema: self.thread_rate_ema.clone(),
+            thread_total_hashes: self.thread_total_hashes.clone(),
+            thread_final_rates: self.thread_final_rates.clone(),
             completed_threads: self.completed_threads,
             result_served: self.result_served,
         }
@@ -404,6 +396,7 @@ pub struct ThreadResult {
     result: Option<MiningJobResult>,
     hash_count: u64,
     origin: Option<engine_cpu::FoundOrigin>,
+    duration: std::time::Duration,
     completed: bool,
 }
 
@@ -429,8 +422,8 @@ impl MiningJob {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             result_receiver: None,
             thread_handles: Vec::new(),
-            thread_last_update: std::collections::HashMap::new(),
-            thread_rate_ema: std::collections::HashMap::new(),
+            thread_total_hashes: std::collections::HashMap::new(),
+            thread_final_rates: Vec::new(),
             completed_threads: 0,
             result_served: false,
         }
@@ -578,12 +571,11 @@ impl MiningJob {
                 metrics::remove_job_hash_rate(self.engine_name, job_id);
                 metrics::remove_job_metrics(self.engine_name, job_id);
                 metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
-                // Remove all per-thread hash rate series on cancellation and clear tracking
-                for (tid, _) in self.thread_rate_ema.iter() {
+                // Remove all per-thread hash rate series on cancellation
+                for (tid, _) in self.thread_total_hashes.iter() {
                     metrics::remove_thread_hash_rate(self.engine_name, job_id, &tid.to_string());
                 }
-                self.thread_last_update.clear();
-                self.thread_rate_ema.clear();
+                self.thread_total_hashes.clear();
             }
         }
 
@@ -602,56 +594,72 @@ impl MiningJob {
 
         while let Ok(thread_result) = receiver.try_recv() {
             self.total_hash_count += thread_result.hash_count;
+            *self
+                .thread_total_hashes
+                .entry(thread_result.thread_id)
+                .or_default() += thread_result.hash_count;
+
             #[cfg(feature = "metrics")]
             {
                 metrics::inc_hashes(thread_result.hash_count);
-                if let Some(job_id) = &self.job_id {
-                    metrics::inc_job_hashes(self.engine_name, job_id, thread_result.hash_count);
-                    metrics::inc_thread_hashes(
-                        self.engine_name,
-                        job_id,
-                        &thread_result.thread_id.to_string(),
-                        thread_result.hash_count,
-                    );
-                    // Compute per-thread delta hash rate since the last update for this thread
-                    let now = std::time::Instant::now();
-                    let last = self
-                        .thread_last_update
-                        .get(&thread_result.thread_id)
-                        .copied()
-                        .unwrap_or(self.start_time);
-                    let dt = now.duration_since(last).as_secs_f64();
-                    if dt > 0.0 && thread_result.hash_count > 0 {
-                        let instant_rate = thread_result.hash_count as f64 / dt;
-                        // Exponential Moving Average smoothing
-                        let prev = self
-                            .thread_rate_ema
-                            .get(&thread_result.thread_id)
-                            .copied()
-                            .unwrap_or(instant_rate);
-                        let ema = THREAD_RATE_EMA_ALPHA * instant_rate
-                            + (1.0 - THREAD_RATE_EMA_ALPHA) * prev;
-                        metrics::set_thread_hash_rate(
+                metrics::record_mining_segment(thread_result.hash_count, thread_result.duration);
+
+                // Only update job-specific metrics if the job is still considered running.
+                // Once completed/failed/cancelled, we stop updating job metrics to avoid
+                // resurrecting series that were cleaned up.
+                if self.status == JobStatus::Running {
+                    if let Some(job_id) = &self.job_id {
+                        metrics::inc_job_hashes(self.engine_name, job_id, thread_result.hash_count);
+                        metrics::inc_thread_hashes(
                             self.engine_name,
                             job_id,
                             &thread_result.thread_id.to_string(),
-                            ema,
+                            thread_result.hash_count,
                         );
-                        // Store updated EMA for next delta
-                        self.thread_rate_ema.insert(thread_result.thread_id, ema);
-                    }
-                    // Update last-seen timestamp for this thread
-                    self.thread_last_update.insert(thread_result.thread_id, now);
 
-                    // Update per-job hash rate as the sum of per-thread EMAs and publish
-                    let job_rate: f64 = self.thread_rate_ema.values().copied().sum();
-                    self.last_hash_rate = job_rate;
-                    metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
+                        // Simple per-job hash rate based on total progress
+                        let elapsed = self.start_time.elapsed().as_secs_f64();
+                        if elapsed > 0.0 {
+                            let job_rate = self.total_hash_count as f64 / elapsed;
+                            self.last_hash_rate = job_rate;
+                            metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
+                        }
+                    }
                 }
             }
 
             if thread_result.completed {
                 self.completed_threads += 1;
+                let thread_total = *self
+                    .thread_total_hashes
+                    .get(&thread_result.thread_id)
+                    .unwrap_or(&0);
+                let elapsed = self.start_time.elapsed().as_secs_f64();
+
+                if elapsed > 0.0 && thread_total > 0 {
+                    let thread_rate = thread_total as f64 / elapsed;
+                    self.thread_final_rates.push(thread_rate);
+
+                    log::info!(
+                        "Thread {} finished - Rate: {:.2} H/s ({} hashes in {:.2}s)",
+                        thread_result.thread_id,
+                        thread_rate,
+                        thread_total,
+                        elapsed
+                    );
+
+                    #[cfg(feature = "metrics")]
+                    if let Some(job_id) = &self.job_id {
+                        // Report final thread rate before cleaning up
+                        metrics::set_thread_hash_rate(
+                            self.engine_name,
+                            job_id,
+                            &thread_result.thread_id.to_string(),
+                            thread_rate,
+                        );
+                    }
+                }
+
                 #[cfg(feature = "metrics")]
                 {
                     if let Some(job_id) = &self.job_id {
@@ -662,9 +670,6 @@ impl MiningJob {
                             &thread_result.thread_id.to_string(),
                         );
                     }
-                    // Cleanup per-thread tracking on completion
-                    self.thread_last_update.remove(&thread_result.thread_id);
-                    self.thread_rate_ema.remove(&thread_result.thread_id);
                 }
             }
 
@@ -723,15 +728,13 @@ impl MiningJob {
                         metrics::remove_job_hash_rate(self.engine_name, job_id);
                         metrics::remove_job_metrics(self.engine_name, job_id);
                         metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
-                        for (tid, _) in self.thread_rate_ema.iter() {
+                        for (tid, _) in self.thread_total_hashes.iter() {
                             metrics::remove_thread_hash_rate(
                                 self.engine_name,
                                 job_id,
                                 &tid.to_string(),
                             );
                         }
-                        self.thread_last_update.clear();
-                        self.thread_rate_ema.clear();
                     }
                 }
             } else if self.completed_threads >= self.thread_handles.len()
@@ -750,15 +753,13 @@ impl MiningJob {
                         // Remove job hash rate on failure and clear per-thread series
                         self.last_hash_rate = 0.0;
                         metrics::remove_job_hash_rate(self.engine_name, job_id);
-                        for (tid, _) in self.thread_rate_ema.iter() {
+                        for (tid, _) in self.thread_total_hashes.iter() {
                             metrics::remove_thread_hash_rate(
                                 self.engine_name,
                                 job_id,
                                 &tid.to_string(),
                             );
                         }
-                        self.thread_last_update.clear();
-                        self.thread_rate_ema.clear();
                     }
                 }
             }
@@ -868,6 +869,7 @@ fn mine_range_with_engine_typed(
             sub_range.start,
             sub_range.end
         );
+        let start_time = Instant::now();
         let status = engine.search_range(&ctx, sub_range.clone(), &cancel_flag);
         let status_str = match status {
             engine_cpu::EngineStatus::Found { .. } => "found",
@@ -890,12 +892,14 @@ fn mine_range_with_engine_typed(
                 hash_count,
                 origin,
             } => {
+                let duration = start_time.elapsed();
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
                     thread_id,
                     result: Some(MiningJobResult { nonce, work, hash }),
                     hash_count,
                     origin: Some(origin),
+                    duration,
                     completed: true,
                 };
                 log::info!(
@@ -917,6 +921,7 @@ fn mine_range_with_engine_typed(
                 break;
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
+                let duration = start_time.elapsed();
                 total_hashes_processed += hash_count;
                 // Send intermediate progress update for this chunk
                 let update = ThreadResult {
@@ -924,6 +929,7 @@ fn mine_range_with_engine_typed(
                     result: None,
                     hash_count,
                     origin: None,
+                    duration,
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
@@ -946,6 +952,7 @@ fn mine_range_with_engine_typed(
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
+                let duration = start_time.elapsed();
                 total_hashes_processed += hash_count;
                 // Send last progress update and stop
                 let update = ThreadResult {
@@ -953,6 +960,7 @@ fn mine_range_with_engine_typed(
                     result: None,
                     hash_count,
                     origin: None,
+                    duration,
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
@@ -1003,6 +1011,7 @@ fn mine_range_with_engine_typed(
             result: None,
             hash_count: 0,
             origin: None,
+            duration: std::time::Duration::from_secs(0),
             completed: true,
         };
         if sender.try_send(final_result).is_err() {

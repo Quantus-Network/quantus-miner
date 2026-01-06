@@ -126,6 +126,18 @@ static HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     c
 });
 
+static MINING_DURATION_NANOS: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new(
+        "miner_mining_duration_nanos",
+        "Total time spent mining across all threads (nanoseconds)",
+    )
+    .expect("create miner_mining_duration_nanos");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_mining_duration_nanos");
+    c
+});
+
 static HASH_RATE: Lazy<Gauge> = Lazy::new(|| {
     let g =
         Gauge::new("miner_hash_rate", "Estimated hash rate (nonces per second)").expect("create");
@@ -537,9 +549,27 @@ pub fn inc_hashes(n: u64) {
     HASHES_TOTAL.inc_by(n);
 }
 
-/// Set the current estimated hash rate (nonces per second).
-pub fn set_hash_rate(rate: f64) {
-    HASH_RATE.set(rate);
+/// Record a completed mining segment to update global hash rate.
+///
+/// This accumulates total hashes and total duration across all threads/jobs
+/// to provide a stable, global hash rate average.
+pub fn record_mining_segment(hashes: u64, duration: Duration) {
+    HASHES_TOTAL.inc_by(hashes);
+    MINING_DURATION_NANOS.inc_by(duration.as_nanos() as u64);
+
+    let total_hashes = HASHES_TOTAL.get();
+    let total_nanos = MINING_DURATION_NANOS.get();
+
+    if total_nanos > 0 {
+        let total_seconds = total_nanos as f64 / 1_000_000_000.0;
+        let rate = total_hashes as f64 / total_seconds;
+        HASH_RATE.set(rate);
+    }
+}
+
+/// Get the current global estimated hash rate.
+pub fn get_hash_rate() -> f64 {
+    HASH_RATE.get()
 }
 
 /// Increment the jobs counter for a terminal status: completed | failed | cancelled.
