@@ -594,8 +594,10 @@ impl MiningJob {
 
         while let Ok(thread_result) = receiver.try_recv() {
             self.total_hash_count += thread_result.hash_count;
-            *self.thread_total_hashes.entry(thread_result.thread_id).or_default() +=
-                thread_result.hash_count;
+            *self
+                .thread_total_hashes
+                .entry(thread_result.thread_id)
+                .or_default() += thread_result.hash_count;
 
             #[cfg(feature = "metrics")]
             {
