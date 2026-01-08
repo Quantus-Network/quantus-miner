@@ -126,18 +126,6 @@ static HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     c
 });
 
-static MINING_DURATION_NANOS: Lazy<IntCounter> = Lazy::new(|| {
-    let c = IntCounter::new(
-        "miner_mining_duration_nanos",
-        "Total time spent mining across all threads (nanoseconds)",
-    )
-    .expect("create miner_mining_duration_nanos");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_mining_duration_nanos");
-    c
-});
-
 static HASH_RATE: Lazy<Gauge> = Lazy::new(|| {
     let g =
         Gauge::new("miner_hash_rate", "Estimated hash rate (nonces per second)").expect("create");
@@ -146,6 +134,45 @@ static HASH_RATE: Lazy<Gauge> = Lazy::new(|| {
         .expect("register miner_hash_rate");
     g
 });
+
+type JobKey = (String, String); // (engine, job_id)
+type ThreadKey = (String, String, String); // (engine, job_id, thread_id)
+
+#[derive(Debug)]
+struct ThreadState {
+    start: Instant,
+    hashes: u64,
+}
+
+#[derive(Debug)]
+struct JobState {
+    start: Instant,
+    hashes: u64,
+    active_threads: usize,
+}
+
+#[derive(Debug)]
+struct MiningSession {
+    start: Option<Instant>,
+    hashes: u64,
+    active_threads: usize,
+    threads: HashMap<ThreadKey, ThreadState>,
+    jobs: HashMap<JobKey, JobState>,
+}
+
+impl MiningSession {
+    fn new() -> Self {
+        Self {
+            start: None,
+            hashes: 0,
+            active_threads: 0,
+            threads: HashMap::new(),
+            jobs: HashMap::new(),
+        }
+    }
+}
+
+static SESSION: Lazy<Mutex<MiningSession>> = Lazy::new(|| Mutex::new(MiningSession::new()));
 
 static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
@@ -549,21 +576,159 @@ pub fn inc_hashes(n: u64) {
     HASHES_TOTAL.inc_by(n);
 }
 
-/// Record a completed mining segment to update global hash rate.
-///
-/// This accumulates total hashes and total duration across all threads/jobs
-/// to provide a stable, global hash rate average.
-pub fn record_mining_segment(hashes: u64, duration: Duration) {
-    HASHES_TOTAL.inc_by(hashes);
-    MINING_DURATION_NANOS.inc_by(duration.as_nanos() as u64);
+fn ensure_session(session: &mut MiningSession, now: Instant) {
+    if session.start.is_none() {
+        session.start = Some(now);
+        session.hashes = 0;
+    }
+}
 
-    let total_hashes = HASHES_TOTAL.get();
-    let total_nanos = MINING_DURATION_NANOS.get();
+fn update_global_rate(session: &MiningSession, now: Instant) {
+    if let Some(start) = session.start {
+        let elapsed = now.saturating_duration_since(start).as_secs_f64();
+        if elapsed > 0.0 && session.hashes > 0 {
+            HASH_RATE.set(session.hashes as f64 / elapsed);
+        }
+    }
+}
 
-    if total_nanos > 0 {
-        let total_seconds = total_nanos as f64 / 1_000_000_000.0;
-        let rate = total_hashes as f64 / total_seconds;
-        HASH_RATE.set(rate);
+fn finish_thread_locked(session: &mut MiningSession, job_key: &JobKey, thread_key: &ThreadKey) {
+    if session.threads.remove(thread_key).is_some() {
+        session.active_threads = session.active_threads.saturating_sub(1);
+    }
+    if let Some(job) = session.jobs.get_mut(job_key) {
+        if job.active_threads > 0 {
+            job.active_threads -= 1;
+        }
+    }
+    if session.active_threads == 0 {
+        session.start = None;
+        session.hashes = 0;
+        HASH_RATE.set(0.0);
+    }
+}
+
+pub fn start_thread(engine: &str, job_id: &str, thread_id: usize) {
+    let now = Instant::now();
+    let engine_key = engine.to_string();
+    let job_key = job_id.to_string();
+    let thread_key = (engine_key.clone(), job_key.clone(), thread_id.to_string());
+    let job_key = (engine_key, job_key);
+
+    let mut session = SESSION.lock().unwrap();
+    ensure_session(&mut session, now);
+
+    if session.threads.contains_key(&thread_key) {
+        return;
+    }
+
+    session.active_threads = session.active_threads.saturating_add(1);
+    session.threads.insert(
+        thread_key,
+        ThreadState {
+            start: now,
+            hashes: 0,
+        },
+    );
+
+    let job = session.jobs.entry(job_key).or_insert(JobState {
+        start: now,
+        hashes: 0,
+        active_threads: 0,
+    });
+    if job.active_threads == 0 {
+        job.start = now;
+        job.hashes = 0;
+    }
+    job.active_threads = job.active_threads.saturating_add(1);
+}
+
+pub fn record_thread_progress(
+    engine: &str,
+    job_id: &str,
+    thread_id: usize,
+    hashes: u64,
+    completed: bool,
+    update_job_metrics: bool,
+) {
+    let now = Instant::now();
+    let engine_key = engine.to_string();
+    let job_key = job_id.to_string();
+    let thread_id_str = thread_id.to_string();
+    let thread_key = (engine_key.clone(), job_key.clone(), thread_id_str.clone());
+    let job_key = (engine_key, job_key);
+
+    let mut session = SESSION.lock().unwrap();
+    ensure_session(&mut session, now);
+
+    let thread_was_present = session.threads.contains_key(&thread_key);
+    if !thread_was_present {
+        session.active_threads = session.active_threads.saturating_add(1);
+        session.threads.insert(
+            thread_key.clone(),
+            ThreadState {
+                start: now,
+                hashes: 0,
+            },
+        );
+    }
+
+    let (thread_start, thread_hashes_total) = {
+        let thread_state = session
+            .threads
+            .get_mut(&thread_key)
+            .expect("thread must exist");
+        thread_state.hashes = thread_state.hashes.saturating_add(hashes);
+        (thread_state.start, thread_state.hashes)
+    };
+
+    let (job_start, job_hashes_total) = {
+        let job_state = session.jobs.entry(job_key.clone()).or_insert(JobState {
+            start: thread_start,
+            hashes: 0,
+            active_threads: 0,
+        });
+        if job_state.active_threads == 0 {
+            job_state.start = thread_start;
+            job_state.hashes = 0;
+        }
+        if !thread_was_present {
+            job_state.active_threads = job_state.active_threads.saturating_add(1);
+        }
+        job_state.hashes = job_state.hashes.saturating_add(hashes);
+        (job_state.start, job_state.hashes)
+    };
+
+    session.hashes = session.hashes.saturating_add(hashes);
+
+    inc_hashes(hashes);
+    if update_job_metrics {
+        inc_job_hashes(engine, job_id, hashes);
+        inc_thread_hashes(engine, job_id, &thread_id_str, hashes);
+    }
+
+    let thread_elapsed = now.saturating_duration_since(thread_start).as_secs_f64();
+    if update_job_metrics && thread_elapsed > 0.0 && thread_hashes_total > 0 {
+        set_thread_hash_rate(
+            engine,
+            job_id,
+            &thread_id_str,
+            thread_hashes_total as f64 / thread_elapsed,
+        );
+    }
+
+    if update_job_metrics {
+        let job_elapsed = now.saturating_duration_since(job_start).as_secs_f64();
+        if job_elapsed > 0.0 && job_hashes_total > 0 {
+            set_job_hash_rate(engine, job_id, job_hashes_total as f64 / job_elapsed);
+        }
+    }
+
+    update_global_rate(&session, now);
+
+    if completed {
+        finish_thread_locked(&mut session, &job_key, &thread_key);
+        update_global_rate(&session, now);
     }
 }
 
@@ -590,9 +755,6 @@ pub fn inc_http_request(endpoint: &str, code: u16) {
 
 const METRICS_TTL_SECS: u64 = 300;
 const JANITOR_INTERVAL_SECS: u64 = 60;
-
-type JobKey = (String, String); // (engine, job_id)
-type ThreadKey = (String, String, String); // (engine, job_id, thread_id)
 
 static JOB_KEYS: Lazy<Mutex<HashSet<JobKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static JOB_LAST: Lazy<Mutex<HashMap<JobKey, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));

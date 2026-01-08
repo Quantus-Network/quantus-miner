@@ -348,7 +348,6 @@ pub struct MiningJob {
     pub status: JobStatus,
     pub start_time: Instant,
     pub total_hash_count: u64,
-    pub last_hash_rate: f64,
     pub best_result: Option<MiningJobResult>,
 
     pub engine_name: &'static str,
@@ -357,7 +356,6 @@ pub struct MiningJob {
     pub result_receiver: Option<Receiver<ThreadResult>>,
     pub thread_handles: Vec<thread::JoinHandle<()>>,
     pub thread_total_hashes: std::collections::HashMap<usize, u64>,
-    pub thread_final_rates: Vec<f64>,
     completed_threads: usize,
     pub result_served: bool,
 }
@@ -373,7 +371,6 @@ impl Clone for MiningJob {
             status: self.status.clone(),
             start_time: self.start_time,
             total_hash_count: self.total_hash_count,
-            last_hash_rate: self.last_hash_rate,
             best_result: self.best_result.clone(),
             engine_name: self.engine_name,
             job_id: self.job_id.clone(),
@@ -383,7 +380,6 @@ impl Clone for MiningJob {
             result_receiver: None,
             thread_handles: Vec::new(),
             thread_total_hashes: self.thread_total_hashes.clone(),
-            thread_final_rates: self.thread_final_rates.clone(),
             completed_threads: self.completed_threads,
             result_served: self.result_served,
         }
@@ -396,7 +392,6 @@ pub struct ThreadResult {
     result: Option<MiningJobResult>,
     hash_count: u64,
     origin: Option<engine_cpu::FoundOrigin>,
-    duration: std::time::Duration,
     completed: bool,
 }
 
@@ -415,7 +410,6 @@ impl MiningJob {
             status: JobStatus::Running,
             start_time: Instant::now(),
             total_hash_count: 0,
-            last_hash_rate: 0.0,
             best_result: None,
             engine_name: "unknown",
             job_id: None,
@@ -423,7 +417,6 @@ impl MiningJob {
             result_receiver: None,
             thread_handles: Vec::new(),
             thread_total_hashes: std::collections::HashMap::new(),
-            thread_final_rates: Vec::new(),
             completed_threads: 0,
             result_served: false,
         }
@@ -496,6 +489,9 @@ impl MiningJob {
                     let engine = cpu_engine.clone();
                     let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
 
+                    #[cfg(feature = "metrics")]
+                    metrics::start_thread(self.engine_name, &job_id, thread_id);
+
                     let handle = thread::spawn(move || {
                         mine_range_with_engine_typed(
                             thread_id,
@@ -528,6 +524,9 @@ impl MiningJob {
                     let ctx = ctx.clone();
                     let engine = gpu_engine.clone();
                     let job_id = self.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+
+                    #[cfg(feature = "metrics")]
+                    metrics::start_thread(self.engine_name, &job_id, thread_id);
 
                     let handle = thread::spawn(move || {
                         mine_range_with_engine_typed(
@@ -566,9 +565,6 @@ impl MiningJob {
                 metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 0);
                 metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
                 metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 1);
-                // Remove job hash rate series on cancellation (avoid scrape-timing artifacts)
-                self.last_hash_rate = 0.0;
-                metrics::remove_job_hash_rate(self.engine_name, job_id);
                 metrics::remove_job_metrics(self.engine_name, job_id);
                 metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                 // Remove all per-thread hash rate series on cancellation
@@ -600,32 +596,15 @@ impl MiningJob {
                 .or_default() += thread_result.hash_count;
 
             #[cfg(feature = "metrics")]
-            {
-                metrics::inc_hashes(thread_result.hash_count);
-                metrics::record_mining_segment(thread_result.hash_count, thread_result.duration);
-
-                // Only update job-specific metrics if the job is still considered running.
-                // Once completed/failed/cancelled, we stop updating job metrics to avoid
-                // resurrecting series that were cleaned up.
-                if self.status == JobStatus::Running {
-                    if let Some(job_id) = &self.job_id {
-                        metrics::inc_job_hashes(self.engine_name, job_id, thread_result.hash_count);
-                        metrics::inc_thread_hashes(
-                            self.engine_name,
-                            job_id,
-                            &thread_result.thread_id.to_string(),
-                            thread_result.hash_count,
-                        );
-
-                        // Simple per-job hash rate based on total progress
-                        let elapsed = self.start_time.elapsed().as_secs_f64();
-                        if elapsed > 0.0 {
-                            let job_rate = self.total_hash_count as f64 / elapsed;
-                            self.last_hash_rate = job_rate;
-                            metrics::set_job_hash_rate(self.engine_name, job_id, job_rate);
-                        }
-                    }
-                }
+            if let Some(job_id) = &self.job_id {
+                metrics::record_thread_progress(
+                    self.engine_name,
+                    job_id,
+                    thread_result.thread_id,
+                    thread_result.hash_count,
+                    thread_result.completed,
+                    self.status == JobStatus::Running,
+                );
             }
 
             if thread_result.completed {
@@ -638,8 +617,6 @@ impl MiningJob {
 
                 if elapsed > 0.0 && thread_total > 0 {
                     let thread_rate = thread_total as f64 / elapsed;
-                    self.thread_final_rates.push(thread_rate);
-
                     log::info!(
                         "Thread {} finished - Rate: {:.2} H/s ({} hashes in {:.2}s)",
                         thread_result.thread_id,
@@ -647,29 +624,6 @@ impl MiningJob {
                         thread_total,
                         elapsed
                     );
-
-                    #[cfg(feature = "metrics")]
-                    if let Some(job_id) = &self.job_id {
-                        // Report final thread rate before cleaning up
-                        metrics::set_thread_hash_rate(
-                            self.engine_name,
-                            job_id,
-                            &thread_result.thread_id.to_string(),
-                            thread_rate,
-                        );
-                    }
-                }
-
-                #[cfg(feature = "metrics")]
-                {
-                    if let Some(job_id) = &self.job_id {
-                        // Remove this thread's hash rate series on completion
-                        metrics::remove_thread_hash_rate(
-                            self.engine_name,
-                            job_id,
-                            &thread_result.thread_id.to_string(),
-                        );
-                    }
                 }
             }
 
@@ -723,9 +677,6 @@ impl MiningJob {
                         metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 1);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 0);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 0);
-                        // Remove job hash rate on completion and clear per-thread series
-                        self.last_hash_rate = 0.0;
-                        metrics::remove_job_hash_rate(self.engine_name, job_id);
                         metrics::remove_job_metrics(self.engine_name, job_id);
                         metrics::remove_thread_metrics_for_job(self.engine_name, job_id);
                         for (tid, _) in self.thread_total_hashes.iter() {
@@ -750,9 +701,6 @@ impl MiningJob {
                         metrics::set_job_status_gauge(self.engine_name, job_id, "completed", 0);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "failed", 1);
                         metrics::set_job_status_gauge(self.engine_name, job_id, "cancelled", 0);
-                        // Remove job hash rate on failure and clear per-thread series
-                        self.last_hash_rate = 0.0;
-                        metrics::remove_job_hash_rate(self.engine_name, job_id);
                         for (tid, _) in self.thread_total_hashes.iter() {
                             metrics::remove_thread_hash_rate(
                                 self.engine_name,
@@ -892,14 +840,13 @@ fn mine_range_with_engine_typed(
                 hash_count,
                 origin,
             } => {
-                let duration = start_time.elapsed();
+                let _duration = start_time.elapsed();
                 // Send final result with found candidate and the hashes covered in this subrange
                 let final_result = ThreadResult {
                     thread_id,
                     result: Some(MiningJobResult { nonce, work, hash }),
                     hash_count,
                     origin: Some(origin),
-                    duration,
                     completed: true,
                 };
                 log::info!(
@@ -921,7 +868,7 @@ fn mine_range_with_engine_typed(
                 break;
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
-                let duration = start_time.elapsed();
+                let _duration = start_time.elapsed();
                 total_hashes_processed += hash_count;
                 // Send intermediate progress update for this chunk
                 let update = ThreadResult {
@@ -929,7 +876,6 @@ fn mine_range_with_engine_typed(
                     result: None,
                     hash_count,
                     origin: None,
-                    duration,
                     completed: false,
                 };
                 if sender.try_send(update).is_err() {
@@ -952,7 +898,7 @@ fn mine_range_with_engine_typed(
                 }
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                let duration = start_time.elapsed();
+                let _duration = start_time.elapsed();
                 total_hashes_processed += hash_count;
                 // Send last progress update and stop
                 let update = ThreadResult {
@@ -960,8 +906,7 @@ fn mine_range_with_engine_typed(
                     result: None,
                     hash_count,
                     origin: None,
-                    duration,
-                    completed: false,
+                    completed: true,
                 };
                 if sender.try_send(update).is_err() {
                     log::warn!(target: "miner", "Job {job_id} thread {thread_id} failed to send cancel update");
@@ -1011,7 +956,6 @@ fn mine_range_with_engine_typed(
             result: None,
             hash_count: 0,
             origin: None,
-            duration: std::time::Duration::from_secs(0),
             completed: true,
         };
         if sender.try_send(final_result).is_err() {
@@ -1171,11 +1115,15 @@ pub async fn handle_result_request(
     let elapsed = job.start_time.elapsed().as_secs_f64();
     match job.status {
         JobStatus::Running => {
+            #[cfg(feature = "metrics")]
+            let current_rate = metrics::get_hash_rate();
+            #[cfg(not(feature = "metrics"))]
+            let current_rate = 0.0;
             log::debug!(
                 "🔍 Job {} still running - elapsed: {:.1}s - hash rate: {:.0} H/s",
                 job_id,
                 elapsed,
-                job.last_hash_rate
+                current_rate
             );
         }
         JobStatus::Completed if !job.result_served => {
@@ -1653,18 +1601,17 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
         tokio::spawn(async move {
             loop {
-                let (active_jobs, total_rate) = {
+                let active_jobs = {
                     let jobs = svc.jobs.lock().await;
-                    let mut running = 0i64;
-                    let mut rate = 0.0;
-                    for (_id, job) in jobs.iter() {
-                        if job.status == JobStatus::Running {
-                            running += 1;
-                            rate += job.last_hash_rate;
-                        }
-                    }
-                    (running, rate)
+                    jobs.values()
+                        .filter(|job| job.status == JobStatus::Running)
+                        .count() as i64
                 };
+
+                #[cfg(feature = "metrics")]
+                let total_rate = metrics::get_hash_rate();
+                #[cfg(not(feature = "metrics"))]
+                let total_rate = 0.0;
 
                 let uptime_ms = start_instant.elapsed().as_millis() as u64;
 
