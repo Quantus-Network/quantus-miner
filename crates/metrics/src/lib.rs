@@ -623,9 +623,13 @@ pub fn start_thread(engine: &str, job_id: &str, thread_id: usize) {
     }
 
     session.active_threads = session.active_threads.saturating_add(1);
-    session
-        .threads
-        .insert(thread_key, ThreadState { start: now, hashes: 0 });
+    session.threads.insert(
+        thread_key,
+        ThreadState {
+            start: now,
+            hashes: 0,
+        },
+    );
 
     let job = session.jobs.entry(job_key).or_insert(JobState {
         start: now,
@@ -670,7 +674,10 @@ pub fn record_thread_progress(
     }
 
     let (thread_start, thread_hashes_total) = {
-        let thread_state = session.threads.get_mut(&thread_key).expect("thread must exist");
+        let thread_state = session
+            .threads
+            .get_mut(&thread_key)
+            .expect("thread must exist");
         thread_state.hashes = thread_state.hashes.saturating_add(hashes);
         (thread_state.start, thread_state.hashes)
     };
