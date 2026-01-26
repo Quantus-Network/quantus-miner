@@ -1165,59 +1165,35 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         metrics::set_effective_cpus(effective_cpus as i64);
     }
 
-    // Initialize GPU engine if requested or for auto-detection
+    // Resolve GPU configuration
     let (gpu_engine, gpu_devices): (Option<Arc<dyn MinerEngine>>, usize) =
         match resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_duration_ms) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 log::error!("❌ ERROR: {}", e);
-                if config.gpu_devices.is_some() {
-                    log::error!("   Please check your --gpu-devices setting or GPU hardware.");
-                    std::process::exit(1);
-                } else {
-                    (None, 0)
-                }
+                log::error!("   Please check your --gpu-devices setting or GPU hardware.");
+                std::process::exit(1);
             }
         };
 
-    // Calculate CPU workers
-    let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
-        if gpu_devices == 0 {
-            // CPU-only mode: use default CPU allocation
-            let default_cpu_workers = effective_cpus
-                .saturating_sub(effective_cpus / 2)
-                .min(effective_cpus.saturating_sub(1))
-                .max(1);
-            log::info!(
-                "No CPU workers specified. Defaulting to {} CPU workers (leaving ~{} for other processes).",
-                default_cpu_workers,
-                effective_cpus.saturating_sub(default_cpu_workers)
-            );
-            default_cpu_workers
-        } else {
-            // Hybrid mode: default to half of effective CPUs for CPU
-            let default_cpu_workers = effective_cpus / 2;
-            log::info!(
-                "Hybrid mode: defaulting to {} CPU workers",
-                default_cpu_workers
-            );
-            default_cpu_workers
+    // Resolve CPU workers: use explicit value, or auto-detect if not specified
+    let cpu_workers = match config.cpu_workers {
+        Some(n) => n,
+        None => {
+            // Auto-detect: use half of available CPUs (at least 1)
+            let default = (effective_cpus / 2).max(1);
+            log::info!("Auto-detected {} CPU workers (of {} available)", default, effective_cpus);
+            default
         }
-    });
-
-    let total_workers = cpu_workers + gpu_devices;
-
-    let (cpu_workers, gpu_devices) = if total_workers == 0 {
-        log::warn!(
-            "No workers specified. Defaulting to CPU-only mode with {} workers.",
-            effective_cpus
-        );
-        (effective_cpus, 0)
-    } else {
-        (cpu_workers, gpu_devices)
     };
 
-    // Create engines based on worker configuration
+    // Validate: must have at least one worker
+    if cpu_workers == 0 && gpu_devices == 0 {
+        log::error!("No workers configured. Specify --cpu-workers > 0 or --gpu-devices > 0.");
+        std::process::exit(1);
+    }
+
+    // Create engines
     let cpu_engine = if cpu_workers > 0 {
         Some(Arc::new(engine_cpu::FastCpuEngine::new()) as Arc<dyn MinerEngine>)
     } else {
@@ -1253,7 +1229,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     log::info!(
         "⛏️  Mining service ready with {} total worker threads",
-        total_workers
+        cpu_workers + gpu_devices
     );
     if let Some(chunk_size) = config.chunk_size {
         log::info!(
