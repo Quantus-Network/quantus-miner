@@ -27,7 +27,7 @@ The binary will be available at `target/release/quantus-miner`.
 ./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
 
 # Custom port and metrics
-./target/release/quantus-miner serve --cpu-workers 2 --quic-port 8000 --metrics-port 9900
+./target/release/quantus-miner serve --cpu-workers 2 --port 8000 --metrics-port 9900
 ```
 
 ## Configuration
@@ -36,7 +36,7 @@ The binary will be available at `target/release/quantus-miner`.
 |----------|---------------------|-------------|---------|
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | 0 |
-| `--quic-port <PORT>` | `MINER_QUIC_PORT` | QUIC server port | 9833 |
+| `--port <PORT>` | `MINER_PORT` | QUIC server port | 9833 |
 | `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | Disabled |
 
 ## GPU Mining
@@ -84,7 +84,7 @@ RUST_LOG=debug ./target/release/quantus-miner serve --cpu-workers 2 --gpu-device
 ./target/release/quantus-miner serve \
   --cpu-workers 6 \
   --gpu-devices 1 \
-  --quic-port 9833 \
+  --port 9833 \
   --metrics-port 9900
 ```
 
