@@ -1,6 +1,8 @@
 #![deny(rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
+pub mod quic;
+
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
 use primitive_types::U512;
@@ -12,7 +14,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use warp::{Filter, Rejection, Reply};
 
 /// Service runtime configuration provided by the CLI/binary.
 #[derive(Clone, Debug)]
@@ -1016,249 +1017,6 @@ pub fn validate_mining_request(request: &MiningRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// HTTP handler for POST /mine
-pub async fn handle_mine_request(
-    request: MiningRequest,
-    state: MiningService,
-) -> Result<impl Reply, Rejection> {
-    log::debug!(target: "miner-servce", "Mine request: {request:?}");
-    if let Err(e) = validate_mining_request(&request) {
-        log::warn!("Invalid mine request ({}): {}", request.job_id, e);
-        #[cfg(feature = "metrics")]
-        {
-            metrics::inc_mine_requests("invalid");
-        }
-        return Ok(warp::reply::with_status(
-            warp::reply::json(&MiningResponse {
-                status: ApiResponseStatus::Error,
-                job_id: request.job_id,
-                message: Some(e),
-            }),
-            warp::http::StatusCode::BAD_REQUEST,
-        ));
-    }
-
-    let header_hash: [u8; 32] = hex::decode(&request.mining_hash)
-        .unwrap()
-        .try_into()
-        .expect("Validated hex string is 32 bytes");
-    let difficulty = U512::from_dec_str(&request.distance_threshold).unwrap();
-    let nonce_start = U512::from_str_radix(&request.nonce_start, 16).unwrap();
-    let nonce_end = U512::from_str_radix(&request.nonce_end, 16).unwrap();
-
-    let job = MiningJob::new(header_hash, difficulty, nonce_start, nonce_end);
-
-    match state.add_job(request.job_id.clone(), job).await {
-        Ok(_) => {
-            log::debug!(target: "miner-servce", "Accepted mine request for job ID: {}", request.job_id);
-            #[cfg(feature = "metrics")]
-            {
-                metrics::inc_mine_requests("accepted");
-            }
-            Ok(warp::reply::with_status(
-                warp::reply::json(&MiningResponse {
-                    status: ApiResponseStatus::Accepted,
-                    job_id: request.job_id,
-                    message: None,
-                }),
-                warp::http::StatusCode::OK,
-            ))
-        }
-        Err(e) => {
-            log::error!("Failed to add job {}: {}", request.job_id, e);
-            #[cfg(feature = "metrics")]
-            {
-                let result = if e.contains("already") {
-                    "duplicate"
-                } else {
-                    "error"
-                };
-                metrics::inc_mine_requests(result);
-            }
-            Ok(warp::reply::with_status(
-                warp::reply::json(&MiningResponse {
-                    status: ApiResponseStatus::Error,
-                    job_id: request.job_id,
-                    message: Some(e),
-                }),
-                warp::http::StatusCode::CONFLICT,
-            ))
-        }
-    }
-}
-
-/// HTTP handler for GET /result/{job_id}
-pub async fn handle_result_request(
-    job_id: String,
-    state: MiningService,
-) -> Result<impl Reply, Rejection> {
-    log::debug!(target: "miner-servce", "Result request: {job_id}");
-
-    let job = match state.get_job(&job_id).await {
-        Some(job) => job,
-        None => {
-            log::warn!("Result request for unknown job: {job_id}");
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&quantus_miner_api::MiningResult {
-                    status: ApiResponseStatus::NotFound,
-                    job_id,
-                    nonce: None,
-                    work: None,
-                    hash_count: 0,
-                    elapsed_time: 0.0,
-                }),
-                warp::http::StatusCode::NOT_FOUND,
-            ));
-        }
-    };
-
-    let elapsed = job.start_time.elapsed().as_secs_f64();
-    match job.status {
-        JobStatus::Running => {
-            #[cfg(feature = "metrics")]
-            let current_rate = metrics::get_hash_rate();
-            #[cfg(not(feature = "metrics"))]
-            let current_rate = 0.0;
-            log::debug!(
-                "🔍 Job {} still running - elapsed: {:.1}s - hash rate: {:.0} H/s",
-                job_id,
-                elapsed,
-                current_rate
-            );
-        }
-        JobStatus::Completed if !job.result_served => {
-            log::info!(
-                "✅ Job {} completed - ready for pickup - elapsed: {:.1}s - {} hashes",
-                job_id,
-                elapsed,
-                job.total_hash_count
-            );
-        }
-        JobStatus::Completed => {
-            log::debug!(
-                "📤 Job {} result already served - elapsed: {:.1}s",
-                job_id,
-                elapsed
-            );
-        }
-        _ => {
-            log::debug!(
-                "🔄 Job {} status: {:?} - elapsed: {:.1}s",
-                job_id,
-                job.status,
-                elapsed
-            );
-        }
-    }
-    let status = match job.status {
-        JobStatus::Running => ApiResponseStatus::Running,
-        JobStatus::Completed => ApiResponseStatus::Completed,
-        JobStatus::Failed => ApiResponseStatus::Failed,
-        JobStatus::Cancelled => ApiResponseStatus::Cancelled,
-    };
-
-    let (nonce_hex, work_hex) = match &job.best_result {
-        Some(result) => (
-            Some(format!("{:x}", result.nonce)),
-            Some(hex::encode(result.work)),
-        ),
-        None => (None, None),
-    };
-
-    // Inline re-verify using the exact nonce bytes we will return
-    if let Some(result) = &job.best_result {
-        let nonce_be = result.nonce.to_big_endian();
-        let (ok, hash_result) = pow_core::is_valid_nonce(job.header_hash, nonce_be, job.difficulty);
-        log::info!(
-            target: "miner",
-            "Serving result: job_id={}, engine={}, ok={}, hash={}, difficulty={}",
-            job_id,
-            job.engine_name,
-            ok,
-            hash_result,
-            job.difficulty
-        );
-        #[cfg(feature = "metrics")]
-        {
-            metrics::inc_mine_requests("result_served");
-        }
-        // Mark served to keep job until at least one fetch succeeds
-        state.mark_job_result_served(&job_id).await;
-    }
-
-    let elapsed_time = job.start_time.elapsed().as_secs_f64();
-
-    Ok(warp::reply::with_status(
-        warp::reply::json(&quantus_miner_api::MiningResult {
-            status,
-            job_id,
-            nonce: nonce_hex,
-            work: work_hex,
-            hash_count: job.total_hash_count,
-            elapsed_time,
-        }),
-        warp::http::StatusCode::OK,
-    ))
-}
-
-/// HTTP handler for POST /cancel/{job_id}
-pub async fn handle_cancel_request(
-    job_id: String,
-    state: MiningService,
-) -> Result<impl Reply, Rejection> {
-    log::info!(target: "miner-servce", "Cancel job: {job_id}");
-
-    if state.cancel_job(&job_id).await {
-        log::debug!(target: "miner", "Successfully cancelled job: {job_id}");
-        Ok(warp::reply::with_status(
-            warp::reply::json(&MiningResponse {
-                status: ApiResponseStatus::Cancelled,
-                job_id,
-                message: None,
-            }),
-            warp::http::StatusCode::OK,
-        ))
-    } else {
-        log::warn!("Cancel request for unknown job: {job_id}");
-        Ok(warp::reply::with_status(
-            warp::reply::json(&MiningResponse {
-                status: ApiResponseStatus::NotFound,
-                job_id,
-                message: Some("Job not found".to_string()),
-            }),
-            warp::http::StatusCode::NOT_FOUND,
-        ))
-    }
-}
-
-/// Build the warp routes for the miner API using the provided service state.
-pub fn build_routes(
-    state: MiningService,
-) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
-    let state_clone = state.clone();
-    let state_filter = warp::any().map(move || state_clone.clone());
-
-    let mine_route = warp::post()
-        .and(warp::path("mine"))
-        .and(warp::body::json())
-        .and(state_filter.clone())
-        .and_then(handle_mine_request);
-
-    let result_route = warp::get()
-        .and(warp::path("result"))
-        .and(warp::path::param())
-        .and(state_filter.clone())
-        .and_then(handle_result_request);
-
-    let cancel_route = warp::post()
-        .and(warp::path("cancel"))
-        .and(warp::path::param())
-        .and(state_filter.clone())
-        .and_then(handle_cancel_request);
-
-    mine_route.or(result_route).or(cancel_route)
-}
-
 /// Helper structures and functions for safe range partitioning (placed before use)
 #[derive(Debug, Clone)]
 struct Partitions {
@@ -1650,27 +1408,21 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         log::info!("Metrics disabled (no --metrics-port provided)");
     }
 
-    // Build routes
-    let routes = build_routes(service);
-
-    // Start server
-    let addr = ([0, 0, 0, 0], config.port);
-    let socket = std::net::SocketAddr::from(addr);
-    log::info!("🌐 HTTP API server starting on http://{}", socket);
-    log::info!("📡 Mining endpoints available:");
-    log::info!("   POST http://{}/mine - Submit mining jobs", socket);
-    log::info!(
-        "   GET  http://{}/result/{{job_id}} - Check mining results",
-        socket
-    );
+    // Start QUIC server
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
+    log::info!("🌐 QUIC server starting on {}", addr);
+    log::info!("📡 Mining protocol: QUIC with bidirectional streaming");
+    log::info!("   NewJob messages from node start mining jobs");
+    log::info!("   JobResult messages pushed back when mining completes");
     if config.metrics_port.is_some() {
         log::info!(
-            "   GET  http://{}:{}/metrics - Prometheus metrics",
-            socket.ip(),
+            "   GET  http://0.0.0.0:{}/metrics - Prometheus metrics",
             config.metrics_port.unwrap()
         );
     }
-    warp::serve(routes).run(socket).await;
+
+    let quic_server = quic::QuicServer::new(addr, service)?;
+    quic_server.run().await?;
 
     Ok(())
 }

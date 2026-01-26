@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 enum Command {
     /// Run the mining service (default behavior)
     Serve {
-        /// Port number to listen on for the miner HTTP API
-        #[arg(short, long, env = "MINER_PORT", default_value_t = 9833)]
-        port: u16,
+        /// Port number to listen on for the QUIC mining protocol
+        #[arg(long = "quic-port", env = "MINER_QUIC_PORT", default_value_t = 9833)]
+        quic_port: u16,
 
         /// Number of CPU worker threads to use for mining (None = auto-detect)
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
@@ -141,7 +141,7 @@ async fn main() {
     let args = Args::parse();
 
     match args.command.unwrap_or(Command::Serve {
-        port: 9833,
+        quic_port: 9833,
         cpu_workers: None,
         gpu_devices: None,
         metrics_port: None,
@@ -165,7 +165,7 @@ async fn main() {
         telemetry_node_version: None,
     }) {
         Command::Serve {
-            port,
+            quic_port,
             cpu_workers,
             gpu_devices,
             metrics_port,
@@ -189,7 +189,7 @@ async fn main() {
             telemetry_node_version,
         } => {
             run_serve_command(
-                port,
+                quic_port,
                 cpu_workers,
                 gpu_devices,
                 metrics_port,
@@ -227,7 +227,7 @@ async fn main() {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_serve_command(
-    port: u16,
+    quic_port: u16,
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
     metrics_port: Option<u16>,
@@ -300,7 +300,7 @@ async fn run_serve_command(
     log::info!("Starting external miner service...");
 
     let config = ServiceConfig {
-        port,
+        port: quic_port,
         cpu_workers,
         gpu_devices,
         metrics_port,

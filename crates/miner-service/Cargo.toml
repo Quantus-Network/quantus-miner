@@ -17,7 +17,6 @@ metrics = [
 
 [dependencies]
 # Workspace-shared deps
-warp = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -28,9 +27,11 @@ crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { version = "0.11", features = ["json"] }
+
+# QUIC transport
 quinn = "0.10"
 rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+rcgen = "0.11"
 
 # Protocol types from the node repo (keep API compatibility)
 quantus-miner-api = { workspace = true }
