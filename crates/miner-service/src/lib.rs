@@ -1055,48 +1055,43 @@ pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
     gpu_batch_duration_ms: Option<u64>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
-    // Default to 3000ms if not specified
-    let duration = std::time::Duration::from_millis(gpu_batch_duration_ms.unwrap_or(3000));
+    // Explicit 0 means no GPU
+    if requested_devices == Some(0) {
+        return Ok((None, 0));
+    }
 
-    if let Some(req_count) = requested_devices {
-        if req_count == 0 {
+    // Try to initialize GPU engine
+    let duration = std::time::Duration::from_millis(gpu_batch_duration_ms.unwrap_or(3000));
+    let engine = match engine_gpu::GpuEngine::try_new(duration) {
+        Ok(e) => e,
+        Err(e) => {
+            if requested_devices.is_some() {
+                // User explicitly requested GPU but it failed
+                anyhow::bail!("Failed to initialize GPU engine: {}", e);
+            }
+            // Auto-detect failed, fall back to CPU only
+            log::info!("No GPU available: {}", e);
             return Ok((None, 0));
         }
-        // Explicit request > 0
-        let engine = engine_gpu::GpuEngine::try_new(duration)
-            .map_err(|e| anyhow::anyhow!("Failed to initialize GPU engine: {}", e))?;
+    };
 
-        let available = engine.device_count();
-        if req_count > available {
-            return Err(anyhow::anyhow!(
-                "Requested {} GPU devices but only {} device(s) are available.",
-                req_count,
-                available
-            ));
+    let available = engine.device_count();
+    let count = match requested_devices {
+        Some(n) if n > available => {
+            anyhow::bail!("Requested {} GPU devices but only {} available", n, available);
         }
-        Ok((Some(Arc::new(engine)), req_count))
-    } else {
-        // Auto-detect
-        match engine_gpu::GpuEngine::try_new(duration) {
-            Ok(engine) => {
-                let available = engine.device_count();
-                if available > 0 {
-                    log::info!(
-                        "Auto-detected {} GPU device(s). Using all available GPUs.",
-                        available
-                    );
-                    Ok((Some(Arc::new(engine)), available))
-                } else {
-                    log::info!("GPU auto-detection found 0 devices. Defaulting to CPU only.");
-                    Ok((None, 0))
-                }
-            }
-            Err(e) => {
-                log::info!("GPU auto-detection failed (no suitable GPU found): {}. Defaulting to CPU only.", e);
-                Ok((None, 0))
-            }
+        Some(n) => n,
+        None if available == 0 => {
+            log::info!("No GPU devices found");
+            return Ok((None, 0));
         }
-    }
+        None => {
+            log::info!("Auto-detected {} GPU device(s)", available);
+            available
+        }
+    };
+
+    Ok((Some(Arc::new(engine)), count))
 }
 
 /// Start the miner service with the given configuration.
