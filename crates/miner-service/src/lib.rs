@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 /// Service runtime configuration provided by the CLI/binary.
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
-    /// Port for the HTTP miner API.
-    pub port: u16,
+    /// Address of the node to connect to (e.g., "127.0.0.1:9833").
+    pub node_addr: std::net::SocketAddr,
     /// Number of CPU worker threads to use for mining (None = auto-detect)
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
@@ -45,7 +45,7 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            port: 9833,
+            node_addr: "127.0.0.1:9833".parse().unwrap(),
             cpu_workers: None,
             gpu_devices: None,
             metrics_port: None,
@@ -64,8 +64,8 @@ impl fmt::Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "port={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}, gpu_batch_duration_ms={:?}",
-            self.port,
+            "node_addr={}, cpu_workers={:?}, gpu_devices={:?}, metrics_port={:?}, progress_interval_ms={:?}, chunk_size={:?}, manip_solved_blocks={:?}, manip_base_delay_ns={:?}, manip_step_batch={:?}, manip_throttle_cap={:?}, gpu_batch_duration_ms={:?}",
+            self.node_addr,
             self.cpu_workers,
             self.gpu_devices,
             self.metrics_port,
@@ -998,22 +998,6 @@ pub fn validate_mining_request(request: &MiningRequest) -> Result<(), String> {
         return Err("distance_threshold must be a valid decimal number".to_string());
     }
 
-    if request.nonce_start.len() != 128 {
-        return Err("nonce_start must be 128 hex characters".to_string());
-    }
-    if request.nonce_end.len() != 128 {
-        return Err("nonce_end must be 128 hex characters".to_string());
-    }
-
-    let nonce_start = U512::from_str_radix(&request.nonce_start, 16)
-        .map_err(|_| "nonce_start must be valid hex".to_string())?;
-    let nonce_end = U512::from_str_radix(&request.nonce_end, 16)
-        .map_err(|_| "nonce_end must be valid hex".to_string())?;
-
-    if nonce_start > nonce_end {
-        return Err("nonce_start must be <= nonce_end".to_string());
-    }
-
     Ok(())
 }
 
@@ -1379,9 +1363,8 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         log::info!("Metrics disabled (no --metrics-port provided)");
     }
 
-    // Start QUIC server
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
-    log::info!("🌐 QUIC server starting on {}", addr);
+    // Connect to node via QUIC and start mining
+    log::info!("🌐 Connecting to node at {}", config.node_addr);
     log::info!("📡 Mining protocol: QUIC with bidirectional streaming");
     log::info!("   NewJob messages from node start mining jobs");
     log::info!("   JobResult messages pushed back when mining completes");
@@ -1392,8 +1375,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         );
     }
 
-    let quic_server = quic::QuicServer::new(addr, service)?;
-    quic_server.run().await?;
+    quic::connect_and_mine(config.node_addr, service).await?;
 
     Ok(())
 }

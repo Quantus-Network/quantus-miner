@@ -1,13 +1,21 @@
-//! QUIC transport layer for the miner service.
+//! QUIC client for connecting to blockchain nodes.
 //!
-//! This module provides a QUIC server that accepts connections from blockchain nodes
-//! and handles bidirectional streaming for mining job submission and result delivery.
+//! This module provides a QUIC client that connects to a blockchain node
+//! and handles bidirectional streaming for receiving mining jobs and
+//! sending results.
+//!
+//! # Architecture
+//!
+//! The miner connects to the node (not the other way around). This allows:
+//! - Instant reconnection when the miner restarts
+//! - Multiple miners connecting to a single node
+//! - Each miner independently selects random nonce starting points
 //!
 //! # Protocol
 //!
-//! The protocol is simple:
-//! - Node sends `MinerMessage::NewJob` to submit a mining job (implicitly cancels any previous)
+//! - Node sends `MinerMessage::NewJob` to submit a mining job
 //! - Miner sends `MinerMessage::JobResult` when mining completes
+//! - When a new job arrives, any previous job is implicitly cancelled
 //!
 //! # Wire Format
 //!
@@ -15,110 +23,126 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use quinn::{Endpoint, ServerConfig};
-use rustls::{Certificate, PrivateKey};
+use primitive_types::U512;
+use quinn::{ClientConfig, Endpoint};
+use rustls::client::ServerCertVerified;
 use tokio::sync::mpsc;
 
-use quantus_miner_api::{read_message, write_message, MinerMessage, MiningResult};
+use quantus_miner_api::{read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult};
 
 use crate::MiningService;
 
-/// QUIC server configuration and state.
-pub struct QuicServer {
-    endpoint: Endpoint,
+/// Connect to a node and start mining.
+///
+/// This function connects to the node, receives mining jobs, and sends results.
+/// It automatically reconnects if the connection is lost.
+///
+/// This function runs forever (or until an unrecoverable error occurs).
+pub async fn connect_and_mine(
+    node_addr: SocketAddr,
     mining_service: MiningService,
-}
+) -> anyhow::Result<()> {
+    let mut reconnect_delay = Duration::from_secs(1);
+    const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
-impl QuicServer {
-    /// Create a new QUIC server bound to the given address.
-    ///
-    /// Generates a self-signed certificate for TLS.
-    pub fn new(addr: SocketAddr, mining_service: MiningService) -> anyhow::Result<Self> {
-        let server_config = generate_self_signed_config()?;
-        let endpoint = Endpoint::server(server_config, addr)?;
+    loop {
+        log::info!("⛏️ Connecting to node at {}...", node_addr);
 
-        log::info!("QUIC server listening on {}", addr);
+        match establish_connection(node_addr).await {
+            Ok((connection, send, recv)) => {
+                log::info!("⛏️ Connected to node at {}", node_addr);
+                reconnect_delay = Duration::from_secs(1); // Reset delay on success
 
-        Ok(Self {
-            endpoint,
-            mining_service,
-        })
-    }
-
-    /// Run the server, accepting connections and handling them.
-    ///
-    /// This function runs forever (or until the endpoint is closed).
-    pub async fn run(self) -> anyhow::Result<()> {
-        log::info!("QUIC server ready to accept connections");
-
-        while let Some(incoming) = self.endpoint.accept().await {
-            let mining_service = self.mining_service.clone();
-
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(connection) => {
-                        let remote = connection.remote_address();
-                        log::info!("New QUIC connection from {}", remote);
-
-                        if let Err(e) = handle_connection(connection, mining_service).await {
-                            log::warn!("Connection from {} closed with error: {}", remote, e);
-                        } else {
-                            log::info!("Connection from {} closed gracefully", remote);
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to accept connection: {}", e);
-                    }
+                // Handle the connection until it fails
+                if let Err(e) = handle_connection(connection, send, recv, mining_service.clone()).await {
+                    log::info!("⛏️ Connection lost: {}", e);
                 }
-            });
+            }
+            Err(e) => {
+                log::warn!("⛏️ Failed to connect to node: {}", e);
+            }
         }
 
-        Ok(())
+        log::info!("⛏️ Reconnecting in {:?}...", reconnect_delay);
+        tokio::time::sleep(reconnect_delay).await;
+
+        // Exponential backoff
+        reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
     }
 }
 
-/// Handle a single QUIC connection from a node.
-///
-/// Opens a bidirectional stream for the connection lifetime:
-/// - Receives `NewJob` messages from the node
-/// - Sends `JobResult` messages back when mining completes
-async fn handle_connection(
-    connection: quinn::Connection,
-    mining_service: MiningService,
-) -> anyhow::Result<()> {
-    // Accept a bidirectional stream from the client
-    let (send, recv) = connection.accept_bi().await?;
+/// Establish a QUIC connection to the node.
+async fn establish_connection(
+    addr: SocketAddr,
+) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
+    // Create client config with insecure certificate verification
+    // (node uses self-signed certificate)
+    let mut crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
+        .with_no_client_auth();
 
-    handle_stream(send, recv, mining_service, connection.remote_address()).await
+    // Set ALPN protocol to match the node server
+    crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
+
+    let mut client_config = ClientConfig::new(Arc::new(crypto));
+
+    // Set transport config with keep-alive to detect connection loss
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    client_config.transport_config(Arc::new(transport_config));
+
+    // Create endpoint
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
+    endpoint.set_default_client_config(client_config);
+
+    // Connect to the node
+    let connection = endpoint.connect(addr, "localhost")?.await?;
+    log::info!("⛏️ QUIC connection established to {}", addr);
+
+    // Open a bidirectional stream
+    log::info!("⛏️ Opening bidirectional stream to node...");
+    let (mut send, recv) = connection.open_bi().await?;
+    
+    // QUIC streams are lazily established - we need to send data to actually
+    // create the stream on the server side. Send a Ready message to trigger
+    // the stream creation and let the node know we're connected.
+    log::debug!("Sending Ready message to establish stream...");
+    write_message(&mut send, &MinerMessage::Ready).await?;
+    log::info!("⛏️ Bidirectional stream established");
+
+    Ok((connection, send, recv))
 }
 
-/// Handle a bidirectional stream for mining communication.
-async fn handle_stream(
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+/// Handle an established connection, receiving jobs and sending results.
+async fn handle_connection(
+    _connection: quinn::Connection,
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
     mining_service: MiningService,
-    remote_addr: SocketAddr,
 ) -> anyhow::Result<()> {
-    // Wrap streams for async read/write
-    let mut send = send;
-    let mut recv = recv;
-
     // Channel for receiving mining results from the service
     let (result_tx, mut result_rx) = mpsc::channel::<MiningResult>(16);
 
     // Current job ID being worked on (for stale result detection)
     let mut current_job_id: Option<String> = None;
 
+    log::info!("⛏️ Waiting for mining jobs from node...");
+
     loop {
         tokio::select! {
+            // Prioritize reading to detect disconnection faster
+            biased;
+
             // Handle incoming messages from the node
             msg_result = read_message(&mut recv) => {
                 match msg_result {
                     Ok(MinerMessage::NewJob(request)) => {
                         log::info!(
-                            "Received NewJob from {}: job_id={}, hash={}",
-                            remote_addr,
+                            "⛏️ Received job: id={}, hash={}...",
                             request.job_id,
                             &request.mining_hash[..8]
                         );
@@ -140,24 +164,20 @@ async fn handle_stream(
                         tokio::spawn(async move {
                             process_mining_job(request, service, result_tx).await;
                         });
-
-                        log::debug!("Started mining job: {}", job_id);
                     }
                     Ok(MinerMessage::JobResult(_)) => {
                         // Node should not send JobResult to miner
                         log::warn!("Received unexpected JobResult from node, ignoring");
                     }
+                    Ok(MinerMessage::Ready) => {
+                        // Node should not send Ready to miner
+                        log::warn!("Received unexpected Ready from node, ignoring");
+                    }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                            log::info!("Node disconnected");
-                        } else {
-                            log::warn!("Error reading message: {}", e);
+                            return Err(anyhow::anyhow!("Node disconnected"));
                         }
-                        // Cancel any running job
-                        if let Some(job_id) = current_job_id.take() {
-                            mining_service.cancel_job(&job_id).await;
-                        }
-                        return Ok(());
+                        return Err(anyhow::anyhow!("Read error: {}", e));
                     }
                 }
             }
@@ -167,16 +187,14 @@ async fn handle_stream(
                 // Check if this result is for the current job
                 if current_job_id.as_ref() == Some(&result.job_id) {
                     log::info!(
-                        "Sending JobResult to {}: job_id={}, status={:?}",
-                        remote_addr,
+                        "⛏️ Sending result: job_id={}, status={:?}",
                         result.job_id,
                         result.status
                     );
 
                     let msg = MinerMessage::JobResult(result);
                     if let Err(e) = write_message(&mut send, &msg).await {
-                        log::warn!("Failed to send result: {}", e);
-                        return Err(e.into());
+                        return Err(anyhow::anyhow!("Failed to send result: {}", e));
                     }
 
                     // Clear current job since it's complete
@@ -193,15 +211,19 @@ async fn handle_stream(
     }
 }
 
+/// Generate a random 512-bit nonce starting point.
+fn generate_random_nonce_start() -> U512 {
+    let mut bytes = [0u8; 64];
+    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
+    U512::from_big_endian(&bytes)
+}
+
 /// Process a mining job and send the result via the channel.
 async fn process_mining_job(
     request: quantus_miner_api::MiningRequest,
     mining_service: MiningService,
     result_tx: mpsc::Sender<MiningResult>,
 ) {
-    use primitive_types::U512;
-    use quantus_miner_api::ApiResponseStatus;
-
     // Parse and validate the request
     let header_hash: [u8; 32] = match hex::decode(&request.mining_hash) {
         Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
@@ -239,41 +261,15 @@ async fn process_mining_job(
         }
     };
 
-    let nonce_start = match U512::from_str_radix(&request.nonce_start, 16) {
-        Ok(n) => n,
-        Err(_) => {
-            log::warn!("Invalid nonce_start in request: {}", request.job_id);
-            let _ = result_tx
-                .send(MiningResult {
-                    status: ApiResponseStatus::Failed,
-                    job_id: request.job_id,
-                    nonce: None,
-                    work: None,
-                    hash_count: 0,
-                    elapsed_time: 0.0,
-                })
-                .await;
-            return;
-        }
-    };
+    // Generate random nonce starting point
+    let nonce_start = generate_random_nonce_start();
+    let nonce_end = U512::MAX;
 
-    let nonce_end = match U512::from_str_radix(&request.nonce_end, 16) {
-        Ok(n) => n,
-        Err(_) => {
-            log::warn!("Invalid nonce_end in request: {}", request.job_id);
-            let _ = result_tx
-                .send(MiningResult {
-                    status: ApiResponseStatus::Failed,
-                    job_id: request.job_id,
-                    nonce: None,
-                    work: None,
-                    hash_count: 0,
-                    elapsed_time: 0.0,
-                })
-                .await;
-            return;
-        }
-    };
+    log::debug!(
+        "Starting job {} with random nonce start: {:x}...",
+        request.job_id,
+        nonce_start
+    );
 
     // Create and add the mining job
     let job = crate::MiningJob::new(header_hash, difficulty, nonce_start, nonce_end);
@@ -333,7 +329,7 @@ async fn process_mining_job(
                 };
 
                 log::info!(
-                    "Job {} completed: {} hashes in {:.2}s",
+                    "⛏️ Job {} completed: {} hashes in {:.2}s",
                     job_id,
                     job.total_hash_count,
                     elapsed_time
@@ -385,33 +381,22 @@ async fn process_mining_job(
     }
 }
 
-/// Generate a self-signed TLS certificate and create a QUIC server config.
-fn generate_self_signed_config() -> anyhow::Result<ServerConfig> {
-    // Generate a self-signed certificate
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
+/// A certificate verifier that accepts any certificate.
+///
+/// This is used because the node uses a self-signed certificate.
+struct InsecureCertVerifier;
 
-    let cert_chain = vec![Certificate(cert_der)];
-    let key = PrivateKey(key_der);
-
-    // Build rustls config
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
-
-    server_crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
-
-    let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
-
-    // Configure transport to allow longer idle periods between mining jobs
-    // The node may take some time to prepare the next block after one is mined
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(60).try_into().unwrap(),
-    ));
-    server_config.transport_config(Arc::new(transport_config));
-
-    Ok(server_config)
+impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        // Accept any certificate
+        Ok(ServerCertVerified::assertion())
+    }
 }

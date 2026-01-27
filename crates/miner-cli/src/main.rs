@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 enum Command {
     /// Run the mining service (default behavior)
     Serve {
-        /// Port number to listen on for the QUIC mining protocol
-        #[arg(short, long, env = "MINER_PORT", default_value_t = 9833)]
-        port: u16,
+        /// Address of the node to connect to (e.g., "127.0.0.1:9833")
+        #[arg(long, env = "MINER_NODE_ADDR")]
+        node_addr: std::net::SocketAddr,
 
         /// Number of CPU worker threads to use for mining (None = auto-detect)
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
@@ -140,32 +140,15 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    match args.command.unwrap_or(Command::Serve {
-        port: 9833,
-        cpu_workers: None,
-        gpu_devices: None,
-        metrics_port: None,
-        verbose: false,
-        progress_interval_ms: None,
-        chunk_size: None,
-        manip_solved_blocks: None,
-        manip_base_delay_ns: None,
-        manip_step_batch: None,
-        manip_throttle_cap: None,
-        gpu_batch_duration_ms: None,
-        telemetry_endpoints: None,
-        telemetry_enabled: None,
-        telemetry_verbosity: None,
-        telemetry_interval_secs: None,
-        telemetry_chain: None,
-        telemetry_genesis: None,
-        telemetry_node_id: None,
-        telemetry_node_peer_id: None,
-        telemetry_node_name: None,
-        telemetry_node_version: None,
-    }) {
+    let Some(command) = args.command else {
+        eprintln!("Error: No command provided. Use 'serve --node-addr <ADDRESS>' to start mining.");
+        eprintln!("Example: miner-cli serve --node-addr 127.0.0.1:9833");
+        std::process::exit(1);
+    };
+
+    match command {
         Command::Serve {
-            port,
+            node_addr,
             cpu_workers,
             gpu_devices,
             metrics_port,
@@ -189,7 +172,7 @@ async fn main() {
             telemetry_node_version,
         } => {
             run_serve_command(
-                port,
+                node_addr,
                 cpu_workers,
                 gpu_devices,
                 metrics_port,
@@ -227,7 +210,7 @@ async fn main() {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_serve_command(
-    port: u16,
+    node_addr: std::net::SocketAddr,
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
     metrics_port: Option<u16>,
@@ -300,7 +283,7 @@ async fn run_serve_command(
     log::info!("Starting external miner service...");
 
     let config = ServiceConfig {
-        port,
+        node_addr,
         cpu_workers,
         gpu_devices,
         metrics_port,
