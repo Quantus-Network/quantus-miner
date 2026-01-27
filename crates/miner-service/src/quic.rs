@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use quantus_miner_api::{read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult};
 
-use crate::{spawn_mining_workers, MiningCandidate};
+use crate::{spawn_mining_workers, EngineType};
 
 /// Connect to a node and start mining.
 ///
@@ -111,6 +111,12 @@ async fn handle_connection(
     cpu_workers: usize,
     gpu_devices: usize,
 ) -> anyhow::Result<()> {
+    // Set static metrics once per connection
+    metrics::set_effective_cpus(num_cpus::get() as i64);
+    metrics::set_workers((cpu_workers + gpu_devices) as i64);
+    metrics::set_cpu_workers(cpu_workers as i64);
+    metrics::set_gpu_devices(gpu_devices as i64);
+
     // Channel for receiving mining results
     let (result_tx, mut result_rx) = mpsc::channel::<MiningResult>(16);
 
@@ -272,6 +278,9 @@ async fn run_mining_job(
     let start_time = Instant::now();
     let total_workers = cpu_workers + gpu_devices;
 
+    // Mark job as active
+    metrics::set_active_jobs(1);
+
     // Spawn worker threads
     let (receiver, _handles) = spawn_mining_workers(
         header_hash,
@@ -285,21 +294,22 @@ async fn run_mining_job(
         cancel_flag.clone(),
     );
 
-    // Wait for results
-    let mut total_hashes = 0u64;
-    let best_candidate: Option<MiningCandidate> = None;
+    // Track hashes per engine type (for job result reporting)
+    let mut cpu_hashes: u64 = 0;
+    let mut gpu_hashes: u64 = 0;
     let mut completed_workers = 0usize;
 
     loop {
         // Check if cancelled externally
-        if cancel_flag.load(Ordering::Relaxed) && best_candidate.is_none() {
+        if cancel_flag.load(Ordering::Relaxed) {
             log::debug!("Job {} cancelled", job_id);
+            metrics::set_active_jobs(0);
             return MiningResult {
                 status: ApiResponseStatus::Cancelled,
                 job_id,
                 nonce: None,
                 work: None,
-                hash_count: total_hashes,
+                hash_count: cpu_hashes + gpu_hashes,
                 elapsed_time: start_time.elapsed().as_secs_f64(),
             };
         }
@@ -314,10 +324,21 @@ async fn run_mining_job(
 
         match recv_result {
             Ok(worker_result) => {
-                total_hashes += worker_result.hash_count;
+                // Track hashes by engine type and update metrics
+                match worker_result.engine_type {
+                    EngineType::Cpu => {
+                        cpu_hashes += worker_result.hash_count;
+                        metrics::record_cpu_hashes(worker_result.hash_count);
+                    }
+                    EngineType::Gpu => {
+                        gpu_hashes += worker_result.hash_count;
+                        metrics::record_gpu_hashes(worker_result.hash_count);
+                    }
+                }
 
                 if let Some(candidate) = worker_result.candidate {
                     // Found a solution!
+                    let total_hashes = cpu_hashes + gpu_hashes;
                     log::info!(
                         "⛏️ Job {} completed: {} hashes in {:.2}s",
                         job_id,
@@ -327,6 +348,7 @@ async fn run_mining_job(
 
                     // Signal other workers to stop
                     cancel_flag.store(true, Ordering::Relaxed);
+                    metrics::set_active_jobs(0);
 
                     return MiningResult {
                         status: ApiResponseStatus::Completed,
@@ -342,7 +364,9 @@ async fn run_mining_job(
                     completed_workers += 1;
                     if completed_workers >= total_workers {
                         // All workers done, no solution found
+                        let total_hashes = cpu_hashes + gpu_hashes;
                         log::warn!("Job {} failed: no solution found", job_id);
+                        metrics::set_active_jobs(0);
                         return MiningResult {
                             status: ApiResponseStatus::Failed,
                             job_id,
@@ -359,10 +383,9 @@ async fn run_mining_job(
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // Channel closed, all workers done
-                if best_candidate.is_some() {
-                    break;
-                }
+                let total_hashes = cpu_hashes + gpu_hashes;
                 log::warn!("Job {} failed: workers disconnected", job_id);
+                metrics::set_active_jobs(0);
                 return MiningResult {
                     status: ApiResponseStatus::Failed,
                     job_id,
@@ -373,16 +396,6 @@ async fn run_mining_job(
                 };
             }
         }
-    }
-
-    // Should not reach here, but just in case
-    MiningResult {
-        status: ApiResponseStatus::Failed,
-        job_id,
-        nonce: None,
-        work: None,
-        hash_count: total_hashes,
-        elapsed_time: start_time.elapsed().as_secs_f64(),
     }
 }
 

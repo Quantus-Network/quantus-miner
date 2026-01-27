@@ -31,3 +31,4 @@ quantus-miner-api = { workspace = true }
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
 engine-gpu = { path = "../engine-gpu" }
+metrics = { path = "../metrics" }

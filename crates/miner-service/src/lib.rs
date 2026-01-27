@@ -31,6 +31,13 @@ pub struct ServiceConfig {
     pub gpu_batch_duration_ms: Option<u64>,
 }
 
+/// Engine type for tracking metrics per compute type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineType {
+    Cpu,
+    Gpu,
+}
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
@@ -46,6 +53,8 @@ impl Default for ServiceConfig {
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
     pub thread_id: usize,
+    /// The type of engine (CPU or GPU) that produced this result.
+    pub engine_type: EngineType,
     /// The winning candidate, if found.
     pub candidate: Option<MiningCandidate>,
     /// Number of hashes computed by this worker.
@@ -115,7 +124,7 @@ pub fn spawn_mining_workers(
                 let tid = thread_id;
 
                 let handle = thread::spawn(move || {
-                    run_worker(tid, "CPU", eng.as_ref(), ctx, start, end, cancel, tx);
+                    run_worker(tid, EngineType::Cpu, eng.as_ref(), ctx, start, end, cancel, tx);
                 });
                 handles.push(handle);
                 thread_id += 1;
@@ -137,7 +146,7 @@ pub fn spawn_mining_workers(
                 let tid = thread_id;
 
                 let handle = thread::spawn(move || {
-                    run_worker(tid, "GPU", eng.as_ref(), ctx, start, end, cancel, tx);
+                    run_worker(tid, EngineType::Gpu, eng.as_ref(), ctx, start, end, cancel, tx);
                 });
                 handles.push(handle);
                 thread_id += 1;
@@ -151,7 +160,7 @@ pub fn spawn_mining_workers(
 /// Run a single mining worker.
 fn run_worker(
     thread_id: usize,
-    engine_type: &str,
+    engine_type: EngineType,
     engine: &dyn MinerEngine,
     ctx: pow_core::JobContext,
     start: U512,
@@ -159,9 +168,14 @@ fn run_worker(
     cancel_flag: Arc<AtomicBool>,
     sender: Sender<WorkerResult>,
 ) {
+    let type_str = match engine_type {
+        EngineType::Cpu => "CPU",
+        EngineType::Gpu => "GPU",
+    };
+
     log::info!(
         "{} thread {} started: range {} to {}",
-        engine_type,
+        type_str,
         thread_id,
         format_u512(start),
         format_u512(end)
@@ -178,7 +192,7 @@ fn run_worker(
         } => {
             log::info!(
                 "🎉 {} thread {} found solution! Nonce: {}, Hash: {}",
-                engine_type,
+                type_str,
                 thread_id,
                 format_u512(nonce),
                 format_u512(hash)
@@ -191,7 +205,7 @@ fn run_worker(
         engine_cpu::EngineStatus::Exhausted { hash_count } => {
             log::debug!(
                 "{} thread {} exhausted range ({} hashes)",
-                engine_type,
+                type_str,
                 thread_id,
                 hash_count
             );
@@ -200,7 +214,7 @@ fn run_worker(
         engine_cpu::EngineStatus::Cancelled { hash_count } => {
             log::debug!(
                 "{} thread {} cancelled ({} hashes)",
-                engine_type,
+                type_str,
                 thread_id,
                 hash_count
             );
@@ -214,17 +228,18 @@ fn run_worker(
 
     let _ = sender.try_send(WorkerResult {
         thread_id,
+        engine_type,
         candidate,
         hash_count,
         completed: true,
     });
 
     // Clear GPU thread-local resources
-    if engine_type == "GPU" {
+    if engine_type == EngineType::Gpu {
         engine_gpu::GpuEngine::clear_worker_resources();
     }
 
-    log::debug!("{} thread {} finished", engine_type, thread_id);
+    log::debug!("{} thread {} finished", type_str, thread_id);
 }
 
 /// Compute partitions of a nonce range for the given number of workers.

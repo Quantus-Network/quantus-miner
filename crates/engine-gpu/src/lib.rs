@@ -247,42 +247,6 @@ impl GpuEngine {
 
         log::info!("GPU engine initialized with {} devices", contexts.len());
 
-        // Set engine backend info for metrics
-        #[cfg(feature = "metrics")]
-        {
-            metrics::set_gpu_device_count(contexts.len() as i64);
-
-            for (i, adapter_info) in adapter_infos.iter().enumerate() {
-                let device_id = format!("gpu-{}", i);
-                let backend_str = format!("{:?}", adapter_info.backend);
-                let vendor_str = format!("{}", adapter_info.vendor);
-                let device_type_str = format!("{:?}", adapter_info.device_type);
-                let clean_name = adapter_info.name.replace(" ", "_").replace(",", "");
-
-                // Set general engine backend info
-                metrics::set_engine_backend(&device_id, &backend_str);
-
-                // Set detailed GPU device info
-                metrics::set_gpu_device_info(
-                    &device_id,
-                    &clean_name,
-                    &backend_str,
-                    &vendor_str,
-                    &device_type_str,
-                );
-
-                // Log GPU device info for monitoring
-                log::info!(
-                    "📊 GPU Device {}: {} | Backend: {:?} | Vendor: {} | Device Type: {:?}",
-                    i,
-                    adapter_info.name,
-                    adapter_info.backend,
-                    adapter_info.vendor,
-                    adapter_info.device_type
-                );
-            }
-        }
-
         Ok(Self {
             contexts,
             device_counter: AtomicUsize::new(0),
@@ -470,13 +434,6 @@ impl MinerEngine for GpuEngine {
             let total_threads = (num_workgroups * threads_per_workgroup) as u64;
             let nonces_per_thread = range_size.div_ceil(total_threads).max(1) as u32;
             let total_threads_u32 = total_threads as u32;
-
-            #[cfg(feature = "metrics")]
-            {
-                let device_id = "gpu-0"; // Simplified; ideally propagate device ID to metrics
-                metrics::set_gpu_batch_size(device_id, range_size as f64);
-                metrics::set_gpu_workgroups(device_id, num_workgroups as f64);
-            }
 
             // Dispatch config: [total_threads, nonces_per_thread, total_nonces, threads_per_workgroup]
             let total_nonces_u32 = range_size.min(u32::MAX as u64) as u32;

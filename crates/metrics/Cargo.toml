@@ -6,11 +6,9 @@ publish = false
 description = "Metrics and Prometheus exporter utilities for the Quantus External Miner"
 
 [features]
-# Provide a Registry by default; HTTP exporter is opt-in.
-default = ["registry"]
-registry = []
+default = []
 # Enable a Warp-based HTTP exporter (used when --metrics-port is provided).
-http-exporter = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:warp"]
+http-exporter = ["dep:tokio", "dep:warp"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -21,5 +19,3 @@ prometheus = { version = "0.13", default-features = false }
 # Optional HTTP exporter stack (enabled via `http-exporter` feature)
 warp = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["full"], optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
-serde_json = { workspace = true, optional = true }

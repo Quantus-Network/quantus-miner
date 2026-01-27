@@ -28,6 +28,10 @@ enum Command {
         #[arg(long = "gpu-batch-duration-ms", env = "MINER_GPU_BATCH_DURATION_MS")]
         gpu_batch_duration_ms: Option<u64>,
 
+        /// Port for Prometheus metrics HTTP endpoint (default: 9900)
+        #[arg(long = "metrics-port", env = "MINER_METRICS_PORT", default_value_t = 9900)]
+        metrics_port: u16,
+
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
         verbose: bool,
@@ -77,11 +81,19 @@ async fn main() {
             cpu_workers,
             gpu_devices,
             gpu_batch_duration_ms,
+            metrics_port,
             verbose,
         } => {
             init_logger(verbose);
 
             log::info!("Starting external miner service...");
+
+            // Start metrics HTTP server
+            if let Err(e) = metrics::start_http_exporter(metrics_port).await {
+                log::error!("Failed to start metrics exporter: {e:?}");
+                std::process::exit(1);
+            }
+            log::info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
 
             let config = ServiceConfig {
                 node_addr,
