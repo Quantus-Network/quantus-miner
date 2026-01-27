@@ -2,7 +2,7 @@
 //!
 //! This module provides the core mining functionality:
 //! - Engine initialization (CPU and GPU)
-//! - Worker thread spawning and coordination
+//! - Persistent worker thread pool for efficient job processing
 //! - QUIC-based communication with the node
 
 #![deny(rust_2018_idioms)]
@@ -14,7 +14,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
 use pow_core::format_u512;
 use primitive_types::U512;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -27,8 +27,6 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// Optional target duration for GPU batches in milliseconds.
-    pub gpu_batch_duration_ms: Option<u64>,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -44,7 +42,6 @@ impl Default for ServiceConfig {
             node_addr: "127.0.0.1:9833".parse().unwrap(),
             cpu_workers: None,
             gpu_devices: None,
-            gpu_batch_duration_ms: None,
         }
     }
 }
@@ -78,171 +75,277 @@ fn generate_random_nonce() -> U512 {
     U512::from_big_endian(&bytes)
 }
 
-/// Spawn mining worker threads and return a receiver for results.
-///
-/// Each worker starts from a completely random nonce and searches forward to U512::MAX.
-/// This avoids any overlap since the nonce space (2^512) is astronomically large.
-/// Set `cancel_flag` to true to stop all workers early.
-pub fn spawn_mining_workers(
-    header_hash: [u8; 32],
-    difficulty: U512,
-    cpu_engine: Option<Arc<dyn MinerEngine>>,
-    gpu_engine: Option<Arc<dyn MinerEngine>>,
-    cpu_workers: usize,
-    gpu_devices: usize,
-    cancel_flag: Arc<AtomicBool>,
-) -> (Receiver<WorkerResult>, Vec<thread::JoinHandle<()>>) {
-    let total_workers = cpu_workers + gpu_devices;
-    let chan_capacity = total_workers.saturating_mul(64).max(256);
-    let (sender, receiver) = bounded(chan_capacity);
+// ---------------------------------------------------------------------------
+// Persistent Worker Pool
+// ---------------------------------------------------------------------------
 
-    let mut thread_id = 0;
-    let mut handles = Vec::with_capacity(total_workers);
-
-    log::info!(
-        "Starting mining with {} CPU + {} GPU workers",
-        cpu_workers,
-        gpu_devices
-    );
-
-    // Spawn CPU workers - each with a random starting nonce
-    if cpu_workers > 0 {
-        if let Some(ref engine) = cpu_engine {
-            let ctx = engine.prepare_context(header_hash, difficulty);
-
-            for _ in 0..cpu_workers {
-                let start = generate_random_nonce();
-                let cancel = cancel_flag.clone();
-                let tx = sender.clone();
-                let ctx = ctx.clone();
-                let eng = engine.clone();
-                let tid = thread_id;
-
-                let handle = thread::spawn(move || {
-                    run_worker(tid, EngineType::Cpu, eng.as_ref(), ctx, start, U512::MAX, cancel, tx);
-                });
-                handles.push(handle);
-                thread_id += 1;
-            }
-        }
-    }
-
-    // Spawn GPU workers - each with a random starting nonce
-    if gpu_devices > 0 {
-        if let Some(ref engine) = gpu_engine {
-            let ctx = engine.prepare_context(header_hash, difficulty);
-
-            for _ in 0..gpu_devices {
-                let start = generate_random_nonce();
-                let cancel = cancel_flag.clone();
-                let tx = sender.clone();
-                let ctx = ctx.clone();
-                let eng = engine.clone();
-                let tid = thread_id;
-
-                let handle = thread::spawn(move || {
-                    run_worker(tid, EngineType::Gpu, eng.as_ref(), ctx, start, U512::MAX, cancel, tx);
-                });
-                handles.push(handle);
-                thread_id += 1;
-            }
-        }
-    }
-
-    (receiver, handles)
+/// A job to be executed by worker threads.
+#[derive(Clone)]
+pub struct MiningJob {
+    /// Job context with header hash and difficulty
+    pub ctx: pow_core::JobContext,
 }
 
-/// Run a single mining worker.
-fn run_worker(
+/// Persistent worker thread pool that keeps threads alive between jobs.
+///
+/// This avoids the overhead of spawning new threads and reinitializing
+/// GPU resources for each mining job.
+pub struct WorkerPool {
+    /// Senders for dispatching jobs to workers (one per worker)
+    job_senders: Vec<Sender<MiningJob>>,
+    /// Receiver for collecting results from all workers
+    result_rx: Receiver<WorkerResult>,
+    /// Shared cancellation flag for all workers
+    cancel_flag: Arc<AtomicBool>,
+    /// Thread handles (for cleanup)
+    _handles: Vec<thread::JoinHandle<()>>,
+    /// Number of CPU workers
+    cpu_worker_count: usize,
+    /// Number of GPU workers
+    gpu_worker_count: usize,
+}
+
+impl WorkerPool {
+    /// Create a new persistent worker pool.
+    pub fn new(
+        cpu_engine: Option<Arc<dyn MinerEngine>>,
+        gpu_engine: Option<Arc<dyn MinerEngine>>,
+        cpu_workers: usize,
+        gpu_devices: usize,
+    ) -> Self {
+        let total_workers = cpu_workers + gpu_devices;
+        let (result_tx, result_rx) = bounded(total_workers * 64);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut job_senders = Vec::with_capacity(total_workers);
+        let mut handles = Vec::with_capacity(total_workers);
+        let mut thread_id = 0;
+
+        log::info!(
+            "Creating persistent worker pool: {} CPU + {} GPU workers",
+            cpu_workers,
+            gpu_devices
+        );
+
+        // Spawn CPU workers
+        if cpu_workers > 0 {
+            if let Some(ref engine) = cpu_engine {
+                for _ in 0..cpu_workers {
+                    let (job_tx, job_rx) = bounded::<MiningJob>(1);
+                    job_senders.push(job_tx);
+
+                    let eng = engine.clone();
+                    let tx = result_tx.clone();
+                    let cancel = cancel_flag.clone();
+                    let tid = thread_id;
+
+                    let handle = thread::spawn(move || {
+                        worker_loop(tid, EngineType::Cpu, eng, job_rx, tx, cancel);
+                    });
+                    handles.push(handle);
+                    thread_id += 1;
+                }
+            }
+        }
+
+        // Spawn GPU workers
+        if gpu_devices > 0 {
+            if let Some(ref engine) = gpu_engine {
+                for _ in 0..gpu_devices {
+                    let (job_tx, job_rx) = bounded::<MiningJob>(1);
+                    job_senders.push(job_tx);
+
+                    let eng = engine.clone();
+                    let tx = result_tx.clone();
+                    let cancel = cancel_flag.clone();
+                    let tid = thread_id;
+
+                    let handle = thread::spawn(move || {
+                        worker_loop(tid, EngineType::Gpu, eng, job_rx, tx, cancel);
+                    });
+                    handles.push(handle);
+                    thread_id += 1;
+                }
+            }
+        }
+
+        Self {
+            job_senders,
+            result_rx,
+            cancel_flag,
+            _handles: handles,
+            cpu_worker_count: cpu_workers,
+            gpu_worker_count: gpu_devices,
+        }
+    }
+
+    /// Start a new mining job. Cancels any currently running job first.
+    pub fn start_job(&self, header_hash: [u8; 32], difficulty: U512) {
+        // Cancel any running job
+        self.cancel_flag.store(true, Ordering::SeqCst);
+
+        // Brief pause to let workers see the cancellation
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        // Reset cancel flag for new job
+        self.cancel_flag.store(false, Ordering::SeqCst);
+
+        // Create job context (shared across all workers)
+        let ctx = pow_core::JobContext::new(header_hash, difficulty);
+        let job = MiningJob { ctx };
+
+        // Dispatch job to all workers
+        for tx in &self.job_senders {
+            // Non-blocking send - if worker is still processing old job, it will
+            // see the cancel flag and exit soon
+            let _ = tx.try_send(job.clone());
+        }
+
+        log::debug!("Job dispatched to {} workers", self.job_senders.len());
+    }
+
+    /// Cancel the current job.
+    pub fn cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Get the result receiver for collecting worker results.
+    pub fn result_receiver(&self) -> &Receiver<WorkerResult> {
+        &self.result_rx
+    }
+
+    /// Get the shared cancel flag.
+    pub fn cancel_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancel_flag
+    }
+
+    /// Total number of workers.
+    pub fn worker_count(&self) -> usize {
+        self.job_senders.len()
+    }
+
+    /// Number of CPU workers.
+    pub fn cpu_worker_count(&self) -> usize {
+        self.cpu_worker_count
+    }
+
+    /// Number of GPU workers.
+    pub fn gpu_worker_count(&self) -> usize {
+        self.gpu_worker_count
+    }
+}
+
+/// Main loop for a persistent worker thread.
+fn worker_loop(
     thread_id: usize,
     engine_type: EngineType,
-    engine: &dyn MinerEngine,
-    ctx: pow_core::JobContext,
-    start: U512,
-    end: U512,
+    engine: Arc<dyn MinerEngine>,
+    job_rx: Receiver<MiningJob>,
+    result_tx: Sender<WorkerResult>,
     cancel_flag: Arc<AtomicBool>,
-    sender: Sender<WorkerResult>,
 ) {
     let type_str = match engine_type {
         EngineType::Cpu => "CPU",
         EngineType::Gpu => "GPU",
     };
 
-    log::info!(
-        "{} thread {} started: range {} to {}",
-        type_str,
-        thread_id,
-        format_u512(start),
-        format_u512(end)
-    );
+    log::info!("{} worker {} started (persistent)", type_str, thread_id);
 
-    let range = EngineRange { start, end };
-    let result = engine.search_range(&ctx, range, &cancel_flag);
+    // Main job processing loop
+    loop {
+        // Wait for a job
+        let job = match job_rx.recv() {
+            Ok(job) => job,
+            Err(_) => {
+                // Channel closed, pool is shutting down
+                log::debug!("{} worker {} shutting down", type_str, thread_id);
+                break;
+            }
+        };
 
-    let (candidate, hash_count) = match result {
-        engine_cpu::EngineStatus::Found {
-            candidate: EngineCandidate { nonce, work, hash },
-            hash_count,
-            ..
-        } => {
-            log::info!(
-                "🎉 {} thread {} found solution! Nonce: {}, Hash: {}",
-                type_str,
-                thread_id,
-                format_u512(nonce),
-                format_u512(hash)
-            );
-            (
-                Some(MiningCandidate { nonce, work, hash }),
+        // Check if already cancelled before starting
+        if cancel_flag.load(Ordering::Relaxed) {
+            log::debug!("{} worker {} skipping cancelled job", type_str, thread_id);
+            continue;
+        }
+
+        // Generate random starting nonce for this job
+        let start = generate_random_nonce();
+        let end = U512::MAX;
+
+        log::debug!(
+            "{} worker {} processing job: range {} to {}",
+            type_str,
+            thread_id,
+            format_u512(start),
+            format_u512(end)
+        );
+
+        // Execute the search
+        let range = EngineRange { start, end };
+        let result = engine.search_range(&job.ctx, range, &cancel_flag);
+
+        // Process result
+        let (candidate, hash_count) = match result {
+            engine_cpu::EngineStatus::Found {
+                candidate: EngineCandidate { nonce, work, hash },
                 hash_count,
-            )
-        }
-        engine_cpu::EngineStatus::Exhausted { hash_count } => {
-            log::debug!(
-                "{} thread {} exhausted range ({} hashes)",
-                type_str,
-                thread_id,
-                hash_count
-            );
-            (None, hash_count)
-        }
-        engine_cpu::EngineStatus::Cancelled { hash_count } => {
-            log::debug!(
-                "{} thread {} cancelled ({} hashes)",
-                type_str,
-                thread_id,
-                hash_count
-            );
-            (None, hash_count)
-        }
-        engine_cpu::EngineStatus::Running { .. } => {
-            // Should not happen for synchronous search
-            (None, 0)
-        }
-    };
+                ..
+            } => {
+                log::info!(
+                    "🎉 {} worker {} found solution! Nonce: {}, Hash: {}",
+                    type_str,
+                    thread_id,
+                    format_u512(nonce),
+                    format_u512(hash)
+                );
+                (Some(MiningCandidate { nonce, work, hash }), hash_count)
+            }
+            engine_cpu::EngineStatus::Exhausted { hash_count } => {
+                log::debug!(
+                    "{} worker {} exhausted range ({} hashes)",
+                    type_str,
+                    thread_id,
+                    hash_count
+                );
+                (None, hash_count)
+            }
+            engine_cpu::EngineStatus::Cancelled { hash_count } => {
+                log::debug!(
+                    "{} worker {} cancelled ({} hashes)",
+                    type_str,
+                    thread_id,
+                    hash_count
+                );
+                (None, hash_count)
+            }
+            engine_cpu::EngineStatus::Running { .. } => {
+                // Should not happen for synchronous search
+                (None, 0)
+            }
+        };
 
-    let _ = sender.try_send(WorkerResult {
-        thread_id,
-        engine_type,
-        candidate,
-        hash_count,
-        completed: true,
-    });
+        // Send result (non-blocking to avoid deadlock if receiver is full)
+        let _ = result_tx.try_send(WorkerResult {
+            thread_id,
+            engine_type,
+            candidate,
+            hash_count,
+            completed: true,
+        });
+    }
 
-    // Clear GPU thread-local resources
+    // Clean up GPU resources on thread exit
     if engine_type == EngineType::Gpu {
         engine_gpu::GpuEngine::clear_worker_resources();
     }
 
-    log::debug!("{} thread {} finished", type_str, thread_id);
+    log::debug!("{} worker {} exited", type_str, thread_id);
 }
-
-
 
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
-    gpu_batch_duration_ms: Option<u64>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -250,8 +353,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let duration = std::time::Duration::from_millis(gpu_batch_duration_ms.unwrap_or(3000));
-    let engine = match engine_gpu::GpuEngine::try_new(duration) {
+    let engine = match engine_gpu::GpuEngine::try_new() {
         Ok(e) => e,
         Err(e) => {
             if requested_devices.is_some() {
@@ -265,7 +367,11 @@ pub fn resolve_gpu_configuration(
     let available = engine.device_count();
     let count = match requested_devices {
         Some(n) if n > available => {
-            anyhow::bail!("Requested {} GPU devices but only {} available", n, available);
+            anyhow::bail!(
+                "Requested {} GPU devices but only {} available",
+                n,
+                available
+            );
         }
         Some(n) => n,
         None if available == 0 => {
@@ -288,7 +394,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     // Resolve GPU configuration
     let (gpu_engine, gpu_devices) =
-        resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_duration_ms)?;
+        resolve_gpu_configuration(config.gpu_devices)?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
@@ -343,5 +449,3 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     )
     .await
 }
-
-

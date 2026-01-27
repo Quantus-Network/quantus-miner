@@ -24,12 +24,12 @@ enum Command {
         #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
         gpu_devices: Option<usize>,
 
-        /// Target duration for GPU mining batches in milliseconds (default: 3000)
-        #[arg(long = "gpu-batch-duration-ms", env = "MINER_GPU_BATCH_DURATION_MS")]
-        gpu_batch_duration_ms: Option<u64>,
-
         /// Port for Prometheus metrics HTTP endpoint (default: 9900)
-        #[arg(long = "metrics-port", env = "MINER_METRICS_PORT", default_value_t = 9900)]
+        #[arg(
+            long = "metrics-port",
+            env = "MINER_METRICS_PORT",
+            default_value_t = 9900
+        )]
         metrics_port: u16,
 
         /// Enable verbose logging
@@ -80,7 +80,6 @@ async fn main() {
             node_addr,
             cpu_workers,
             gpu_devices,
-            gpu_batch_duration_ms,
             metrics_port,
             verbose,
         } => {
@@ -93,13 +92,15 @@ async fn main() {
                 log::error!("Failed to start metrics exporter: {e:?}");
                 std::process::exit(1);
             }
-            log::info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
+            log::info!(
+                "Metrics available at http://0.0.0.0:{}/metrics",
+                metrics_port
+            );
 
             let config = ServiceConfig {
                 node_addr,
                 cpu_workers,
                 gpu_devices,
-                gpu_batch_duration_ms,
             };
 
             if let Err(e) = run(config).await {
@@ -137,7 +138,7 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     // Initialize GPU engine
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices, None) {
+        match miner_service::resolve_gpu_configuration(gpu_devices) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);
@@ -149,7 +150,11 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
-    println!("CPU Workers: {} (Available: {})", effective_cpu_workers, num_cpus::get());
+    println!(
+        "CPU Workers: {} (Available: {})",
+        effective_cpu_workers,
+        num_cpus::get()
+    );
     println!("GPU Devices: {}", effective_gpu_devices);
     println!("Duration: {} seconds", duration);
     println!();
@@ -203,7 +208,9 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
             let worker_start = U512::from(worker_id as u64).saturating_mul(stride);
             let worker_range = EngineRange {
                 start: worker_start,
-                end: worker_start.saturating_add(U512::from(nonces_per_batch)).saturating_sub(U512::from(1u64)),
+                end: worker_start
+                    .saturating_add(U512::from(nonces_per_batch))
+                    .saturating_sub(U512::from(1u64)),
             };
 
             loop {

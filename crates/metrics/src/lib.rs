@@ -88,8 +88,11 @@ static HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 // ---------------------------------------------------------------------------
 
 static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
-    let g = IntGauge::new("miner_active_jobs", "Number of currently running mining jobs")
-        .expect("create miner_active_jobs");
+    let g = IntGauge::new(
+        "miner_active_jobs",
+        "Number of currently running mining jobs",
+    )
+    .expect("create miner_active_jobs");
     REGISTRY
         .register(Box::new(g.clone()))
         .expect("register miner_active_jobs");
@@ -140,7 +143,7 @@ static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
 // ---------------------------------------------------------------------------
 
 /// Tracks cumulative hashes to compute rolling hash rates.
-/// 
+///
 /// The hash rate is computed as total_hashes / elapsed_time since mining started.
 /// Call `reset()` when a new mining session begins to get accurate rates.
 struct HashRateTracker {

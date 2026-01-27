@@ -194,7 +194,8 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 @group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
-@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads (logical), nonces_per_thread, total_nonces (logical nonces in this dispatch), threads_per_workgroup]
+@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 4>; // [total_threads, nonces_per_thread, total_nonces, cancel_check_interval]
+@group(0) @binding(5) var<storage, read> cancel_flag: array<u32, 1>; // 0 = running, 1 = cancel requested
 
 // Goldilocks field element represented as [limb0, limb1]
 // where the value is limb0 + limb1*2^32
@@ -805,8 +806,11 @@ fn is_below_target(hash: array<u32, 16>, difficulty_tgt: array<u32, 16>) -> bool
 // Main mining kernel
 @compute @workgroup_size(256)
 fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // If solution already found, exit early
+    // If solution already found or cancelled, exit early
     if (atomicLoad(&results[0]) != 0u) {
+        return;
+    }
+    if (cancel_flag[0] != 0u) {
         return;
     }
 
@@ -815,6 +819,7 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let total_threads = dispatch_config[0];        // Total logical threads in this dispatch
     let nonces_per_thread = dispatch_config[1];    // Nonces processed by each thread
     let total_nonces = dispatch_config[2];         // Total logical nonces this dispatch should cover
+    let cancel_check_interval = dispatch_config[3]; // How often to check cancel flag
 
     // Guard against threads beyond configured total_threads
     if (thread_id >= total_threads) {
@@ -829,6 +834,14 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let logical_index = base_index + j;
         if (logical_index >= total_nonces) {
             break;
+        }
+
+        // Periodic checks for early exit
+        // Check cancel flag every cancel_check_interval iterations
+        if (cancel_check_interval > 0u && (j % cancel_check_interval) == 0u) {
+            if (cancel_flag[0] != 0u) {
+                return;
+            }
         }
 
         // Check if solution already found (early exit for entire dispatch)

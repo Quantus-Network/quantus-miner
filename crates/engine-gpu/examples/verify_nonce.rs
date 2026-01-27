@@ -1,8 +1,7 @@
-use engine_cpu::{BaselineCpuEngine, EngineStatus, MinerEngine, Range};
+use engine_cpu::{EngineStatus, FastCpuEngine, MinerEngine, Range};
 use engine_gpu::GpuEngine;
 use primitive_types::U512;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 fn main() {
     // Initialize logging
@@ -17,7 +16,7 @@ fn main() {
     // Use a fixed header and easy difficulty (1) so any nonce is valid
     let header = [1u8; 32];
     let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
-    let cpu_engine = BaselineCpuEngine::new();
+    let cpu_engine = FastCpuEngine::new();
     let ctx = cpu_engine.prepare_context(header, difficulty);
 
     log::info!("Context prepared. Difficulty: {}", difficulty);
@@ -26,7 +25,7 @@ fn main() {
 
     // 3. Verify with GPU engine
     log::info!("Initializing GPU engine...");
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
 
     // Search a small range around the valid nonce
     let gpu_range = Range {
