@@ -5,11 +5,10 @@ use pow_core::JobContext;
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     // Small range: 10K nonces - reasonable for benchmarking
@@ -59,7 +58,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
 
 fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     // Medium range: 100K nonces
@@ -109,7 +108,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
 
 fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     // Large range: 1M nonces - where GPU should really shine
@@ -159,7 +158,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
 
 fn bench_solution_finding(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     // Range where we expect to find solutions quickly
@@ -209,7 +208,7 @@ fn bench_solution_finding(c: &mut Criterion) {
 
 fn bench_throughput_per_second(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     // Fixed time benchmark - see how many hashes we can do in 1 second
@@ -258,7 +257,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
 }
 
 fn bench_gpu_batch_efficiency(c: &mut Criterion) {
-    let gpu_engine = GpuEngine::new(Duration::from_millis(3000));
+    let gpu_engine = GpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
 
     let mut group = c.benchmark_group("gpu_batch_sizes");
