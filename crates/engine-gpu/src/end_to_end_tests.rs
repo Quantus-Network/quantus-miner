@@ -230,10 +230,7 @@ pub async fn test_end_to_end_mining(
             );
 
             // Verify hash is below target (should always pass with difficulty 1)
-            assert!(
-                gpu_hash <= ctx.target,
-                "Hash is not below target!"
-            );
+            assert!(gpu_hash <= ctx.target, "Hash is not below target!");
 
             println!("✅ End-to-End Test Passed!");
         } else {

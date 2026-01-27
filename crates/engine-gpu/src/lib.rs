@@ -162,7 +162,8 @@ impl Default for GpuEngine {
 
 impl GpuEngine {
     pub fn new() -> Self {
-        block_on(Self::init(DEFAULT_CANCEL_CHECK_INTERVAL)).expect("Failed to initialize GPU engine")
+        block_on(Self::init(DEFAULT_CANCEL_CHECK_INTERVAL))
+            .expect("Failed to initialize GPU engine")
     }
 
     /// Create a new GPU engine with a custom cancel check interval.
@@ -176,7 +177,9 @@ impl GpuEngine {
     }
 
     /// Try to initialize the GPU engine with a custom cancel check interval.
-    pub fn try_with_cancel_interval(cancel_check_interval: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn try_with_cancel_interval(
+        cancel_check_interval: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         block_on(Self::init(cancel_check_interval))
     }
 
@@ -346,7 +349,10 @@ impl MinerEngine for GpuEngine {
         let gpu_ctx = &self.contexts[device_index];
 
         // Calculate range size (capped at u32::MAX for dispatch config)
-        let range_size_u512 = range.end.saturating_sub(range.start).saturating_add(U512::one());
+        let range_size_u512 = range
+            .end
+            .saturating_sub(range.start)
+            .saturating_add(U512::one());
         let range_size = if range_size_u512 > U512::from(u32::MAX) {
             u32::MAX as u64
         } else {

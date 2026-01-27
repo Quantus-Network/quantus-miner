@@ -393,8 +393,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let effective_cpus = num_cpus::get().max(1);
 
     // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) =
-        resolve_gpu_configuration(config.gpu_devices)?;
+    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(config.gpu_devices)?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
