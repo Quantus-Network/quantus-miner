@@ -1451,17 +1451,12 @@ dependencies = [
  "getrandom 0.2.16",
  "hex",
  "log",
- "metrics",
- "miner-telemetry",
  "num_cpus",
  "pow-core",
  "primitive-types 0.13.1",
  "quantus-miner-api",
  "quinn",
  "rustls 0.21.12",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
  "tokio",
 ]
 
