@@ -71,15 +71,21 @@ pub struct MiningCandidate {
     pub hash: U512,
 }
 
+/// Generate a random U512 nonce starting point.
+fn generate_random_nonce() -> U512 {
+    let mut bytes = [0u8; 64];
+    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
+    U512::from_big_endian(&bytes)
+}
+
 /// Spawn mining worker threads and return a receiver for results.
 ///
-/// Workers will search the nonce range and send results via the channel.
+/// Each worker starts from a completely random nonce and searches forward to U512::MAX.
+/// This avoids any overlap since the nonce space (2^512) is astronomically large.
 /// Set `cancel_flag` to true to stop all workers early.
 pub fn spawn_mining_workers(
     header_hash: [u8; 32],
     difficulty: U512,
-    nonce_start: U512,
-    nonce_end: U512,
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
     cpu_workers: usize,
@@ -90,11 +96,6 @@ pub fn spawn_mining_workers(
     let chan_capacity = total_workers.saturating_mul(64).max(256);
     let (sender, receiver) = bounded(chan_capacity);
 
-    let total_range = nonce_end
-        .saturating_sub(nonce_start)
-        .saturating_add(U512::from(1u64));
-
-    let mut current_start = nonce_start;
     let mut thread_id = 0;
     let mut handles = Vec::with_capacity(total_workers);
 
@@ -104,19 +105,13 @@ pub fn spawn_mining_workers(
         gpu_devices
     );
 
-    // Spawn CPU workers
+    // Spawn CPU workers - each with a random starting nonce
     if cpu_workers > 0 {
         if let Some(ref engine) = cpu_engine {
             let ctx = engine.prepare_context(header_hash, difficulty);
-            let cpu_range_end = current_start.saturating_add(
-                total_range
-                    .saturating_mul(U512::from(cpu_workers))
-                    / U512::from(total_workers),
-            );
-            let partitions = compute_partitions(current_start, cpu_range_end.saturating_sub(U512::from(1u64)), cpu_workers);
-            current_start = cpu_range_end;
 
-            for (start, end) in partitions {
+            for _ in 0..cpu_workers {
+                let start = generate_random_nonce();
                 let cancel = cancel_flag.clone();
                 let tx = sender.clone();
                 let ctx = ctx.clone();
@@ -124,7 +119,7 @@ pub fn spawn_mining_workers(
                 let tid = thread_id;
 
                 let handle = thread::spawn(move || {
-                    run_worker(tid, EngineType::Cpu, eng.as_ref(), ctx, start, end, cancel, tx);
+                    run_worker(tid, EngineType::Cpu, eng.as_ref(), ctx, start, U512::MAX, cancel, tx);
                 });
                 handles.push(handle);
                 thread_id += 1;
@@ -132,13 +127,13 @@ pub fn spawn_mining_workers(
         }
     }
 
-    // Spawn GPU workers
+    // Spawn GPU workers - each with a random starting nonce
     if gpu_devices > 0 {
         if let Some(ref engine) = gpu_engine {
             let ctx = engine.prepare_context(header_hash, difficulty);
-            let partitions = compute_partitions(current_start, nonce_end, gpu_devices);
 
-            for (start, end) in partitions {
+            for _ in 0..gpu_devices {
+                let start = generate_random_nonce();
                 let cancel = cancel_flag.clone();
                 let tx = sender.clone();
                 let ctx = ctx.clone();
@@ -146,7 +141,7 @@ pub fn spawn_mining_workers(
                 let tid = thread_id;
 
                 let handle = thread::spawn(move || {
-                    run_worker(tid, EngineType::Gpu, eng.as_ref(), ctx, start, end, cancel, tx);
+                    run_worker(tid, EngineType::Gpu, eng.as_ref(), ctx, start, U512::MAX, cancel, tx);
                 });
                 handles.push(handle);
                 thread_id += 1;
@@ -242,34 +237,7 @@ fn run_worker(
     log::debug!("{} thread {} finished", type_str, thread_id);
 }
 
-/// Compute partitions of a nonce range for the given number of workers.
-fn compute_partitions(start: U512, end: U512, workers: usize) -> Vec<(U512, U512)> {
-    if workers == 0 {
-        return vec![];
-    }
 
-    let total_range = end.saturating_sub(start).saturating_add(U512::from(1u64));
-    let workers_u512 = U512::from(workers as u64);
-    let range_per = total_range / workers_u512;
-    let remainder = total_range % workers_u512;
-
-    let mut partitions = Vec::with_capacity(workers);
-    let mut current = start;
-
-    for i in 0..workers {
-        let mut partition_end = current.saturating_add(range_per).saturating_sub(U512::from(1u64));
-        if i == workers - 1 {
-            partition_end = partition_end.saturating_add(remainder);
-        }
-        if partition_end > end {
-            partition_end = end;
-        }
-        partitions.push((current, partition_end));
-        current = partition_end.saturating_add(U512::from(1u64));
-    }
-
-    partitions
-}
 
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
@@ -376,31 +344,4 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     .await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_compute_partitions_single_worker() {
-        let partitions = compute_partitions(U512::from(0u64), U512::from(99u64), 1);
-        assert_eq!(partitions.len(), 1);
-        assert_eq!(partitions[0], (U512::from(0u64), U512::from(99u64)));
-    }
-
-    #[test]
-    fn test_compute_partitions_multiple_workers() {
-        let partitions = compute_partitions(U512::from(0u64), U512::from(99u64), 4);
-        assert_eq!(partitions.len(), 4);
-        // Each gets 25 nonces
-        assert_eq!(partitions[0], (U512::from(0u64), U512::from(24u64)));
-        assert_eq!(partitions[1], (U512::from(25u64), U512::from(49u64)));
-        assert_eq!(partitions[2], (U512::from(50u64), U512::from(74u64)));
-        assert_eq!(partitions[3], (U512::from(75u64), U512::from(99u64)));
-    }
-
-    #[test]
-    fn test_compute_partitions_zero_workers() {
-        let partitions = compute_partitions(U512::from(0u64), U512::from(99u64), 0);
-        assert!(partitions.is_empty());
-    }
-}

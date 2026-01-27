@@ -116,6 +116,9 @@ async fn handle_connection(
     metrics::set_workers((cpu_workers + gpu_devices) as i64);
     metrics::set_cpu_workers(cpu_workers as i64);
     metrics::set_gpu_devices(gpu_devices as i64);
+    
+    // Reset hash rate tracker for accurate rate calculation
+    metrics::reset_hash_tracker();
 
     // Channel for receiving mining results
     let (result_tx, mut result_rx) = mpsc::channel::<MiningResult>(16);
@@ -186,15 +189,7 @@ async fn handle_connection(
                         current_cancel = Some(cancel.clone());
                         current_job_id = Some(request.job_id.clone());
 
-                        // Generate random nonce start
-                        let nonce_start = generate_random_nonce_start();
-                        let nonce_end = U512::MAX;
-
-                        log::debug!(
-                            "Starting job {} with nonce start: {:x}...",
-                            request.job_id,
-                            nonce_start
-                        );
+                        log::debug!("Starting job {}", request.job_id);
 
                         // Spawn mining task
                         let job_id = request.job_id.clone();
@@ -207,8 +202,6 @@ async fn handle_connection(
                                 job_id,
                                 header_hash,
                                 difficulty,
-                                nonce_start,
-                                nonce_end,
                                 cpu_eng,
                                 gpu_eng,
                                 cpu_workers,
@@ -267,8 +260,6 @@ async fn run_mining_job(
     job_id: String,
     header_hash: [u8; 32],
     difficulty: U512,
-    nonce_start: U512,
-    nonce_end: U512,
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
     cpu_workers: usize,
@@ -281,12 +272,10 @@ async fn run_mining_job(
     // Mark job as active
     metrics::set_active_jobs(1);
 
-    // Spawn worker threads
+    // Spawn worker threads - each worker generates its own random starting nonce
     let (receiver, _handles) = spawn_mining_workers(
         header_hash,
         difficulty,
-        nonce_start,
-        nonce_end,
         cpu_engine,
         gpu_engine,
         cpu_workers,
@@ -397,13 +386,6 @@ async fn run_mining_job(
             }
         }
     }
-}
-
-/// Generate a random 512-bit nonce starting point.
-fn generate_random_nonce_start() -> U512 {
-    let mut bytes = [0u8; 64];
-    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
-    U512::from_big_endian(&bytes)
 }
 
 /// Certificate verifier that accepts any certificate (for self-signed certs).

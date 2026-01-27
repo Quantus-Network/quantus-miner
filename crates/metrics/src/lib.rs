@@ -140,13 +140,16 @@ static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
 // ---------------------------------------------------------------------------
 
 /// Tracks cumulative hashes to compute rolling hash rates.
+/// 
+/// The hash rate is computed as total_hashes / elapsed_time since mining started.
+/// Call `reset()` when a new mining session begins to get accurate rates.
 struct HashRateTracker {
-    /// Cumulative CPU hashes
+    /// Cumulative CPU hashes since last reset
     cpu_total: u64,
-    /// Cumulative GPU hashes  
+    /// Cumulative GPU hashes since last reset
     gpu_total: u64,
-    /// When tracking started (or was last reset)
-    start_time: Instant,
+    /// When tracking started - set via reset() when mining begins
+    start_time: Option<Instant>,
 }
 
 impl HashRateTracker {
@@ -154,8 +157,15 @@ impl HashRateTracker {
         Self {
             cpu_total: 0,
             gpu_total: 0,
-            start_time: Instant::now(),
+            start_time: None,
         }
+    }
+
+    /// Reset the tracker - call this when a new mining session starts.
+    fn reset(&mut self) {
+        self.cpu_total = 0;
+        self.gpu_total = 0;
+        self.start_time = Some(Instant::now());
     }
 
     fn record_cpu(&mut self, hashes: u64) {
@@ -169,13 +179,16 @@ impl HashRateTracker {
     }
 
     fn update_rates(&self) {
-        let elapsed = self.start_time.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            let cpu_rate = (self.cpu_total as f64 / elapsed) as i64;
-            let gpu_rate = (self.gpu_total as f64 / elapsed) as i64;
-            CPU_HASH_RATE.set(cpu_rate);
-            GPU_HASH_RATE.set(gpu_rate);
-            HASH_RATE.set(cpu_rate + gpu_rate);
+        if let Some(start) = self.start_time {
+            let elapsed = start.elapsed().as_secs_f64();
+            // Require at least 0.1 seconds of data for meaningful rate
+            if elapsed >= 0.1 {
+                let cpu_rate = (self.cpu_total as f64 / elapsed) as i64;
+                let gpu_rate = (self.gpu_total as f64 / elapsed) as i64;
+                CPU_HASH_RATE.set(cpu_rate);
+                GPU_HASH_RATE.set(gpu_rate);
+                HASH_RATE.set(cpu_rate + gpu_rate);
+            }
         }
     }
 }
@@ -186,6 +199,14 @@ static HASH_TRACKER: Lazy<Mutex<HashRateTracker>> =
 // ---------------------------------------------------------------------------
 // Public API - Hash Recording
 // ---------------------------------------------------------------------------
+
+/// Reset the hash rate tracker - call this when mining starts.
+/// This resets the cumulative hash counts and starts a fresh timing window.
+pub fn reset_hash_tracker() {
+    if let Ok(mut tracker) = HASH_TRACKER.lock() {
+        tracker.reset();
+    }
+}
 
 /// Record CPU hashes and update hash rate metrics.
 pub fn record_cpu_hashes(n: u64) {
