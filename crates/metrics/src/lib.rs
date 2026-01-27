@@ -26,8 +26,7 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    opts, Encoder, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-    TextEncoder,
+    opts, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
 };
 
 #[cfg(feature = "http-exporter")]

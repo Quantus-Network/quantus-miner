@@ -2,6 +2,20 @@ use primitive_types::U512;
 
 pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
 
+/// Format a U512 in a human-readable way (scientific notation for large numbers).
+pub fn format_u512(n: U512) -> String {
+    if n.is_zero() {
+        return "0".to_string();
+    }
+    let s = format!("{}", n);
+    let len = s.len();
+    if len <= 12 {
+        s
+    } else {
+        format!("{}e{}", &s[..4], len - 1)
+    }
+}
+
 /// Job context for Bitcoin-style PoW mining with double Poseidon2 hashing
 #[derive(Debug, Clone)]
 pub struct JobContext {

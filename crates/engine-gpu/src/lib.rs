@@ -3,7 +3,7 @@
 
 use engine_cpu::{Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use futures::executor::block_on;
-use pow_core::JobContext;
+use pow_core::{format_u512, JobContext};
 use primitive_types::U512;
 use std::cell::RefCell;
 use std::sync::{
@@ -355,10 +355,10 @@ impl MinerEngine for GpuEngine {
         let initial_batch_size = gpu_ctx.batch_size.load(Ordering::Relaxed);
         log::info!(
             target: "gpu_engine",
-            "GPU {} search started: range {}..={} (inclusive), initial batch size: {}",
+            "GPU {} search started: range {}..{}, batch size: {}",
             device_index,
-            range.start,
-            range.end,
+            format_u512(range.start),
+            format_u512(range.end),
             initial_batch_size
         );
 
@@ -551,10 +551,10 @@ impl MinerEngine for GpuEngine {
 
                 log::info!(
                     target: "gpu_engine",
-                    "GPU {} found solution! Nonce: {}, Hash: {:x}",
+                    "GPU {} found solution! Nonce: {}, Hash: {}",
                     device_index,
-                    nonce,
-                    hash
+                    format_u512(nonce),
+                    format_u512(hash)
                 );
 
                 drop(data);

@@ -12,6 +12,7 @@ pub mod quic;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
+use pow_core::format_u512;
 use primitive_types::U512;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -162,8 +163,8 @@ fn run_worker(
         "{} thread {} started: range {} to {}",
         engine_type,
         thread_id,
-        start,
-        end
+        format_u512(start),
+        format_u512(end)
     );
 
     let range = EngineRange { start, end };
@@ -176,11 +177,11 @@ fn run_worker(
             ..
         } => {
             log::info!(
-                "🎉 {} thread {} found solution! Nonce: {}, Hash: {:x}",
+                "🎉 {} thread {} found solution! Nonce: {}, Hash: {}",
                 engine_type,
                 thread_id,
-                nonce,
-                hash
+                format_u512(nonce),
+                format_u512(hash)
             );
             (
                 Some(MiningCandidate { nonce, work, hash }),
