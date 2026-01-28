@@ -24,6 +24,10 @@ enum Command {
         #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
         gpu_devices: Option<usize>,
 
+        /// GPU cancel check interval in nonces (default: 10000)
+        #[arg(long = "gpu-cancel-interval", env = "MINER_GPU_CANCEL_INTERVAL")]
+        gpu_cancel_interval: Option<u32>,
+
         /// Port for Prometheus metrics HTTP endpoint (default: 9900)
         #[arg(
             long = "metrics-port",
@@ -80,6 +84,7 @@ async fn main() {
             node_addr,
             cpu_workers,
             gpu_devices,
+            gpu_cancel_interval,
             metrics_port,
             verbose,
         } => {
@@ -101,6 +106,7 @@ async fn main() {
                 node_addr,
                 cpu_workers,
                 gpu_devices,
+                gpu_cancel_interval,
             };
 
             if let Err(e) = run(config).await {
@@ -138,7 +144,7 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     // Initialize GPU engine
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices) {
+        match miner_service::resolve_gpu_configuration(gpu_devices, None) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);

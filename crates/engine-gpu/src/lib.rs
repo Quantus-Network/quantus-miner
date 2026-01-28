@@ -3,7 +3,7 @@
 
 use engine_cpu::{Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use futures::executor::block_on;
-use pow_core::{format_u512, JobContext};
+use pow_core::{format_hashrate, format_u512, JobContext};
 use primitive_types::U512;
 use std::cell::RefCell;
 use std::sync::{
@@ -565,15 +565,15 @@ impl MinerEngine for GpuEngine {
 
             let hash_rate = hashes_computed as f64 / search_elapsed.as_secs_f64();
 
-            log::info!(
+            log::debug!(
                 target: "gpu_engine",
-                "GPU {} found solution! Nonce: {}, Hash: {} ({} hashes in {:.2}s, {:.2} MH/s)",
+                "GPU {} found solution! Nonce: {}, Hash: {} ({} hashes in {:.2}s, {})",
                 device_index,
                 format_u512(nonce),
                 format_u512(hash),
                 hashes_computed,
                 search_elapsed.as_secs_f64(),
-                hash_rate / 1_000_000.0
+                format_hashrate(hash_rate)
             );
 
             return EngineStatus::Found {
@@ -611,11 +611,11 @@ impl MinerEngine for GpuEngine {
         let hash_rate = dispatched_nonces as f64 / search_elapsed.as_secs_f64();
         log::info!(
             target: "gpu_engine",
-            "GPU {} search exhausted: {} hashes in {:.2}s ({:.2} MH/s)",
+            "GPU {} search exhausted: {} hashes in {:.2}s ({})",
             device_index,
             dispatched_nonces,
             search_elapsed.as_secs_f64(),
-            hash_rate / 1_000_000.0
+            format_hashrate(hash_rate)
         );
 
         EngineStatus::Exhausted {

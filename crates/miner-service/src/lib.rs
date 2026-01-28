@@ -27,6 +27,8 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
+    /// GPU cancel check interval in nonces (None = use default of 10,000)
+    pub gpu_cancel_interval: Option<u32>,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -42,6 +44,7 @@ impl Default for ServiceConfig {
             node_addr: "127.0.0.1:9833".parse().unwrap(),
             cpu_workers: None,
             gpu_devices: None,
+            gpu_cancel_interval: None,
         }
     }
 }
@@ -312,8 +315,8 @@ fn worker_loop(
         // Check if epoch changed during search - if so, this result is stale
         let actual_epoch = current_epoch.load(Ordering::SeqCst);
         if actual_epoch != job_epoch {
-            log::debug!(
-                "{} worker {} discarding stale result (job epoch {} != current epoch {})",
+            log::warn!(
+                "⏰ {} worker {} discarding stale result (job epoch {} != current epoch {})",
                 type_str,
                 thread_id,
                 job_epoch,
@@ -398,6 +401,7 @@ fn worker_loop(
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
+    cancel_interval: Option<u32>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -405,7 +409,11 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = match engine_gpu::GpuEngine::try_new() {
+    let engine = match cancel_interval {
+        Some(interval) => engine_gpu::GpuEngine::try_with_cancel_interval(interval),
+        None => engine_gpu::GpuEngine::try_new(),
+    };
+    let engine = match engine {
         Ok(e) => e,
         Err(e) => {
             if requested_devices.is_some() {
@@ -445,7 +453,8 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let effective_cpus = num_cpus::get().max(1);
 
     // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(config.gpu_devices)?;
+    let (gpu_engine, gpu_devices) =
+        resolve_gpu_configuration(config.gpu_devices, config.gpu_cancel_interval)?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {

@@ -16,6 +16,19 @@ pub fn format_u512(n: U512) -> String {
     }
 }
 
+/// Format a hash rate with appropriate units (H/s, KH/s, MH/s, GH/s).
+pub fn format_hashrate(hashes_per_sec: f64) -> String {
+    if hashes_per_sec >= 1_000_000_000.0 {
+        format!("{:.2} GH/s", hashes_per_sec / 1_000_000_000.0)
+    } else if hashes_per_sec >= 1_000_000.0 {
+        format!("{:.2} MH/s", hashes_per_sec / 1_000_000.0)
+    } else if hashes_per_sec >= 1_000.0 {
+        format!("{:.2} KH/s", hashes_per_sec / 1_000.0)
+    } else {
+        format!("{:.2} H/s", hashes_per_sec)
+    }
+}
+
 /// Job context for Bitcoin-style PoW mining with double Poseidon2 hashing
 #[derive(Debug, Clone)]
 pub struct JobContext {

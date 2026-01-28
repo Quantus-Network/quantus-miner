@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::RecvTimeoutError;
 use engine_cpu::MinerEngine;
 use primitive_types::U512;
 use quinn::{ClientConfig, Endpoint};
@@ -19,6 +18,7 @@ use quantus_miner_api::{
 };
 
 use crate::{EngineType, WorkerPool};
+use pow_core::format_hashrate;
 
 /// Connect to a node and start mining.
 ///
@@ -78,8 +78,8 @@ async fn establish_connection(
     let mut client_config = ClientConfig::new(Arc::new(crypto));
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
-    transport_config.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
     client_config.transport_config(Arc::new(transport_config));
 
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
@@ -98,20 +98,37 @@ async fn establish_connection(
     Ok((connection, send, recv))
 }
 
+/// Helper to send a message while monitoring connection health.
+async fn send_message_checked(
+    connection: &quinn::Connection,
+    send: &mut quinn::SendStream,
+    msg: &MinerMessage,
+) -> anyhow::Result<()> {
+    tokio::select! {
+        biased;
+        reason = connection.closed() => {
+            Err(anyhow::anyhow!("Connection closed: {}", reason))
+        }
+        result = write_message(send, msg) => {
+            result.map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))
+        }
+    }
+}
+
 /// Handle an established connection, receiving jobs and sending results.
 async fn handle_connection(
-    _connection: quinn::Connection,
+    connection: quinn::Connection,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     worker_pool: &WorkerPool,
 ) -> anyhow::Result<()> {
+    use crossbeam_channel::RecvTimeoutError;
+
     // Set static metrics once per connection
     metrics::set_effective_cpus(num_cpus::get() as i64);
     metrics::set_workers(worker_pool.worker_count() as i64);
     metrics::set_cpu_workers(worker_pool.cpu_worker_count() as i64);
     metrics::set_gpu_devices(worker_pool.gpu_worker_count() as i64);
-
-    // Reset hash rate tracker for accurate rate calculation
     metrics::reset_hash_tracker();
 
     // Current job state
@@ -119,18 +136,19 @@ async fn handle_connection(
     let mut job_start_time: Option<Instant> = None;
     let mut cpu_hashes: u64 = 0;
     let mut gpu_hashes: u64 = 0;
+    let mut result_sent_for_current_job = false;
 
     log::info!("⛏️ Waiting for mining jobs from node...");
 
     loop {
         // Poll for worker results (non-blocking via spawn_blocking)
-        let poll_result = if current_job_id.is_some() {
+        let poll_result = if current_job_id.is_some() && !result_sent_for_current_job {
             let rx = worker_pool.result_receiver().clone();
             tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_millis(10)))
                 .await
                 .unwrap_or(Err(RecvTimeoutError::Disconnected))
         } else {
-            Err(RecvTimeoutError::Timeout) // No active job, just skip
+            Err(RecvTimeoutError::Timeout)
         };
 
         // Handle worker result if any
@@ -147,56 +165,51 @@ async fn handle_connection(
                 }
             }
 
-            // Check if solution found
+            // Only send result for the FIRST solution found
             if let Some(candidate) = worker_result.candidate {
-                if let Some(job_id) = current_job_id.take() {
-                    let total_hashes = cpu_hashes + gpu_hashes;
-                    let elapsed = job_start_time
-                        .map(|t| t.elapsed().as_secs_f64())
-                        .unwrap_or(0.0);
-                    let hash_rate = if elapsed > 0.0 {
-                        total_hashes as f64 / elapsed
-                    } else {
-                        0.0
-                    };
+                if !result_sent_for_current_job {
+                    if let Some(ref job_id) = current_job_id {
+                        let total_hashes = cpu_hashes + gpu_hashes;
+                        let elapsed = job_start_time
+                            .map(|t| t.elapsed().as_secs_f64())
+                            .unwrap_or(0.0);
 
-                    log::info!(
-                        "⛏️ Job {} completed: {} hashes in {:.2}s ({:.2} MH/s)",
-                        job_id,
-                        total_hashes,
-                        elapsed,
-                        hash_rate / 1_000_000.0
-                    );
+                        log::info!(
+                            "⛏️ Job {} completed: {} hashes in {:.2}s ({})",
+                            job_id,
+                            total_hashes,
+                            elapsed,
+                            format_hashrate(total_hashes as f64 / elapsed.max(0.001))
+                        );
 
-                    // Signal other workers to stop
-                    worker_pool.cancel();
-                    metrics::set_active_jobs(0);
+                        // Mark as sent BEFORE sending to prevent duplicates
+                        result_sent_for_current_job = true;
+                        worker_pool.cancel();
+                        metrics::set_active_jobs(0);
 
-                    let result = MiningResult {
-                        status: ApiResponseStatus::Completed,
-                        job_id,
-                        nonce: Some(format!("{:x}", candidate.nonce)),
-                        work: Some(hex::encode(candidate.work)),
-                        hash_count: total_hashes,
-                        elapsed_time: elapsed,
-                    };
+                        let result = MiningResult {
+                            status: ApiResponseStatus::Completed,
+                            job_id: job_id.clone(),
+                            nonce: Some(format!("{:x}", candidate.nonce)),
+                            work: Some(hex::encode(candidate.work)),
+                            hash_count: total_hashes,
+                            elapsed_time: elapsed,
+                        };
 
-                    let msg = MinerMessage::JobResult(result);
-                    if let Err(e) = write_message(&mut send, &msg).await {
-                        return Err(anyhow::anyhow!("Failed to send result: {}", e));
+                        let msg = MinerMessage::JobResult(result);
+                        send_message_checked(&connection, &mut send, &msg).await?;
                     }
-
-                    // Reset for next job
-                    cpu_hashes = 0;
-                    gpu_hashes = 0;
-                    job_start_time = None;
                 }
             }
         }
 
-        // Check for incoming messages (with short timeout to allow result polling)
+        // Check for incoming messages and connection health
         tokio::select! {
             biased;
+
+            reason = connection.closed() => {
+                return Err(anyhow::anyhow!("Connection closed: {}", reason));
+            }
 
             msg_result = read_message(&mut recv) => {
                 match msg_result {
@@ -207,7 +220,7 @@ async fn handle_connection(
                             &request.mining_hash[..8]
                         );
 
-                        // Parse and validate request
+                        // Parse header hash
                         let header_hash: [u8; 32] = match hex::decode(&request.mining_hash) {
                             Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
                             _ => {
@@ -221,11 +234,12 @@ async fn handle_connection(
                                     elapsed_time: 0.0,
                                 };
                                 let msg = MinerMessage::JobResult(result);
-                                write_message(&mut send, &msg).await?;
+                                send_message_checked(&connection, &mut send, &msg).await?;
                                 continue;
                             }
                         };
 
+                        // Parse difficulty
                         let difficulty = match U512::from_dec_str(&request.distance_threshold) {
                             Ok(d) => d,
                             Err(_) => {
@@ -239,22 +253,21 @@ async fn handle_connection(
                                     elapsed_time: 0.0,
                                 };
                                 let msg = MinerMessage::JobResult(result);
-                                write_message(&mut send, &msg).await?;
+                                send_message_checked(&connection, &mut send, &msg).await?;
                                 continue;
                             }
                         };
 
-                        // Reset hash counters for new job
+                        // Reset state for new job
                         cpu_hashes = 0;
                         gpu_hashes = 0;
                         job_start_time = Some(Instant::now());
                         current_job_id = Some(request.job_id.clone());
+                        result_sent_for_current_job = false;
 
                         log::debug!("Starting job {}", request.job_id);
                         metrics::set_active_jobs(1);
 
-                        // Start job via persistent worker pool
-                        // This cancels any previous job and dispatches to all workers
                         worker_pool.start_job(header_hash, difficulty);
                     }
                     Ok(MinerMessage::JobResult(_)) => {
@@ -263,16 +276,16 @@ async fn handle_connection(
                     Ok(MinerMessage::Ready) => {
                         log::warn!("Received unexpected Ready from node");
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Err(anyhow::anyhow!("Node disconnected"));
+                    }
                     Err(e) => {
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                            return Err(anyhow::anyhow!("Node disconnected"));
-                        }
                         return Err(anyhow::anyhow!("Read error: {}", e));
                     }
                 }
             }
 
-            // Short sleep to yield to other tasks when no messages
+            // Short sleep to yield when no messages
             _ = tokio::time::sleep(Duration::from_millis(1)) => {}
         }
     }
