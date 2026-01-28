@@ -538,7 +538,7 @@ impl MinerEngine for GpuEngine {
             let work = nonce.to_big_endian();
 
             // Calculate hashes computed based on GPU parallel execution model.
-            // 
+            //
             // GPU threads process nonces in parallel, not sequentially:
             // - Thread T processes nonces: start + T*nonces_per_thread + 0, +1, +2, ...
             // - All threads run approximately in lockstep (SIMT execution)
@@ -602,7 +602,9 @@ impl MinerEngine for GpuEngine {
                 search_elapsed.as_secs_f64(),
                 estimated_hashes
             );
-            return EngineStatus::Cancelled { hash_count: estimated_hashes };
+            return EngineStatus::Cancelled {
+                hash_count: estimated_hashes,
+            };
         }
 
         // Range exhausted without finding solution - all dispatched nonces were processed

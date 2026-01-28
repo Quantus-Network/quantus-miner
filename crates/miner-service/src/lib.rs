@@ -204,7 +204,10 @@ impl WorkerPool {
 
         // Create job context (shared across all workers)
         let ctx = pow_core::JobContext::new(header_hash, difficulty);
-        let job = MiningJob { ctx, epoch: new_epoch };
+        let job = MiningJob {
+            ctx,
+            epoch: new_epoch,
+        };
 
         // Dispatch job to all workers
         for tx in &self.job_senders {
@@ -213,7 +216,11 @@ impl WorkerPool {
             let _ = tx.try_send(job.clone());
         }
 
-        log::debug!("Job dispatched to {} workers (epoch {})", self.job_senders.len(), new_epoch);
+        log::debug!(
+            "Job dispatched to {} workers (epoch {})",
+            self.job_senders.len(),
+            new_epoch
+        );
     }
 
     /// Cancel the current job.
