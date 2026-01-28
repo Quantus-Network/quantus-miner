@@ -553,21 +553,17 @@ dependencies = [
 name = "engine-cpu"
 version = "2.1.2"
 dependencies = [
- "anyhow",
  "criterion",
  "hex",
- "log",
  "pow-core",
  "primitive-types 0.13.1",
  "rand 0.8.5",
- "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "engine-gpu"
 version = "2.1.2"
 dependencies = [
- "anyhow",
  "bytemuck",
  "criterion",
  "engine-cpu",
@@ -577,13 +573,11 @@ dependencies = [
  "log",
  "pow-core",
  "primitive-types 0.13.1",
- "qp-plonky2",
  "qp-plonky2-field",
  "qp-poseidon-constants",
  "qp-poseidon-core",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "thiserror 1.0.69",
  "wgpu",
 ]
 
@@ -809,10 +803,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -948,7 +940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash",
- "rayon",
  "serde",
 ]
 
@@ -1479,7 +1470,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.23.1",
- "url",
  "uuid",
 ]
 
@@ -1897,9 +1887,6 @@ name = "plonky2_maybe_rayon"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1e554181dc95243b8d9948ae7bae5759c7fb2502fed28f671f95ef38079406"
-dependencies = [
- "rayon",
-]
 
 [[package]]
 name = "plonky2_util"
@@ -1963,15 +1950,9 @@ dependencies = [
 name = "pow-core"
 version = "2.1.2"
 dependencies = [
- "anyhow",
  "hex",
- "log",
- "num-bigint",
- "num-traits",
  "primitive-types 0.13.1",
- "qp-poseidon-core",
  "qpow-math",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2056,7 +2037,6 @@ checksum = "39530b02faa85964bba211e030afa2d54995b403b0022f88e984c4c65679c4bc"
 dependencies = [
  "ahash",
  "anyhow",
- "getrandom 0.2.17",
  "hashbrown 0.14.5",
  "itertools 0.11.0",
  "keccak-hash",
@@ -2071,11 +2051,9 @@ dependencies = [
  "qp-plonky2-field",
  "qp-poseidon-constants",
  "rand 0.8.5",
- "rand_chacha 0.3.1",
  "serde",
  "static_assertions",
  "unroll",
- "web-time",
 ]
 
 [[package]]
@@ -3315,16 +3293,6 @@ name = "web-sys"
 version = "0.3.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "312e32e551d92129218ea9a2452120f4aabc03529ef03e4d0d82fb2780608598"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "web-time"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

@@ -18,7 +18,6 @@ default = ["baseline", "std"]
 # std feature wires through to dependencies that have separate std/no_std builds.
 std = [
 	"primitive-types/std",
-	"qp-poseidon-core/std",
 ]
 
 # Baseline/reference implementation using BigUint-backed modular exponentiation.
@@ -34,14 +33,8 @@ simd-poseidon2 = []
 gpu-interop = []
 
 [dependencies]
-log = { workspace = true }
 primitive-types = { workspace = true }
-num-bigint = { workspace = true }
-num-traits = { workspace = true }
-qp-poseidon-core = { workspace = true }
 qpow-math = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
