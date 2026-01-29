@@ -315,7 +315,7 @@ fn worker_loop(
         // Check if epoch changed during search - if so, this result is stale
         let actual_epoch = current_epoch.load(Ordering::SeqCst);
         if actual_epoch != job_epoch {
-            log::warn!(
+            log::debug!(
                 "⏰ {} worker {} discarding stale result (job epoch {} != current epoch {})",
                 type_str,
                 thread_id,
