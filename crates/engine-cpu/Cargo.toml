@@ -20,9 +20,6 @@ simd-poseidon2 = ["pow-core/simd-poseidon2"]
 [dependencies]
 pow-core = { path = "../pow-core" }
 primitive-types = { workspace = true }
-log = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }

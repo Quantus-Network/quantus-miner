@@ -3,41 +3,32 @@ name = "miner-service"
 version.workspace = true
 edition.workspace = true
 publish = false
-description = "Service layer: HTTP API, job orchestration, and engine abstraction for the Quantus External Miner"
+description = "QUIC-based mining service for the Quantus External Miner"
 
 [features]
-default = ["cpu", "metrics"]
-# Enable CPU engine by default.
+default = ["cpu"]
 cpu = ["engine-cpu"]
-# Optional metrics/observability (Prometheus endpoint).
-metrics = [
-	"dep:metrics",
-	"metrics/http-exporter",
-]
 
 [dependencies]
 # Workspace-shared deps
-warp = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 hex = { workspace = true }
 primitive-types = { workspace = true }
 log = { workspace = true }
 crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { version = "0.11", features = ["json"] }
+
+# QUIC transport
 quinn = "0.10"
 rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+getrandom = "0.2"
 
-# Protocol types from the node repo (keep API compatibility)
+# Protocol types from the node repo
 quantus-miner-api = { workspace = true }
 
 # Local crates
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
 engine-gpu = { path = "../engine-gpu" }
-metrics = { path = "../metrics", optional = true }
-miner-telemetry = { path = "../miner-telemetry" }
+metrics = { path = "../metrics" }

@@ -11,26 +11,21 @@ description = "GPU mining engine implementation for the Quantus External Miner"
 
 [features]
 # Default to the baseline/reference implementation; enable others as needed.
-default = ["baseline", "metrics"]
+default = ["baseline"]
 
 # Map engine features (pow-core dependency removed for now)
 baseline = []
 simd-poseidon2 = []
-metrics = ["dep:metrics"]
 
 [dependencies]
 engine-cpu = { path = "../engine-cpu" }
 pow-core = { path = "../pow-core" }
-metrics = { path = "../metrics", optional = true }
 primitive-types = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
 qp-poseidon-core = { version = "1.0.2", features = ["p2"] }
 qp-poseidon-constants = { version = "1.0.2" }
-qp-plonky2 = { version = "1.1.1" }
 qp-plonky2-field = { version = "1.1.1" }
-
+plonky2 = { package = "qp-plonky2", version = "1.1.3" }
 
 wgpu = { version = "27.0.1" }                              # GPU compute library
 futures = "0.3"                                            # For async executor

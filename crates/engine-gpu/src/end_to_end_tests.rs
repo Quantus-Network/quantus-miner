@@ -82,8 +82,8 @@ pub async fn test_end_to_end_mining(
     let zeros = vec![0u8; results_size];
     queue.write_buffer(&results_buffer, 0, &zeros);
 
-    // Dispatch config buffer: [total_threads, nonces_per_thread, work_per_batch, threads_per_workgroup]
-    let dispatch_config_data: [u32; 4] = [256, 1, 1, 256];
+    // Dispatch config buffer: [total_threads, nonces_per_thread, total_nonces, cancel_check_interval]
+    let dispatch_config_data: [u32; 4] = [256, 1, 256, 10000];
     let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Dispatch Config Buffer"),
         size: 16,
@@ -94,6 +94,20 @@ pub async fn test_end_to_end_mining(
         &dispatch_config_buffer,
         0,
         bytemuck::cast_slice(&dispatch_config_data),
+    );
+
+    // Cancel flag buffer: 0 = running, 1 = cancel requested
+    let cancel_flag_data: [u32; 1] = [0];
+    let cancel_flag_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Cancel Flag Buffer"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(
+        &cancel_flag_buffer,
+        0,
+        bytemuck::cast_slice(&cancel_flag_data),
     );
 
     // Load Shader
@@ -136,6 +150,10 @@ pub async fn test_end_to_end_mining(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: dispatch_config_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: cancel_flag_buffer.as_entire_binding(),
             },
         ],
     });
@@ -193,18 +211,27 @@ pub async fn test_end_to_end_mining(
             let found_nonce = U512::from_little_endian(&nonce_bytes);
             println!("GPU Nonce: {}", found_nonce);
 
-            assert_eq!(found_nonce, nonce_val, "Nonce mismatch!");
-
-            // Parse hash
+            // Parse hash from GPU result
             let mut hash_bytes = [0u8; 64];
             for i in 0..16 {
                 let bytes = result_u32s[17 + i].to_le_bytes();
                 hash_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
             }
-            let found_hash = U512::from_little_endian(&hash_bytes);
-            println!("GPU Hash: {:x}", found_hash);
+            let gpu_hash = U512::from_little_endian(&hash_bytes);
+            println!("GPU Hash: {:x}", gpu_hash);
 
-            assert_eq!(found_hash, expected_hash, "Hash mismatch!");
+            // Verify: compute hash on CPU for the found nonce and compare
+            let cpu_verified_hash = hash_from_nonce(&ctx, found_nonce);
+            println!("CPU verified hash: {:x}", cpu_verified_hash);
+
+            assert_eq!(
+                gpu_hash, cpu_verified_hash,
+                "GPU hash doesn't match CPU verification for the found nonce!"
+            );
+
+            // Verify hash is below target (should always pass with difficulty 1)
+            assert!(gpu_hash <= ctx.target, "Hash is not below target!");
+
             println!("✅ End-to-End Test Passed!");
         } else {
             println!("❌ GPU did not find solution (should have passed with MAX target)");

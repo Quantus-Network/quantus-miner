@@ -2,6 +2,33 @@ use primitive_types::U512;
 
 pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
 
+/// Format a U512 in a human-readable way (scientific notation for large numbers).
+pub fn format_u512(n: U512) -> String {
+    if n.is_zero() {
+        return "0".to_string();
+    }
+    let s = format!("{}", n);
+    let len = s.len();
+    if len <= 12 {
+        s
+    } else {
+        format!("{}e{}", &s[..4], len - 1)
+    }
+}
+
+/// Format a hash rate with appropriate units (H/s, KH/s, MH/s, GH/s).
+pub fn format_hashrate(hashes_per_sec: f64) -> String {
+    if hashes_per_sec >= 1_000_000_000.0 {
+        format!("{:.2} GH/s", hashes_per_sec / 1_000_000_000.0)
+    } else if hashes_per_sec >= 1_000_000.0 {
+        format!("{:.2} MH/s", hashes_per_sec / 1_000_000.0)
+    } else if hashes_per_sec >= 1_000.0 {
+        format!("{:.2} KH/s", hashes_per_sec / 1_000.0)
+    } else {
+        format!("{:.2} H/s", hashes_per_sec)
+    }
+}
+
 /// Job context for Bitcoin-style PoW mining with double Poseidon2 hashing
 #[derive(Debug, Clone)]
 pub struct JobContext {

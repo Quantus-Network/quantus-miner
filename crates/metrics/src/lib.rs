@@ -1,55 +1,91 @@
 #![deny(rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
-//! Minimal metrics scaffolding for the Quantus External Miner.
+//! Minimal metrics for the Quantus External Miner.
 //!
-//! - Provides a global Prometheus registry and a handful of default metrics.
-//! - Exposes helper functions to update metrics from the service layer.
-//! - Optionally runs a Warp-based HTTP endpoint (/metrics) when the
-//!   `http-exporter` feature is enabled. This is gated at runtime by
-//!   the presence of a metrics port in the CLI (`--metrics-port`).
+//! Exposes a small set of Prometheus metrics for monitoring mining performance:
+//! - `miner_hash_rate`: Total hash rate (CPU + GPU combined)
+//! - `miner_cpu_hash_rate`: CPU-only hash rate
+//! - `miner_gpu_hash_rate`: GPU-only hash rate
+//! - `miner_hashes_total`: Total hashes computed (all time)
+//! - `miner_active_jobs`: Currently running jobs (0 or 1)
+//! - `miner_workers`: Total worker count
+//! - `miner_cpu_workers`: Number of CPU workers
+//! - `miner_gpu_devices`: Number of GPU devices
+//! - `miner_effective_cpus`: Detected CPU cores
 //!
-//! Default metrics:
-//! - miner_jobs_total{status}        : number of jobs by terminal state
-//! - miner_hashes_total              : total nonces tested
-//! - miner_hash_rate                 : current estimated hash rate (nonces/sec)
-//! - miner_http_requests_total{code,endpoint} : HTTP request counts for miner API
-//!
-//! Notes:
-//! - The HTTP exporter is spawned as a background task and does not block.
-//! - If the `http-exporter` feature is disabled, `start_http_exporter` becomes
-//!   a no-op that returns immediately.
-//! - When jobs/threads end, prefer removing gauge label children (series) rather than
-//!   writing a zero; this avoids scrape-timing artifacts and produces cleaner rollups.
-//! - Service-level observability: expose an `active_jobs` gauge and a `mine_requests_total`
-//!   counter (labeled by result) to disambiguate "idle because no jobs" vs "actively mining".
+//! Optionally runs a Warp-based HTTP endpoint (`/metrics`) when the
+//! `http-exporter` feature is enabled.
 
 use once_cell::sync::Lazy;
-use prometheus::{
-    opts, Encoder, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-    TextEncoder,
-};
+use prometheus::{IntCounter, IntGauge, Registry};
+use std::sync::Mutex;
+use std::time::Instant;
 
 #[cfg(feature = "http-exporter")]
-use {anyhow::Result, std::net::SocketAddr, warp::Filter};
+use {
+    anyhow::Result,
+    prometheus::{Encoder, TextEncoder},
+    std::net::SocketAddr,
+    warp::Filter,
+};
 
 #[cfg(not(feature = "http-exporter"))]
 use anyhow::Result;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
-
-// -------------------------------------------------------------------------------------
-// Global Registry and Default Metrics
-// -------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Global Registry
+// ---------------------------------------------------------------------------
 
 static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
-// -------------------------------------------------------------------------------------
-// High-level service metrics
-// -------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Hash Rate Metrics
+// ---------------------------------------------------------------------------
+
+static HASH_RATE: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_hash_rate", "Total hash rate in hashes per second")
+        .expect("create miner_hash_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_hash_rate");
+    g
+});
+
+static CPU_HASH_RATE: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_cpu_hash_rate", "CPU hash rate in hashes per second")
+        .expect("create miner_cpu_hash_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_cpu_hash_rate");
+    g
+});
+
+static GPU_HASH_RATE: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_gpu_hash_rate", "GPU hash rate in hashes per second")
+        .expect("create miner_gpu_hash_rate");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_hash_rate");
+    g
+});
+
+// ---------------------------------------------------------------------------
+// Counter Metrics
+// ---------------------------------------------------------------------------
+
+static HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new("miner_hashes_total", "Total hashes computed")
+        .expect("create miner_hashes_total");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register miner_hashes_total");
+    c
+});
+
+// ---------------------------------------------------------------------------
+// Gauge Metrics
+// ---------------------------------------------------------------------------
 
 static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
     let g = IntGauge::new(
@@ -63,25 +99,37 @@ static ACTIVE_JOBS: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
-static ENGINE_BACKEND_INFO: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_engine_backend",
-            "Engine backend info (label-only gauge set to 1). Labels: engine, backend"
-        ),
-        &["engine", "backend"],
-    )
-    .expect("create miner_engine_backend");
+static WORKERS: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_workers", "Total number of worker threads")
+        .expect("create miner_workers");
     REGISTRY
         .register(Box::new(g.clone()))
-        .expect("register miner_engine_backend");
+        .expect("register miner_workers");
+    g
+});
+
+static CPU_WORKERS: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_cpu_workers", "Number of CPU worker threads")
+        .expect("create miner_cpu_workers");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_cpu_workers");
+    g
+});
+
+static GPU_DEVICES: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("miner_gpu_devices", "Number of GPU devices")
+        .expect("create miner_gpu_devices");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register miner_gpu_devices");
     g
 });
 
 static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
     let g = IntGauge::new(
         "miner_effective_cpus",
-        "Detected logical CPU capacity available to this process (cpuset-aware)",
+        "Detected logical CPU cores available to this process",
     )
     .expect("create miner_effective_cpus");
     REGISTRY
@@ -90,868 +138,167 @@ static EFFECTIVE_CPUS: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
-static MINE_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_mine_requests_total",
-            "Count of /mine requests by result"
-        ),
-        &["result"], // accepted, duplicate, invalid, error
-    )
-    .expect("create miner_mine_requests_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_mine_requests_total");
-    c
-});
+// ---------------------------------------------------------------------------
+// Hash Rate Tracking
+// ---------------------------------------------------------------------------
 
-static JOBS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!("miner_jobs_total", "Number of jobs by status"),
-        &["status"],
-    )
-    .expect("create miner_jobs_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_jobs_total");
-    c
-});
-
-static HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    let c = IntCounter::new("miner_hashes_total", "Total nonces tested")
-        .expect("create miner_hashes_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_hashes_total");
-    c
-});
-
-static HASH_RATE: Lazy<Gauge> = Lazy::new(|| {
-    let g =
-        Gauge::new("miner_hash_rate", "Estimated hash rate (nonces per second)").expect("create");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_hash_rate");
-    g
-});
-
-type JobKey = (String, String); // (engine, job_id)
-type ThreadKey = (String, String, String); // (engine, job_id, thread_id)
-
-#[derive(Debug)]
-struct ThreadState {
-    start: Instant,
-    hashes: u64,
+/// Tracks cumulative hashes to compute rolling hash rates.
+///
+/// The hash rate is computed as total_hashes / elapsed_time since mining started.
+/// Call `reset()` when a new mining session begins to get accurate rates.
+struct HashRateTracker {
+    /// Cumulative CPU hashes since last reset
+    cpu_total: u64,
+    /// Cumulative GPU hashes since last reset
+    gpu_total: u64,
+    /// When tracking started - set via reset() when mining begins
+    start_time: Option<Instant>,
 }
 
-#[derive(Debug)]
-struct JobState {
-    start: Instant,
-    hashes: u64,
-    active_threads: usize,
-}
-
-#[derive(Debug)]
-struct MiningSession {
-    start: Option<Instant>,
-    hashes: u64,
-    active_threads: usize,
-    threads: HashMap<ThreadKey, ThreadState>,
-    jobs: HashMap<JobKey, JobState>,
-}
-
-impl MiningSession {
+impl HashRateTracker {
     fn new() -> Self {
         Self {
-            start: None,
-            hashes: 0,
-            active_threads: 0,
-            threads: HashMap::new(),
-            jobs: HashMap::new(),
+            cpu_total: 0,
+            gpu_total: 0,
+            start_time: None,
+        }
+    }
+
+    /// Reset the tracker - call this when a new mining session starts.
+    fn reset(&mut self) {
+        self.cpu_total = 0;
+        self.gpu_total = 0;
+        self.start_time = Some(Instant::now());
+    }
+
+    fn record_cpu(&mut self, hashes: u64) {
+        self.cpu_total += hashes;
+        self.update_rates();
+    }
+
+    fn record_gpu(&mut self, hashes: u64) {
+        self.gpu_total += hashes;
+        self.update_rates();
+    }
+
+    fn update_rates(&self) {
+        if let Some(start) = self.start_time {
+            let elapsed = start.elapsed().as_secs_f64();
+            // Require at least 0.1 seconds of data for meaningful rate
+            if elapsed >= 0.1 {
+                let cpu_rate = (self.cpu_total as f64 / elapsed) as i64;
+                let gpu_rate = (self.gpu_total as f64 / elapsed) as i64;
+                CPU_HASH_RATE.set(cpu_rate);
+                GPU_HASH_RATE.set(gpu_rate);
+                HASH_RATE.set(cpu_rate + gpu_rate);
+            }
         }
     }
 }
 
-static SESSION: Lazy<Mutex<MiningSession>> = Lazy::new(|| Mutex::new(MiningSession::new()));
+static HASH_TRACKER: Lazy<Mutex<HashRateTracker>> =
+    Lazy::new(|| Mutex::new(HashRateTracker::new()));
 
-static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_http_requests_total",
-            "HTTP requests count by endpoint and status code"
-        ),
-        &["endpoint", "code"],
-    )
-    .expect("create miner_http_requests_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_http_requests_total");
-    c
-});
+// ---------------------------------------------------------------------------
+// Public API - Hash Recording
+// ---------------------------------------------------------------------------
 
-/// Access the global Prometheus registry used by this crate.
-// Engine-aware, per-job, and per-thread labeled metrics
-pub fn set_effective_cpus(n: i64) {
-    EFFECTIVE_CPUS.set(n);
+/// Reset the hash rate tracker - call this when mining starts.
+/// This resets the cumulative hash counts and starts a fresh timing window.
+pub fn reset_hash_tracker() {
+    if let Ok(mut tracker) = HASH_TRACKER.lock() {
+        tracker.reset();
+    }
 }
 
-static JOB_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_job_hashes_total",
-            "Total nonces tested per job and engine"
-        ),
-        &["engine", "job_id"],
-    )
-    .expect("create miner_job_hashes_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_job_hashes_total");
-    c
-});
-
-static JOB_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_job_hash_rate",
-            "Estimated hash rate (nonces per second) per job and engine"
-        ),
-        &["engine", "job_id"],
-    )
-    .expect("create miner_job_hash_rate");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_job_hash_rate");
-    g
-});
-
-static JOB_ESTIMATED_RATE: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_job_estimated_rate",
-            "Estimated work rate (nonces per second) per engine and backend"
-        ),
-        &["engine", "backend"],
-    )
-    .expect("create miner_job_estimated_rate");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_job_estimated_rate");
-    g
-});
-
-static CANDIDATES_FOUND_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_candidates_found_total",
-            "Total candidates found per job and engine"
-        ),
-        &["engine", "job_id"],
-    )
-    .expect("create miner_candidates_found_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_candidates_found_total");
-    c
-});
-
-static CANDIDATES_FALSE_POSITIVE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_candidates_false_positive_total",
-            "Total false-positive candidates rejected by host re-verification per engine"
-        ),
-        &["engine"],
-    )
-    .expect("create miner_candidates_false_positive_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_candidates_false_positive_total");
-    c
-});
-
-static SAMPLE_MISMATCH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_sample_mismatch_total",
-            "Total decision parity mismatches between engine and host per engine"
-        ),
-        &["engine"],
-    )
-    .expect("create miner_sample_mismatch_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_sample_mismatch_total");
-    c
-});
-
-static MISSED_WINNER_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    let c = IntCounter::new(
-        "miner_gpu_g2_missed_winner_total",
-        "Host detected a winner in G2 batch sample but device did not flag early-exit",
-    )
-    .expect("create miner_gpu_g2_missed_winner_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_gpu_g2_missed_winner_total");
-    c
-});
-
-static FOUND_BY_ORIGIN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_found_by_origin_total",
-            "Count of candidates found by origin per engine"
-        ),
-        &["engine", "origin"],
-    )
-    .expect("create miner_found_by_origin_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_found_by_origin_total");
-    c
-});
-
-static THREAD_HASHES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_thread_hashes_total",
-            "Total nonces tested per thread, job, and engine"
-        ),
-        &["engine", "job_id", "thread_id"],
-    )
-    .expect("create miner_thread_hashes_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_thread_hashes_total");
-    c
-});
-
-static THREAD_HASH_RATE: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_thread_hash_rate",
-            "Estimated hash rate (nonces per second) per thread, job, and engine"
-        ),
-        &["engine", "job_id", "thread_id"],
-    )
-    .expect("create miner_thread_hash_rate");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_thread_hash_rate");
-    g
-});
-
-static JOBS_BY_ENGINE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        opts!(
-            "miner_jobs_by_engine_total",
-            "Number of jobs by engine and terminal status"
-        ),
-        &["engine", "status"],
-    )
-    .expect("create miner_jobs_by_engine_total");
-    REGISTRY
-        .register(Box::new(c.clone()))
-        .expect("register miner_jobs_by_engine_total");
-    c
-});
-
-static JOB_STATUS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    let g = IntGaugeVec::new(
-        opts!(
-            "miner_job_status",
-            "Job status gauge (set to 1 for current status)"
-        ),
-        &["engine", "job_id", "status"],
-    )
-    .expect("create miner_job_status");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_job_status");
-    g
-});
-
-static JOB_FOUND_ORIGIN: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_job_found_origin",
-            "Per-job found candidate origin (0=unknown, 1=cpu, 2=gpu-g1, 3=gpu-g2)"
-        ),
-        &["engine", "job_id", "origin"],
-    )
-    .expect("create miner_job_found_origin");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_job_found_origin");
-    g
-});
-
-// -------------------------------------------------------------------------------------
-// GPU-specific metrics
-// -------------------------------------------------------------------------------------
-
-static GPU_DEVICE_COUNT: Lazy<IntGauge> = Lazy::new(|| {
-    let g = IntGauge::new(
-        "miner_gpu_devices_total",
-        "Number of GPU devices available for mining",
-    )
-    .expect("create miner_gpu_devices_total");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_gpu_devices_total");
-    g
-});
-
-static GPU_DEVICE_INFO: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_gpu_device_info",
-            "GPU device information (label-only gauge set to 1). Labels: device_id, name, backend, vendor, device_type"
-        ),
-        &["device_id", "name", "backend", "vendor", "device_type"],
-    )
-    .expect("create miner_gpu_device_info");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_gpu_device_info");
-    g
-});
-
-static GPU_BATCH_SIZE: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_gpu_batch_size",
-            "Current GPU batch size (hashes per batch) per device"
-        ),
-        &["device_id"],
-    )
-    .expect("create miner_gpu_batch_size");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_gpu_batch_size");
-    g
-});
-
-static GPU_WORKGROUPS: Lazy<GaugeVec> = Lazy::new(|| {
-    let g = GaugeVec::new(
-        opts!(
-            "miner_gpu_workgroups",
-            "Number of GPU workgroups dispatched per device"
-        ),
-        &["device_id"],
-    )
-    .expect("create miner_gpu_workgroups");
-    REGISTRY
-        .register(Box::new(g.clone()))
-        .expect("register miner_gpu_workgroups");
-    g
-});
-
-pub fn default_registry() -> &'static Registry {
-    &REGISTRY
+/// Record CPU hashes and update hash rate metrics.
+pub fn record_cpu_hashes(n: u64) {
+    HASHES_TOTAL.inc_by(n);
+    if let Ok(mut tracker) = HASH_TRACKER.lock() {
+        tracker.record_cpu(n);
+    }
 }
 
-// -------------------------------------------------------------------------------------
-// Update Helpers (to be called from the service layer)
-// -------------------------------------------------------------------------------------
-
-/// Increment the total hashes counter by `n` (number of nonces tested).
-// Labeled helpers for engine/job/thread metrics
-//
-// Service-level helpers
-pub fn set_active_jobs(n: i64) {
-    ACTIVE_JOBS.set(n);
+/// Record GPU hashes and update hash rate metrics.
+pub fn record_gpu_hashes(n: u64) {
+    HASHES_TOTAL.inc_by(n);
+    if let Ok(mut tracker) = HASH_TRACKER.lock() {
+        tracker.record_gpu(n);
+    }
 }
 
-pub fn set_engine_backend(engine: &str, backend: &str) {
-    ENGINE_BACKEND_INFO
-        .with_label_values(&[engine, backend])
-        .set(1.0);
+// ---------------------------------------------------------------------------
+// Public API - Hash Rates (for direct setting, kept for compatibility)
+// ---------------------------------------------------------------------------
+
+/// Set the total hash rate (CPU + GPU combined).
+pub fn set_hash_rate(rate: i64) {
+    HASH_RATE.set(rate);
 }
 
-pub fn inc_mine_requests(result: &str) {
-    MINE_REQUESTS_TOTAL.with_label_values(&[result]).inc();
+/// Set the CPU-only hash rate.
+pub fn set_cpu_hash_rate(rate: i64) {
+    CPU_HASH_RATE.set(rate);
 }
 
-pub fn inc_job_hashes(engine: &str, job_id: &str, n: u64) {
-    touch_job(engine, job_id);
-    JOB_HASHES_TOTAL
-        .with_label_values(&[engine, job_id])
-        .inc_by(n);
+/// Set the GPU-only hash rate.
+pub fn set_gpu_hash_rate(rate: i64) {
+    GPU_HASH_RATE.set(rate);
 }
 
-pub fn set_job_hash_rate(engine: &str, job_id: &str, rate: f64) {
-    touch_job(engine, job_id);
-    JOB_HASH_RATE.with_label_values(&[engine, job_id]).set(rate);
-}
+// ---------------------------------------------------------------------------
+// Public API - Counters (kept for compatibility)
+// ---------------------------------------------------------------------------
 
-pub fn set_job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
-    JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, backend])
-        .set(rate);
-}
-
-pub fn set_job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
-    // Compatibility shim: map per-job series to backend="unknown" to avoid cardinality growth
-    JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, "unknown"])
-        .set(rate);
-}
-
-pub fn inc_candidates_found(engine: &str, job_id: &str) {
-    touch_job(engine, job_id);
-    CANDIDATES_FOUND_TOTAL
-        .with_label_values(&[engine, job_id])
-        .inc();
-}
-
-pub fn inc_candidates_false_positive(engine: &str) {
-    CANDIDATES_FALSE_POSITIVE_TOTAL
-        .with_label_values(&[engine])
-        .inc();
-}
-
-pub fn inc_sample_mismatch(engine: &str) {
-    SAMPLE_MISMATCH_TOTAL.with_label_values(&[engine]).inc();
-}
-
-pub fn inc_found_by_origin(engine: &str, origin: &str) {
-    FOUND_BY_ORIGIN_TOTAL
-        .with_label_values(&[engine, origin])
-        .inc();
-}
-
-pub fn inc_gpu_g2_missed_winner() {
-    MISSED_WINNER_TOTAL.inc();
-}
-
-pub fn set_job_found_origin(engine: &str, job_id: &str, origin: &str) {
-    touch_job(engine, job_id);
-    JOB_FOUND_ORIGIN
-        .with_label_values(&[engine, job_id, origin])
-        .set(1.0);
-}
-
-pub fn job_estimated_rate_backend(engine: &str, backend: &str, rate: f64) {
-    JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, backend])
-        .set(rate);
-}
-
-pub fn job_estimated_rate(engine: &str, _job_id: &str, rate: f64) {
-    // Compatibility shim: prefer new API using backend; fallback to backend="unknown"
-    JOB_ESTIMATED_RATE
-        .with_label_values(&[engine, "unknown"])
-        .set(rate);
-}
-
-pub fn inc_thread_hashes(engine: &str, job_id: &str, thread_id: &str, n: u64) {
-    THREAD_HASHES_TOTAL
-        .with_label_values(&[engine, job_id, thread_id])
-        .inc_by(n);
-}
-
-pub fn set_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str, rate: f64) {
-    touch_thread(engine, job_id, thread_id);
-    THREAD_HASH_RATE
-        .with_label_values(&[engine, job_id, thread_id])
-        .set(rate);
-}
-
-pub fn inc_jobs_by_engine(engine: &str, status: &str) {
-    JOBS_BY_ENGINE_TOTAL
-        .with_label_values(&[engine, status])
-        .inc();
-}
-
-pub fn set_job_status_gauge(engine: &str, job_id: &str, status: &str, value: i64) {
-    touch_job(engine, job_id);
-    JOB_STATUS_GAUGE
-        .with_label_values(&[engine, job_id, status])
-        .set(value);
-}
-
+/// Increment the total hashes counter (without updating rates).
+/// Prefer `record_cpu_hashes` or `record_gpu_hashes` instead.
 pub fn inc_hashes(n: u64) {
     HASHES_TOTAL.inc_by(n);
 }
 
-fn ensure_session(session: &mut MiningSession, now: Instant) {
-    if session.start.is_none() {
-        session.start = Some(now);
-        session.hashes = 0;
-    }
+// ---------------------------------------------------------------------------
+// Public API - Gauges
+// ---------------------------------------------------------------------------
+
+/// Set the number of active jobs (0 or 1).
+pub fn set_active_jobs(n: i64) {
+    ACTIVE_JOBS.set(n);
 }
 
-fn update_global_rate(session: &MiningSession, now: Instant) {
-    if let Some(start) = session.start {
-        let elapsed = now.saturating_duration_since(start).as_secs_f64();
-        if elapsed > 0.0 && session.hashes > 0 {
-            HASH_RATE.set(session.hashes as f64 / elapsed);
-        }
-    }
+/// Set the total number of workers.
+pub fn set_workers(n: i64) {
+    WORKERS.set(n);
 }
 
-fn finish_thread_locked(session: &mut MiningSession, job_key: &JobKey, thread_key: &ThreadKey) {
-    if session.threads.remove(thread_key).is_some() {
-        session.active_threads = session.active_threads.saturating_sub(1);
-    }
-    if let Some(job) = session.jobs.get_mut(job_key) {
-        if job.active_threads > 0 {
-            job.active_threads -= 1;
-        }
-    }
-    if session.active_threads == 0 {
-        session.start = None;
-        session.hashes = 0;
-        HASH_RATE.set(0.0);
-    }
+/// Set the number of CPU workers.
+pub fn set_cpu_workers(n: i64) {
+    CPU_WORKERS.set(n);
 }
 
-pub fn start_thread(engine: &str, job_id: &str, thread_id: usize) {
-    let now = Instant::now();
-    let engine_key = engine.to_string();
-    let job_key = job_id.to_string();
-    let thread_key = (engine_key.clone(), job_key.clone(), thread_id.to_string());
-    let job_key = (engine_key, job_key);
-
-    let mut session = SESSION.lock().unwrap();
-    ensure_session(&mut session, now);
-
-    if session.threads.contains_key(&thread_key) {
-        return;
-    }
-
-    session.active_threads = session.active_threads.saturating_add(1);
-    session.threads.insert(
-        thread_key,
-        ThreadState {
-            start: now,
-            hashes: 0,
-        },
-    );
-
-    let job = session.jobs.entry(job_key).or_insert(JobState {
-        start: now,
-        hashes: 0,
-        active_threads: 0,
-    });
-    if job.active_threads == 0 {
-        job.start = now;
-        job.hashes = 0;
-    }
-    job.active_threads = job.active_threads.saturating_add(1);
+/// Set the number of GPU devices.
+pub fn set_gpu_devices(n: i64) {
+    GPU_DEVICES.set(n);
 }
 
-pub fn record_thread_progress(
-    engine: &str,
-    job_id: &str,
-    thread_id: usize,
-    hashes: u64,
-    completed: bool,
-    update_job_metrics: bool,
-) {
-    let now = Instant::now();
-    let engine_key = engine.to_string();
-    let job_key = job_id.to_string();
-    let thread_id_str = thread_id.to_string();
-    let thread_key = (engine_key.clone(), job_key.clone(), thread_id_str.clone());
-    let job_key = (engine_key, job_key);
-
-    let mut session = SESSION.lock().unwrap();
-    ensure_session(&mut session, now);
-
-    let thread_was_present = session.threads.contains_key(&thread_key);
-    if !thread_was_present {
-        session.active_threads = session.active_threads.saturating_add(1);
-        session.threads.insert(
-            thread_key.clone(),
-            ThreadState {
-                start: now,
-                hashes: 0,
-            },
-        );
-    }
-
-    let (thread_start, thread_hashes_total) = {
-        let thread_state = session
-            .threads
-            .get_mut(&thread_key)
-            .expect("thread must exist");
-        thread_state.hashes = thread_state.hashes.saturating_add(hashes);
-        (thread_state.start, thread_state.hashes)
-    };
-
-    let (job_start, job_hashes_total) = {
-        let job_state = session.jobs.entry(job_key.clone()).or_insert(JobState {
-            start: thread_start,
-            hashes: 0,
-            active_threads: 0,
-        });
-        if job_state.active_threads == 0 {
-            job_state.start = thread_start;
-            job_state.hashes = 0;
-        }
-        if !thread_was_present {
-            job_state.active_threads = job_state.active_threads.saturating_add(1);
-        }
-        job_state.hashes = job_state.hashes.saturating_add(hashes);
-        (job_state.start, job_state.hashes)
-    };
-
-    session.hashes = session.hashes.saturating_add(hashes);
-
-    inc_hashes(hashes);
-    if update_job_metrics {
-        inc_job_hashes(engine, job_id, hashes);
-        inc_thread_hashes(engine, job_id, &thread_id_str, hashes);
-    }
-
-    let thread_elapsed = now.saturating_duration_since(thread_start).as_secs_f64();
-    if update_job_metrics && thread_elapsed > 0.0 && thread_hashes_total > 0 {
-        set_thread_hash_rate(
-            engine,
-            job_id,
-            &thread_id_str,
-            thread_hashes_total as f64 / thread_elapsed,
-        );
-    }
-
-    if update_job_metrics {
-        let job_elapsed = now.saturating_duration_since(job_start).as_secs_f64();
-        if job_elapsed > 0.0 && job_hashes_total > 0 {
-            set_job_hash_rate(engine, job_id, job_hashes_total as f64 / job_elapsed);
-        }
-    }
-
-    update_global_rate(&session, now);
-
-    if completed {
-        finish_thread_locked(&mut session, &job_key, &thread_key);
-        update_global_rate(&session, now);
-    }
+/// Set the detected CPU core count.
+pub fn set_effective_cpus(n: i64) {
+    EFFECTIVE_CPUS.set(n);
 }
 
-/// Get the current global estimated hash rate.
-pub fn get_hash_rate() -> f64 {
-    HASH_RATE.get()
-}
+// ---------------------------------------------------------------------------
+// HTTP Exporter
+// ---------------------------------------------------------------------------
 
-/// Increment the jobs counter for a terminal status: completed | failed | cancelled.
-pub fn inc_job_status(status: &str) {
-    JOBS_TOTAL.with_label_values(&[status]).inc();
-}
-
-/// Increment HTTP request counters for an endpoint with a status code.
-pub fn inc_http_request(endpoint: &str, code: u16) {
-    HTTP_REQUESTS_TOTAL
-        .with_label_values(&[endpoint, &code.to_string()])
-        .inc();
-}
-
-// -------------------------------------------------------------------------------------
-// Removal helpers for end-of-life series
-// -------------------------------------------------------------------------------------
-
-const METRICS_TTL_SECS: u64 = 300;
-const JANITOR_INTERVAL_SECS: u64 = 60;
-
-static JOB_KEYS: Lazy<Mutex<HashSet<JobKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static JOB_LAST: Lazy<Mutex<HashMap<JobKey, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static THREAD_KEYS: Lazy<Mutex<HashSet<ThreadKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static THREAD_LAST: Lazy<Mutex<HashMap<ThreadKey, Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-static JANITOR_INIT: Lazy<()> = Lazy::new(|| {
-    thread::spawn(|| loop {
-        thread::sleep(Duration::from_secs(JANITOR_INTERVAL_SECS));
-        prune_stale();
-    });
-});
-
-fn prune_stale() {
-    let now = Instant::now();
-    // Jobs
-    let mut to_remove_jobs: Vec<JobKey> = Vec::new();
-    {
-        let last = JOB_LAST.lock().unwrap();
-        for (k, ts) in last.iter() {
-            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
-                to_remove_jobs.push(k.clone());
-            }
-        }
-    }
-    for (engine, job_id) in to_remove_jobs {
-        let _ = JOB_HASHES_TOTAL.remove_label_values(&[&engine, &job_id]);
-        let _ = JOB_HASH_RATE.remove_label_values(&[&engine, &job_id]);
-        let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[&engine, &job_id]);
-        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "completed"]);
-        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "failed"]);
-        let _ = JOB_STATUS_GAUGE.remove_label_values(&[&engine, &job_id, "cancelled"]);
-        // Remove per-job origin gauge variants (known origins)
-        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "cpu"]);
-        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g1"]);
-        let _ = JOB_FOUND_ORIGIN.remove_label_values(&[&engine, &job_id, "gpu-g2"]);
-        JOB_KEYS
-            .lock()
-            .unwrap()
-            .remove(&(engine.clone(), job_id.clone()));
-        JOB_LAST.lock().unwrap().remove(&(engine, job_id));
-    }
-    // Threads
-    let mut to_remove_threads: Vec<ThreadKey> = Vec::new();
-    {
-        let last = THREAD_LAST.lock().unwrap();
-        for (k, ts) in last.iter() {
-            if now.duration_since(*ts).as_secs() > METRICS_TTL_SECS {
-                to_remove_threads.push(k.clone());
-            }
-        }
-    }
-    for (engine, job_id, thread_id) in to_remove_threads {
-        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&engine, &job_id, &thread_id]);
-        let _ = THREAD_HASH_RATE.remove_label_values(&[&engine, &job_id, &thread_id]);
-        THREAD_KEYS
-            .lock()
-            .unwrap()
-            .remove(&(engine.clone(), job_id.clone(), thread_id.clone()));
-        THREAD_LAST
-            .lock()
-            .unwrap()
-            .remove(&(engine, job_id, thread_id));
-    }
-}
-
-fn touch_job(engine: &str, job_id: &str) {
-    *JANITOR_INIT; // ensure janitor starts
-    let key = (engine.to_string(), job_id.to_string());
-    JOB_KEYS.lock().unwrap().insert(key.clone());
-    JOB_LAST.lock().unwrap().insert(key, Instant::now());
-}
-
-fn touch_thread(engine: &str, job_id: &str, thread_id: &str) {
-    *JANITOR_INIT; // ensure janitor starts
-    let key = (
-        engine.to_string(),
-        job_id.to_string(),
-        thread_id.to_string(),
-    );
-    THREAD_KEYS.lock().unwrap().insert(key.clone());
-    THREAD_LAST.lock().unwrap().insert(key, Instant::now());
-}
-
-/// Explicitly remove all job-scoped metrics for a job (call on job completion)
-pub fn remove_job_metrics(engine: &str, job_id: &str) {
-    let _ = JOB_HASHES_TOTAL.remove_label_values(&[engine, job_id]);
-    let _ = JOB_HASH_RATE.remove_label_values(&[engine, job_id]);
-    let _ = CANDIDATES_FOUND_TOTAL.remove_label_values(&[engine, job_id]);
-    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "completed"]);
-    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "failed"]);
-    let _ = JOB_STATUS_GAUGE.remove_label_values(&[engine, job_id, "cancelled"]);
-    // Remove per-job origin gauge variants (known origins)
-    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "cpu"]);
-    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g1"]);
-    let _ = JOB_FOUND_ORIGIN.remove_label_values(&[engine, job_id, "gpu-g2"]);
-    JOB_KEYS
-        .lock()
-        .unwrap()
-        .remove(&(engine.to_string(), job_id.to_string()));
-    JOB_LAST
-        .lock()
-        .unwrap()
-        .remove(&(engine.to_string(), job_id.to_string()));
-}
-
-/// Explicitly remove all thread-scoped metrics for a job
-pub fn remove_thread_metrics_for_job(engine: &str, job_id: &str) {
-    // Collect matching thread keys
-    let keys: Vec<ThreadKey> = {
-        let set = THREAD_KEYS.lock().unwrap();
-        set.iter()
-            .filter(|(e, j, _)| e == engine && j == job_id)
-            .cloned()
-            .collect()
-    };
-    for (e, j, t) in keys {
-        let _ = THREAD_HASHES_TOTAL.remove_label_values(&[&e, &j, &t]);
-        let _ = THREAD_HASH_RATE.remove_label_values(&[&e, &j, &t]);
-        THREAD_KEYS
-            .lock()
-            .unwrap()
-            .remove(&(e.clone(), j.clone(), t.clone()));
-        THREAD_LAST
-            .lock()
-            .unwrap()
-            .remove(&(e.clone(), j.clone(), t.clone()));
-    }
-}
-
-/// Remove the per-job hash rate series for a finished job.
-pub fn remove_job_hash_rate(engine: &str, job_id: &str) {
-    let _ = JOB_HASH_RATE.remove_label_values(&[engine, job_id]);
-}
-
-/// Remove the per-thread hash rate series for a finished thread.
-pub fn remove_thread_hash_rate(engine: &str, job_id: &str, thread_id: &str) {
-    let _ = THREAD_HASH_RATE.remove_label_values(&[engine, job_id, thread_id]);
-}
-
-// -------------------------------------------------------------------------------------
-// GPU-specific metric helpers
-// -------------------------------------------------------------------------------------
-
-/// Set the total number of GPU devices available for mining
-pub fn set_gpu_device_count(count: i64) {
-    GPU_DEVICE_COUNT.set(count);
-}
-
-/// Set GPU device information (call once per device during initialization)
-pub fn set_gpu_device_info(
-    device_id: &str,
-    name: &str,
-    backend: &str,
-    vendor: &str,
-    device_type: &str,
-) {
-    GPU_DEVICE_INFO
-        .with_label_values(&[device_id, name, backend, vendor, device_type])
-        .set(1.0);
-}
-
-/// Set GPU batch size for a specific device
-pub fn set_gpu_batch_size(device_id: &str, batch_size: f64) {
-    GPU_BATCH_SIZE
-        .with_label_values(&[device_id])
-        .set(batch_size);
-}
-
-/// Set GPU workgroup count for a specific device
-pub fn set_gpu_workgroups(device_id: &str, workgroups: f64) {
-    GPU_WORKGROUPS
-        .with_label_values(&[device_id])
-        .set(workgroups);
-}
-
-// -------------------------------------------------------------------------------------
-// HTTP Exporter (feature: http-exporter)
-// -------------------------------------------------------------------------------------
-
-/// Start the Prometheus HTTP exporter on 0.0.0.0:`port`.
+/// Start the Prometheus HTTP exporter on `0.0.0.0:port`.
 ///
-/// Behavior:
-/// - Spawns the exporter as a background task and returns immediately.
-/// - Serves plaintext metrics at GET /metrics.
-/// - If called multiple times, multiple servers may be created (call once).
+/// Spawns the exporter as a background task and returns immediately.
+/// Serves plaintext metrics at `GET /metrics`.
 #[cfg(feature = "http-exporter")]
 pub async fn start_http_exporter(port: u16) -> Result<()> {
-    // Encoder is created inside the handler to avoid capturing non-Clone state
-    // Use REGISTRY.gather() directly in the handler
-
-    // GET /metrics -> plaintext Prometheus format
     let metrics_route = warp::path("metrics").and(warp::get()).map(|| {
         let encoder = TextEncoder::new();
         let metric_families = REGISTRY.gather();
-        let mut buffer = Vec::with_capacity(16 * 1024);
+        let mut buffer = Vec::with_capacity(4096);
         encoder
             .encode(&metric_families, &mut buffer)
             .unwrap_or_default();
@@ -969,7 +316,7 @@ pub async fn start_http_exporter(port: u16) -> Result<()> {
     Ok(())
 }
 
-// If the exporter feature is not enabled, expose a no-op to keep call sites simple.
+/// No-op when HTTP exporter feature is disabled.
 #[cfg(not(feature = "http-exporter"))]
 pub async fn start_http_exporter(_port: u16) -> Result<()> {
     log::warn!(
