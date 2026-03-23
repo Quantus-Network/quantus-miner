@@ -29,7 +29,7 @@ pub fn format_hashrate(hashes_per_sec: f64) -> String {
     }
 }
 
-/// Job context for Bitcoin-style PoW mining with double Poseidon2 hashing
+/// Job context for PoW mining with Poseidon2 hash_squeeze_twice
 #[derive(Debug, Clone)]
 pub struct JobContext {
     pub header: [u8; 32],
@@ -62,7 +62,7 @@ pub fn step_nonce(nonce: U512) -> U512 {
     nonce.saturating_add(U512::from(1u64))
 }
 
-/// Compute hash for the current nonce using Bitcoin-style double Poseidon2
+/// Compute hash for the current nonce using Poseidon2 hash_squeeze_twice
 pub fn hash_from_nonce(ctx: &JobContext, nonce: U512) -> U512 {
     let nonce_bytes = nonce.to_big_endian();
     qpow_math::get_nonce_hash(ctx.header, nonce_bytes)
