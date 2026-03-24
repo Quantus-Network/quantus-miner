@@ -194,6 +194,7 @@ async fn handle_connection(
                             work: Some(hex::encode(candidate.work)),
                             hash_count: total_hashes,
                             elapsed_time: elapsed,
+                            miner_id: None,
                         };
 
                         let msg = MinerMessage::JobResult(result);
@@ -232,6 +233,7 @@ async fn handle_connection(
                                     work: None,
                                     hash_count: 0,
                                     elapsed_time: 0.0,
+                                    miner_id: None,
                                 };
                                 let msg = MinerMessage::JobResult(result);
                                 send_message_checked(&connection, &mut send, &msg).await?;
@@ -251,6 +253,7 @@ async fn handle_connection(
                                     work: None,
                                     hash_count: 0,
                                     elapsed_time: 0.0,
+                                    miner_id: None,
                                 };
                                 let msg = MinerMessage::JobResult(result);
                                 send_message_checked(&connection, &mut send, &msg).await?;
