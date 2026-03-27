@@ -898,9 +898,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
 
     // Test 1: All zeros
     let zero_input = [0u8; 96];
-    let zero_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(
-        &zero_input,
-    ));
+    let zero_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&zero_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: zero_input,
         expected_felts: zero_expected,
@@ -908,9 +906,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
 
     // Test 2: All 0xFF
     let ff_input = [0xFFu8; 96];
-    let ff_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(
-        &ff_input,
-    ));
+    let ff_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&ff_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: ff_input,
         expected_felts: ff_expected,
@@ -921,9 +917,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for (i, byte) in seq_input.iter_mut().enumerate() {
         *byte = (i % 256) as u8;
     }
-    let seq_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(
-        &seq_input,
-    ));
+    let seq_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&seq_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: seq_input,
         expected_felts: seq_expected,
@@ -933,9 +927,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for _ in 0..10 {
         let mut input = [0u8; 96];
         rng.fill(&mut input[..]);
-        let expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(
-            &input,
-        ));
+        let expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&input));
         vectors.push(BytesToFieldTestCase {
             input_bytes: input,
             expected_felts: expected,
