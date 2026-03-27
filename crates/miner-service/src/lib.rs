@@ -151,7 +151,15 @@ impl WorkerPool {
                     let tid = thread_id;
 
                     let handle = thread::spawn(move || {
-                        worker_loop(tid, EngineType::Cpu, eng, job_rx, tx, cancel, job_id_counter);
+                        worker_loop(
+                            tid,
+                            EngineType::Cpu,
+                            eng,
+                            job_rx,
+                            tx,
+                            cancel,
+                            job_id_counter,
+                        );
                     });
                     handles.push(handle);
                     thread_id += 1;
@@ -173,7 +181,15 @@ impl WorkerPool {
                     let tid = thread_id;
 
                     let handle = thread::spawn(move || {
-                        worker_loop(tid, EngineType::Gpu, eng, job_rx, tx, cancel, job_id_counter);
+                        worker_loop(
+                            tid,
+                            EngineType::Gpu,
+                            eng,
+                            job_rx,
+                            tx,
+                            cancel,
+                            job_id_counter,
+                        );
                     });
                     handles.push(handle);
                     thread_id += 1;
