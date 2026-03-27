@@ -132,7 +132,10 @@ async fn handle_connection(
     metrics::reset_hash_tracker();
 
     // Current job state
-    let mut current_job_id: Option<String> = None;
+    // - node_job_id: The string ID from the node (e.g., "27") - used in protocol messages
+    // - internal_job_id: Our internal numeric ID from WorkerPool - used to detect stale results
+    let mut node_job_id: Option<String> = None;
+    let mut internal_job_id: u64 = 0;
     let mut job_start_time: Option<Instant> = None;
     let mut cpu_hashes: u64 = 0;
     let mut gpu_hashes: u64 = 0;
@@ -142,7 +145,7 @@ async fn handle_connection(
 
     loop {
         // Poll for worker results (non-blocking via spawn_blocking)
-        let poll_result = if current_job_id.is_some() && !result_sent_for_current_job {
+        let poll_result = if node_job_id.is_some() && !result_sent_for_current_job {
             let rx = worker_pool.result_receiver().clone();
             tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_millis(10)))
                 .await
@@ -153,7 +156,7 @@ async fn handle_connection(
 
         // Handle worker result if any
         if let Ok(worker_result) = poll_result {
-            // Track hashes by engine type
+            // Track hashes by engine type (always, even for stale results)
             match worker_result.engine_type {
                 EngineType::Cpu => {
                     cpu_hashes += worker_result.hash_count;
@@ -165,20 +168,28 @@ async fn handle_connection(
                 }
             }
 
-            // Only send result for the FIRST solution found
+            // Check if this result is for the current job (not stale)
+            if worker_result.job_id != internal_job_id {
+                log::debug!(
+                    "⏰ Discarding stale result from worker {} (result job_id {} != current {})",
+                    worker_result.thread_id,
+                    worker_result.job_id,
+                    internal_job_id
+                );
+                continue;
+            }
+
+            // Only send result for the FIRST solution found for THIS job
             if let Some(candidate) = worker_result.candidate {
                 if !result_sent_for_current_job {
-                    if let Some(ref job_id) = current_job_id {
+                    if let Some(ref job_id) = node_job_id {
                         let total_hashes = cpu_hashes + gpu_hashes;
                         let elapsed = job_start_time
                             .map(|t| t.elapsed().as_secs_f64())
                             .unwrap_or(0.0);
 
                         log::info!(
-                            "⛏️ Job {} completed: {} hashes in {:.2}s ({})",
-                            job_id,
-                            total_hashes,
-                            elapsed,
+                            "⛏️ Job {job_id} completed: {total_hashes} hashes in {elapsed:.2}s ({})",
                             format_hashrate(total_hashes as f64 / elapsed.max(0.001))
                         );
 
@@ -265,13 +276,14 @@ async fn handle_connection(
                         cpu_hashes = 0;
                         gpu_hashes = 0;
                         job_start_time = Some(Instant::now());
-                        current_job_id = Some(request.job_id.clone());
+                        node_job_id = Some(request.job_id.clone());
                         result_sent_for_current_job = false;
 
                         log::debug!("Starting job {}", request.job_id);
                         metrics::set_active_jobs(1);
 
-                        worker_pool.start_job(header_hash, difficulty);
+                        // start_job returns the internal job ID used to detect stale results
+                        internal_job_id = worker_pool.start_job(header_hash, difficulty);
                     }
                     Ok(MinerMessage::JobResult(_)) => {
                         log::warn!("Received unexpected JobResult from node");
