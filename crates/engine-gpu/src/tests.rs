@@ -1,8 +1,8 @@
+use p3_field::PrimeField64 as P3PrimeField64;
+use p3_goldilocks::Goldilocks as P3Goldilocks;
 use plonky2::hash::poseidon2::P2Permuter;
 use qp_plonky2_field::goldilocks_field::GoldilocksField;
 use qp_plonky2_field::types::{Field, Field64, PrimeField64};
-
-use qp_poseidon_core::serialization::{p2_backend::GF as P2Goldilocks, GoldiCompat};
 use rand::{Rng, SeedableRng};
 use wgpu::util::DeviceExt;
 
@@ -888,13 +888,17 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x98765432);
 
+    // Helper to convert P3 Goldilocks to P2 (Plonky2) GoldilocksField
+    fn p3_to_p2(felts: Vec<P3Goldilocks>) -> Vec<GoldilocksField> {
+        felts
+            .into_iter()
+            .map(|g| GoldilocksField::from_noncanonical_u64(g.as_canonical_u64()))
+            .collect()
+    }
+
     // Test 1: All zeros
     let zero_input = [0u8; 96];
-    let zero_expected =
-        qp_poseidon_core::serialization::injective_bytes_to_felts::<P2Goldilocks>(&zero_input)
-            .into_iter()
-            .map(|g| GoldilocksField::from_noncanonical_u64(g.to_u64()))
-            .collect();
+    let zero_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&zero_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: zero_input,
         expected_felts: zero_expected,
@@ -902,11 +906,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
 
     // Test 2: All 0xFF
     let ff_input = [0xFFu8; 96];
-    let ff_expected =
-        qp_poseidon_core::serialization::injective_bytes_to_felts::<P2Goldilocks>(&ff_input)
-            .into_iter()
-            .map(|g| GoldilocksField::from_noncanonical_u64(g.to_u64()))
-            .collect();
+    let ff_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&ff_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: ff_input,
         expected_felts: ff_expected,
@@ -917,11 +917,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for (i, byte) in seq_input.iter_mut().enumerate() {
         *byte = (i % 256) as u8;
     }
-    let seq_expected =
-        qp_poseidon_core::serialization::injective_bytes_to_felts::<P2Goldilocks>(&seq_input)
-            .into_iter()
-            .map(|g| GoldilocksField::from_noncanonical_u64(g.to_u64()))
-            .collect();
+    let seq_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&seq_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: seq_input,
         expected_felts: seq_expected,
@@ -931,11 +927,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for _ in 0..10 {
         let mut input = [0u8; 96];
         rng.fill(&mut input[..]);
-        let expected =
-            qp_poseidon_core::serialization::injective_bytes_to_felts::<P2Goldilocks>(&input)
-                .into_iter()
-                .map(|g| GoldilocksField::from_noncanonical_u64(g.to_u64()))
-                .collect();
+        let expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&input));
         vectors.push(BytesToFieldTestCase {
             input_bytes: input,
             expected_felts: expected,
@@ -1040,20 +1032,18 @@ fn print_test_failure_hex(
     }
 }
 
-fn generate_double_hash_test_vectors() -> Vec<DoubleHashTestCase> {
+fn generate_hash_squeeze_twice_test_vectors() -> Vec<DoubleHashTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xDEADBEEF);
 
-    // Test 1-250: Random header and nonce combinations (25 tests)
+    // Test 1-250: Random header and nonce combinations
     for i in 0..250 {
         let mut input = [0u8; 96];
 
         rng.fill(&mut input[..]);
 
-        let expected = {
-            let first_hash = qp_poseidon_core::hash_squeeze_twice(&input);
-            qp_poseidon_core::hash_squeeze_twice(&first_hash)
-        };
+        // Single hash with double squeeze (no longer double hash)
+        let expected = qp_poseidon_core::hash_squeeze_twice(&input);
 
         vectors.push(DoubleHashTestCase {
             input_96_bytes: input,
@@ -4344,11 +4334,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     results.print_summary()
 }
 
-pub async fn test_double_hash(
+pub async fn test_hash_squeeze_twice(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let test_vectors = generate_double_hash_test_vectors();
+    let test_vectors = generate_hash_squeeze_twice_test_vectors();
     let total_tests = test_vectors.len();
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
@@ -4372,8 +4362,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
         input_array[i] = input_data[input_offset + i];
     }}
 
-    // Hash the input using double hash (96 bytes -> 64 bytes)
-    let hash_result = double_hash(input_array);
+    // Hash the input using single hash with double squeeze (96 bytes -> 64 bytes)
+    let hash_result = hash_squeeze_twice(input_array);
 
     // Write full 64 bytes (16 u32s) of result as the hash
     let output_offset = test_id * 16u;
@@ -4386,12 +4376,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Double Hash Test Shader"),
+        label: Some("Hash Squeeze Twice Test Shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Double Hash Test Pipeline"),
+        label: Some("Hash Squeeze Twice Test Pipeline"),
         layout: None,
         module: &shader,
         entry_point: Some("main"),

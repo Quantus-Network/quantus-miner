@@ -9,7 +9,7 @@ const GOLDILOCKS_PRIME_HIGH: u32 = 4294967295u;  // High 32 bits (2^32 - 1)
 
 // Poseidon2 constants
 const WIDTH: u32 = 12u;
-const RATE: u32 = 4u;
+const RATE: u32 = 8u;
 const EXTERNAL_ROUNDS: u32 = 4u;
 const INTERNAL_ROUNDS: u32 = 22u;
 
@@ -677,17 +677,17 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
         state[i] = gf_zero();
     }
 
-    // Convert input to field elements (25 total)
+    // Convert input to field elements (25 total: 24 from input + 1 terminator)
     let input_felts = bytes_to_field_elements(input);
 
     // Sponge construction matching CPU reference exactly:
-    // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=4
+    // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=8
 
-    // Process first 24 elements (6 complete chunks of 4)
-    for (var chunk = 0u; chunk < 6u; chunk++) {
-        // Absorb 4 elements for this chunk
-        for (var i = 0u; i < 4u; i++) {
-            let felt_idx = chunk * 4u + i;
+    // Process first 24 elements (3 complete chunks of 8)
+    for (var chunk = 0u; chunk < 3u; chunk++) {
+        // Absorb 8 elements for this chunk
+        for (var i = 0u; i < 8u; i++) {
+            let felt_idx = chunk * 8u + i;
             state[i] = gf_add(state[i], input_felts[felt_idx]);
         }
         // Permute after each complete chunk
@@ -695,17 +695,16 @@ fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     }
 
     // Process remaining 1 element (partial chunk)
-    // Now we have element 24 (the padding marker = 1) remaining
-    // This simulates CPU's finalize_twice adding ONE to buffer position 0
-    state[0] = gf_add(state[0], input_felts[24u]); // Add the padding marker (should be 1)
+    // Now we have element 24 (the terminator = 1) remaining
+    state[0] = gf_add(state[0], input_felts[24u]); // Add the terminator (value 1)
 
     // Add sponge padding marker (ONE) to the next position
     state[1] = gf_add(state[1], gf_one());
 
-    // Final permutation (CPU calls permute after completing the block)
+    // Final permutation
     poseidon2_permute(&state);
 
-    // First squeeze - get first 4 field elements
+    // First squeeze - get first 4 field elements (POSEIDON2_OUTPUT=4 -> 32 bytes)
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
         state[0], state[1], state[2], state[3]
     ));
@@ -784,10 +783,9 @@ fn poseidon2_hash_squeeze_twice_64(input: array<u32, 16>) -> array<u32, 16> {
     return result;
 }
 
-// Double Poseidon2 hash (like Bitcoin's double SHA256)
-fn double_hash(input: array<u32, 24>) -> array<u32, 16> {
-    let first_hash = poseidon2_hash_squeeze_twice(input);
-    return poseidon2_hash_squeeze_twice_64(first_hash);
+// Single Poseidon2 hash with double squeeze (512-bit output)
+fn hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
+    return poseidon2_hash_squeeze_twice(input);
 }
 
 // Check if hash < target (U512 comparison)
@@ -886,7 +884,7 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
 
         // Hash (Big Endian)
-        let hash_be = double_hash(input);
+        let hash_be = hash_squeeze_twice(input);
 
         // Convert to Little Endian for difficulty check and storage
         var hash_le: array<u32, 16>;

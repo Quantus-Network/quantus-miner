@@ -93,8 +93,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("❌ Poseidon2 squeeze-twice tests failed: {}", e);
     }
 
-    if let Err(e) = tests::test_double_hash(&device, &queue).await {
-        eprintln!("❌ Double hash tests failed: {}", e);
+    if let Err(e) = tests::test_hash_squeeze_twice(&device, &queue).await {
+        eprintln!("❌ Hash squeeze twice tests failed: {}", e);
     }
 
     if let Err(e) = end_to_end_tests::test_end_to_end_mining(&device, &queue).await {
