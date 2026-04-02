@@ -2215,9 +2215,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "1.3.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "905129f9f25cdcfcb5108f23f15d185c9ce0c7698c1b362d55c67da4a0a321cd"
+checksum = "c51774769a44a1c65f9ad3959ff1497a9c315a16f5718151873721b3c5631413"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
@@ -2230,7 +2230,7 @@ dependencies = [
 [[package]]
 name = "qpow-math"
 version = "0.1.0"
-source = "git+https://github.com/Quantus-Network/chain.git?branch=illuzen%2Fno-length-trie#183fd9f9f6777534fea292fb3c0d63c901653c0a"
+source = "git+https://github.com/Quantus-Network/chain.git?tag=v0.4.11-star-dust#89f0260cdba4eb71533cb060215cca3d166108d1"
 dependencies = [
  "hex",
  "log",
@@ -2241,7 +2241,7 @@ dependencies = [
 [[package]]
 name = "quantus-miner-api"
 version = "0.0.3"
-source = "git+https://github.com/Quantus-Network/chain.git?branch=illuzen%2Fquic-miner#c3e572f87fc69484a0069234c245e16357b65741"
+source = "git+https://github.com/Quantus-Network/chain.git?tag=v0.4.11-star-dust#89f0260cdba4eb71533cb060215cca3d166108d1"
 dependencies = [
  "serde",
  "serde_json",
