@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 enum Command {
     /// Run the mining service
     Serve {
-        /// Address of the node to connect to (e.g., "127.0.0.1:9833")
-        #[arg(long, env = "MINER_NODE_ADDR")]
+        /// Address of the node to connect to
+        #[arg(long, env = "MINER_NODE_ADDR", default_value = "127.0.0.1:9833")]
         node_addr: std::net::SocketAddr,
 
         /// Number of CPU worker threads to use for mining (default: auto-detect)
@@ -74,7 +74,7 @@ async fn main() {
     let args = Args::parse();
 
     let Some(command) = args.command else {
-        eprintln!("Error: No command provided. Use 'serve --node-addr <ADDRESS>' to start mining.");
+        eprintln!("Error: No command provided. Use 'serve' to start mining (defaults to local node at 127.0.0.1:9833).");
         eprintln!("Example: quantus-miner serve --node-addr 127.0.0.1:9833");
         std::process::exit(1);
     };
