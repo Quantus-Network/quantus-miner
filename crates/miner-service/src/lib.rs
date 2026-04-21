@@ -27,7 +27,7 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// GPU cancel check interval in nonces (None = use default of 10,000)
+    /// GPU cancel check interval in nonces (None = use default of 100,000)
     pub gpu_cancel_interval: Option<u32>,
 }
 
