@@ -84,6 +84,10 @@ enum Command {
         #[arg(long = "metrics-port", env = "POOL_METRICS_PORT", default_value_t = 9901)]
         metrics_port: u16,
 
+        /// Disable TLS for WebSocket (use ws:// instead of wss://) - for local development only
+        #[arg(long = "no-tls", env = "POOL_NO_TLS")]
+        no_tls: bool,
+
         /// Enable verbose logging
         #[arg(short, long, env = "POOL_VERBOSE")]
         verbose: bool,
@@ -160,6 +164,7 @@ async fn main() {
             rewards_inner_hash,
             payout_batch_size,
             metrics_port,
+            no_tls,
             verbose,
         } => {
             init_logger(verbose);
@@ -184,6 +189,7 @@ async fn main() {
                 ws_port,
                 pool_inner_hash: inner_hash,
                 payout_batch_size,
+                no_tls,
             };
 
             if let Err(e) = pool_service::run(config).await {

@@ -1,17 +1,18 @@
 //! WebSocket server for browser-based miners.
 //!
-//! Accepts connections from browser miners over WSS (secure WebSocket).
+//! Accepts connections from browser miners over WS or WSS (secure WebSocket).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use futures_util::StreamExt;
-use pool_api::{read_miner_message, write_pool_message, MinerToPool, PoolToMiner};
+use futures_util::{SinkExt, StreamExt};
+use pool_api::{MinerToPool, PoolToMiner};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tokio_rustls::TlsAcceptor;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Information about a connected browser miner.
 #[derive(Debug, Clone)]
@@ -63,11 +64,16 @@ impl WebSocketServer {
     }
 
     /// Start listening for connections.
-    pub async fn run(&self, port: u16) -> anyhow::Result<()> {
+    pub async fn run(&self, port: u16, no_tls: bool) -> anyhow::Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-        let tls_acceptor = create_tls_acceptor()?;
+        let tls_acceptor = if no_tls {
+            None
+        } else {
+            Some(create_tls_acceptor()?)
+        };
 
-        log::info!("WebSocket server listening on port {port}");
+        let protocol = if no_tls { "ws" } else { "wss" };
+        log::info!("WebSocket server listening on {protocol}://0.0.0.0:{port}");
 
         loop {
             let (stream, addr) = listener.accept().await?;
@@ -77,9 +83,14 @@ impl WebSocketServer {
             let miner_id = self.next_miner_id.fetch_add(1, Ordering::Relaxed);
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_connection(stream, addr, tls_acceptor, miners, event_tx, miner_id).await
-                {
+                let result = if let Some(tls_acceptor) = tls_acceptor {
+                    handle_tls_connection(stream, addr, tls_acceptor, miners, event_tx, miner_id)
+                        .await
+                } else {
+                    handle_plain_connection(stream, addr, miners, event_tx, miner_id).await
+                };
+
+                if let Err(e) = result {
                     log::debug!("Connection from {addr} ended: {e}");
                 }
             });
@@ -117,8 +128,28 @@ impl WebSocketServer {
     }
 }
 
-/// Handle a single WebSocket connection.
-async fn handle_connection(
+/// Handle a plain (non-TLS) WebSocket connection.
+async fn handle_plain_connection(
+    stream: tokio::net::TcpStream,
+    addr: SocketAddr,
+    miners: Arc<RwLock<HashMap<u64, BrowserMiner>>>,
+    event_tx: mpsc::Sender<BrowserEvent>,
+    miner_id: u64,
+) -> anyhow::Result<()> {
+    log::debug!("New plain connection from {addr}");
+
+    // WebSocket handshake
+    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    let (mut write, mut read) = ws_stream.split();
+
+    log::debug!("WebSocket established with {addr}");
+
+    // Run the connection handler
+    run_miner_session(&mut write, &mut read, addr, miners, event_tx, miner_id).await
+}
+
+/// Handle a TLS WebSocket connection.
+async fn handle_tls_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
     tls_acceptor: TlsAcceptor,
@@ -126,27 +157,44 @@ async fn handle_connection(
     event_tx: mpsc::Sender<BrowserEvent>,
     miner_id: u64,
 ) -> anyhow::Result<()> {
-    log::debug!("New connection from {addr}");
+    log::debug!("New TLS connection from {addr}");
 
     // TLS handshake
     let tls_stream = tls_acceptor.accept(stream).await?;
 
-    // WebSocket handshake
+    // WebSocket handshake over TLS
     let ws_stream = tokio_tungstenite::accept_async(tls_stream).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    log::debug!("WebSocket established with {addr}");
+    log::debug!("WebSocket (TLS) established with {addr}");
 
+    // Run the connection handler
+    run_miner_session(&mut write, &mut read, addr, miners, event_tx, miner_id).await
+}
+
+/// Run the miner session protocol.
+async fn run_miner_session<S, R>(
+    write: &mut S,
+    read: &mut R,
+    addr: SocketAddr,
+    miners: Arc<RwLock<HashMap<u64, BrowserMiner>>>,
+    event_tx: mpsc::Sender<BrowserEvent>,
+    miner_id: u64,
+) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    R: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     // Wait for Register message
-    let miner_address = match read_miner_message(&mut read).await {
+    let miner_address = match read_message(read).await {
         Ok(MinerToPool::Register { address }) => {
             log::info!("Miner {miner_id} registered with address: {address}");
             address
         }
         Ok(other) => {
             log::warn!("Expected Register from {addr}, got {other:?}");
-            let _ = write_pool_message(
-                &mut write,
+            let _ = write_message(
+                write,
                 &PoolToMiner::Error {
                     message: "Expected Register message first".to_string(),
                 },
@@ -161,7 +209,7 @@ async fn handle_connection(
     };
 
     // Send Registered acknowledgment
-    write_pool_message(&mut write, &PoolToMiner::Registered { miner_id }).await?;
+    write_message(write, &PoolToMiner::Registered { miner_id }).await?;
 
     // Create channel for sending messages to this miner
     let (tx, mut rx) = mpsc::channel::<PoolToMiner>(16);
@@ -176,7 +224,7 @@ async fn handle_connection(
     let _ = event_tx.send(BrowserEvent::MinerConnected(miner)).await;
 
     // Wait for Ready message
-    match read_miner_message(&mut read).await {
+    match read_message(read).await {
         Ok(MinerToPool::Ready) => {
             log::debug!("Miner {miner_id} is ready");
         }
@@ -197,7 +245,7 @@ async fn handle_connection(
             biased;
 
             // Receive messages from browser miner
-            msg_result = read_miner_message(&mut read) => {
+            msg_result = read_message(read) => {
                 match msg_result {
                     Ok(MinerToPool::JobResult { job_id, nonce, work, hash_count, elapsed_time }) => {
                         log::info!("Miner {miner_id} submitted result for job {job_id}");
@@ -227,7 +275,7 @@ async fn handle_connection(
             msg = rx.recv() => {
                 match msg {
                     Some(msg) => {
-                        if let Err(e) = write_pool_message(&mut write, &msg).await {
+                        if let Err(e) = write_message(write, &msg).await {
                             log::debug!("Failed to send to miner {miner_id}: {e}");
                             break;
                         }
@@ -246,6 +294,56 @@ async fn handle_connection(
     let _ = event_tx.send(BrowserEvent::MinerDisconnected(miner_id)).await;
     log::info!("Miner {miner_id} disconnected");
 
+    Ok(())
+}
+
+/// Read a miner message from the WebSocket stream.
+async fn read_message<R>(read: &mut R) -> std::io::Result<MinerToPool>
+where
+    R: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        match read.next().await {
+            Some(Ok(WsMessage::Text(text))) => {
+                return serde_json::from_str(&text)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
+            Some(Ok(WsMessage::Binary(data))) => {
+                return serde_json::from_slice(&data)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            Some(Ok(WsMessage::Close(_))) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "WebSocket closed",
+                ));
+            }
+            Some(Ok(WsMessage::Frame(_))) => continue,
+            Some(Err(e)) => {
+                return Err(std::io::Error::other(e.to_string()));
+            }
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "WebSocket stream ended",
+                ));
+            }
+        }
+    }
+}
+
+/// Write a pool message to the WebSocket sink.
+async fn write_message<S>(write: &mut S, msg: &PoolToMiner) -> std::io::Result<()>
+where
+    S: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let json = serde_json::to_string(msg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write
+        .send(WsMessage::Text(json))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
 }
 

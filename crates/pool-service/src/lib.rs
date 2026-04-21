@@ -40,6 +40,8 @@ pub struct PoolConfig {
     pub pool_inner_hash: [u8; 32],
     /// Number of block wins to accumulate before triggering a batch payout.
     pub payout_batch_size: usize,
+    /// Disable TLS for WebSocket connections (for local development only).
+    pub no_tls: bool,
 }
 
 impl Default for PoolConfig {
@@ -49,6 +51,7 @@ impl Default for PoolConfig {
             ws_port: 9834,
             pool_inner_hash: [0u8; 32],
             payout_batch_size: 16,
+            no_tls: false,
         }
     }
 }
@@ -59,6 +62,7 @@ pub async fn run(config: PoolConfig) -> anyhow::Result<()> {
     log::info!("  Node address: {}", config.node_addr);
     log::info!("  WebSocket port: {}", config.ws_port);
     log::info!("  Payout batch size: {} blocks", config.payout_batch_size);
+    log::info!("  TLS: {}", if config.no_tls { "disabled" } else { "enabled" });
 
     let coordinator = PoolCoordinator::new(config);
     coordinator.run().await

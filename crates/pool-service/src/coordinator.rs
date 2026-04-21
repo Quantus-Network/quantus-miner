@@ -66,9 +66,10 @@ impl PoolCoordinator {
 
         // Start WebSocket server task
         let ws_port = self.config.ws_port;
+        let no_tls = self.config.no_tls;
         let ws_server_clone = ws_server.clone();
         let ws_task = tokio::spawn(async move {
-            if let Err(e) = ws_server_clone.run(ws_port).await {
+            if let Err(e) = ws_server_clone.run(ws_port, no_tls).await {
                 log::error!("WebSocket server error: {e}");
             }
         });

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quantus Web Miner</title>
+  <style>
+    :root {
+      --bg-primary: #0f0f0f;
+      --bg-secondary: #1a1a1a;
+      --bg-tertiary: #252525;
+      --text-primary: #e0e0e0;
+      --text-secondary: #888;
+      --accent: #00d4aa;
+      --accent-dim: #00a080;
+      --error: #ff4444;
+      --warning: #ffaa00;
+      --success: #00dd66;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--bg-tertiary);
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .card-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-secondary);
+      margin-bottom: 15px;
+    }
+
+    .connection-form {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    input {
+      background: var(--bg-tertiary);
+      border: 1px solid transparent;
+      border-radius: 4px;
+      padding: 12px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    input:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      flex: 1;
+      background: var(--accent);
+      color: var(--bg-primary);
+      border: none;
+      border-radius: 4px;
+      padding: 12px 20px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--accent-dim);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    button.secondary {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+
+    button.secondary:hover:not(:disabled) {
+      background: #333;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+    }
+
+    .status-text {
+      font-size: 14px;
+    }
+
+    .state {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .state-disconnected { background: var(--bg-secondary); color: var(--text-secondary); }
+    .state-connecting { background: var(--warning); color: var(--bg-primary); }
+    .state-registering { background: var(--warning); color: var(--bg-primary); }
+    .state-ready { background: var(--accent-dim); color: var(--bg-primary); }
+    .state-mining { background: var(--success); color: var(--bg-primary); }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 15px;
+    }
+
+    .stat {
+      background: var(--bg-tertiary);
+      padding: 15px;
+      border-radius: 4px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .current-job {
+      display: flex;
+      gap: 20px;
+    }
+
+    .job-info {
+      flex: 1;
+    }
+
+    .job-info-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .job-info-value {
+      font-size: 14px;
+      font-family: inherit;
+      word-break: break-all;
+    }
+
+    .log {
+      height: 200px;
+      overflow-y: auto;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .log-entry {
+      padding: 2px 0;
+    }
+
+    .log-info { color: var(--text-secondary); }
+    .log-success { color: var(--success); }
+    .log-error { color: var(--error); }
+    .log-warning { color: var(--warning); }
+
+    footer {
+      text-align: center;
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 600px) {
+      body {
+        padding: 10px;
+      }
+
+      .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .current-job {
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .button-group {
+        flex-direction: column;
+      }
+    }
+  </style>
+  <script type="module" crossorigin src="/assets/index-k9mFB_aM.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Quantus Web Miner</h1>
+      <p class="subtitle">Browser-based GPU mining powered by WebGPU</p>
+    </header>
+
+    <div class="card">
+      <div class="card-title">Connection</div>
+      <div class="connection-form">
+        <div class="form-group">
+          <label for="address">Rewards Address (SS58)</label>
+          <input type="text" id="address" placeholder="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY" />
+        </div>
+        <div class="form-group">
+          <label for="pool-url">Pool URL</label>
+          <input type="text" id="pool-url" placeholder="wss://localhost:9834" value="wss://localhost:9834" />
+        </div>
+        <div class="button-group">
+          <button id="connect-btn">Connect</button>
+          <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Status</div>
+      <div class="status-bar">
+        <span class="status-text" id="status">Initializing...</span>
+        <span class="state state-disconnected" id="state">disconnected</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Statistics</div>
+      <div class="stats-grid">
+        <div class="stat">
+          <div class="stat-value" id="hash-rate">0 H/s</div>
+          <div class="stat-label">Hash Rate</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="total-hashes">0</div>
+          <div class="stat-label">Total Hashes</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="blocks-won">0</div>
+          <div class="stat-label">Blocks Won</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="jobs-completed">0</div>
+          <div class="stat-label">Jobs</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="uptime">00:00:00</div>
+          <div class="stat-label">Uptime</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Current Job</div>
+      <div class="current-job">
+        <div class="job-info">
+          <div class="job-info-label">Job ID</div>
+          <div class="job-info-value" id="job-id">-</div>
+        </div>
+        <div class="job-info">
+          <div class="job-info-label">Hashes</div>
+          <div class="job-info-value" id="job-hashes">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Log</div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <footer>
+      <p>Quantus Network &middot; <a href="https://github.com/quantus-network" target="_blank">GitHub</a></p>
+    </footer>
+  </div>
+
+</body>
+</html>
