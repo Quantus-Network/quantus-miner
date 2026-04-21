@@ -1,0 +1,30 @@
+[package]
+name = "pool-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Mining pool service for browser-based Quantus miners"
+
+[dependencies]
+# Workspace dependencies
+anyhow = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+primitive-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+# Local crates
+pool-api = { path = "../pool-api" }
+quantus-miner-api = { workspace = true }
+
+# QUIC transport (for connecting to node)
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+rcgen = "0.11"
+
+# WebSocket transport (for browser miners)
+futures-util = "0.3"
+tokio-tungstenite = "0.21"
+tokio-rustls = "0.24"

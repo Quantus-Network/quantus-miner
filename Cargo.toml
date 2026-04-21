@@ -6,6 +6,8 @@ members = [
 	"crates/miner-cli",
 	"crates/miner-service",
 	"crates/miner-telemetry",
+	"crates/pool-api",
+	"crates/pool-service",
 	"crates/pow-core",
 ]
 default-members = ["crates/miner-cli"]

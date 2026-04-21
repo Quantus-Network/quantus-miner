@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use engine_cpu::{EngineRange, MinerEngine};
 use miner_service::{run, ServiceConfig};
+use pool_service::PoolConfig;
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
@@ -57,6 +58,34 @@ enum Command {
 
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
+        verbose: bool,
+    },
+
+    /// Run as a mining pool for browser-based miners
+    Pool {
+        /// Address of the node to connect to (e.g., "127.0.0.1:9833")
+        #[arg(long, env = "POOL_NODE_ADDR")]
+        node_addr: std::net::SocketAddr,
+
+        /// Port to listen for WebSocket connections from browser miners
+        #[arg(long = "ws-port", env = "POOL_WS_PORT", default_value_t = 9834)]
+        ws_port: u16,
+
+        /// Pool operator's inner hash for receiving block rewards
+        /// (0x-prefixed, 32-byte hex from wormhole key generation)
+        #[arg(long, env = "POOL_REWARDS_INNER_HASH")]
+        rewards_inner_hash: String,
+
+        /// Number of block wins to accumulate before batch payout (default: 16)
+        #[arg(long = "payout-batch-size", env = "POOL_PAYOUT_BATCH_SIZE", default_value_t = 16)]
+        payout_batch_size: usize,
+
+        /// Port for Prometheus metrics HTTP endpoint (default: 9901)
+        #[arg(long = "metrics-port", env = "POOL_METRICS_PORT", default_value_t = 9901)]
+        metrics_port: u16,
+
+        /// Enable verbose logging
+        #[arg(short, long, env = "POOL_VERBOSE")]
         verbose: bool,
     },
 }
@@ -124,7 +153,72 @@ async fn main() {
             init_logger(verbose);
             run_benchmark(cpu_workers, gpu_devices, duration).await;
         }
+
+        Command::Pool {
+            node_addr,
+            ws_port,
+            rewards_inner_hash,
+            payout_batch_size,
+            metrics_port,
+            verbose,
+        } => {
+            init_logger(verbose);
+
+            // Parse inner hash
+            let inner_hash = parse_inner_hash(&rewards_inner_hash);
+
+            log::info!("Starting mining pool...");
+
+            // Start metrics HTTP server
+            if let Err(e) = metrics::start_http_exporter(metrics_port).await {
+                log::error!("Failed to start metrics exporter: {e:?}");
+                std::process::exit(1);
+            }
+            log::info!(
+                "Metrics available at http://0.0.0.0:{}/metrics",
+                metrics_port
+            );
+
+            let config = PoolConfig {
+                node_addr,
+                ws_port,
+                pool_inner_hash: inner_hash,
+                payout_batch_size,
+            };
+
+            if let Err(e) = pool_service::run(config).await {
+                log::error!("Pool service terminated with error: {e:?}");
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+fn parse_inner_hash(hex_str: &str) -> [u8; 32] {
+    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+
+    if hex_str.len() != 64 {
+        eprintln!("Error: --rewards-inner-hash must be a 32-byte hex string (64 characters).");
+        eprintln!("  Provided: {} characters", hex_str.len());
+        eprintln!();
+        eprintln!("To generate an inner hash, run on the node:");
+        eprintln!("  quantus-node key quantus --scheme wormhole");
+        eprintln!();
+        eprintln!("Then pass the 'Inner Hash' value as --rewards-inner-hash.");
+        std::process::exit(1);
+    }
+
+    let bytes = match hex::decode(hex_str) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("Error: --rewards-inner-hash contains invalid hex characters.");
+            std::process::exit(1);
+        }
+    };
+
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&bytes);
+    result
 }
 
 fn init_logger(verbose: bool) {

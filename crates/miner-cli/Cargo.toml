@@ -7,11 +7,13 @@ description = "CLI binary to run the Quantus External Miner service"
 
 [dependencies]
 miner-service = { path = "../miner-service" }
+pool-service = { path = "../pool-service" }
 metrics = { path = "../metrics", features = ["http-exporter"] }
 clap = { workspace = true, features = ["derive", "env"] }
 tokio = { workspace = true, features = ["full"] }
 env_logger = { workspace = true }
 log = { workspace = true }
+hex = { workspace = true }
 engine-cpu = { path = "../engine-cpu" }
 engine-gpu = { path = "../engine-gpu" }
 primitive-types = { workspace = true }
