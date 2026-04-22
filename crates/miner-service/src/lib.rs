@@ -10,7 +10,7 @@
 
 pub mod quic;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
 use pow_core::format_u512;
 use primitive_types::U512;
@@ -141,7 +141,7 @@ impl WorkerPool {
         if cpu_workers > 0 {
             if let Some(ref engine) = cpu_engine {
                 for _ in 0..cpu_workers {
-                    let (job_tx, job_rx) = bounded::<MiningJob>(1);
+                    let (job_tx, job_rx) = unbounded::<MiningJob>();
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -171,7 +171,7 @@ impl WorkerPool {
         if gpu_devices > 0 {
             if let Some(ref engine) = gpu_engine {
                 for _ in 0..gpu_devices {
-                    let (job_tx, job_rx) = bounded::<MiningJob>(1);
+                    let (job_tx, job_rx) = unbounded::<MiningJob>();
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -216,6 +216,8 @@ impl WorkerPool {
         // will be detected as stale when workers check the job ID before sending results
         let new_job_id = self.current_job_id.fetch_add(1, Ordering::SeqCst) + 1;
 
+        log::debug!("[JOB DISPATCH] Starting job {} - setting cancel flag", new_job_id);
+
         // Cancel any running job
         self.cancel_flag.store(true, Ordering::SeqCst);
 
@@ -232,17 +234,16 @@ impl WorkerPool {
             job_id: new_job_id,
         };
 
-        // Dispatch job to all workers
+        // Dispatch job to all workers (unbounded channels - always succeeds unless worker died)
         for tx in &self.job_senders {
-            // Non-blocking send - if worker is still processing old job, it will
-            // see the cancel flag and exit soon
-            let _ = tx.try_send(job.clone());
+            // Send will only fail if receiver is dropped (worker thread died)
+            let _ = tx.send(job.clone());
         }
 
         log::debug!(
-            "Job dispatched to {} workers (job_id {})",
-            self.job_senders.len(),
-            new_job_id
+            "[JOB DISPATCH] Job {} dispatched to {} workers",
+            new_job_id,
+            self.job_senders.len()
         );
 
         new_job_id
@@ -298,8 +299,10 @@ fn worker_loop(
 
     // Main job processing loop
     loop {
-        // Wait for a job
-        let job = match job_rx.recv() {
+        log::debug!("[WORKER {type_str}-{thread_id}] Waiting for job...");
+        
+        // Wait for a job (blocking)
+        let mut job = match job_rx.recv() {
             Ok(job) => job,
             Err(_) => {
                 // Channel closed, pool is shutting down
@@ -308,12 +311,23 @@ fn worker_loop(
             }
         };
 
+        // Drain channel to get the latest job (in case multiple jobs queued while we were busy)
+        let mut skipped = 0;
+        while let Ok(newer_job) = job_rx.try_recv() {
+            skipped += 1;
+            job = newer_job;
+        }
+        if skipped > 0 {
+            log::debug!("[WORKER {type_str}-{thread_id}] Drained {skipped} stale jobs from queue");
+        }
+
         // Capture the job's ID for later validation
         let job_id = job.job_id;
+        log::debug!("[WORKER {type_str}-{thread_id}] Received job {job_id}");
 
         // Check if already cancelled before starting
         if cancel_flag.load(Ordering::Relaxed) {
-            log::debug!("{type_str} worker {thread_id} skipping cancelled job");
+            log::debug!("[WORKER {type_str}-{thread_id}] Job {job_id} already cancelled, skipping");
             continue;
         }
 
@@ -321,15 +335,25 @@ fn worker_loop(
         let start = generate_random_nonce();
         let end = U512::MAX;
 
-        log::debug!(
-            "{type_str} worker {thread_id} processing job {job_id}: range {} to {}",
-            format_u512(start),
-            format_u512(end)
-        );
+        log::debug!("[WORKER {type_str}-{thread_id}] Starting search for job {job_id}");
 
         // Execute the search
+        let search_start = std::time::Instant::now();
         let range = EngineRange { start, end };
         let result = engine.search_range(&job.ctx, range, &cancel_flag);
+        let search_elapsed = search_start.elapsed();
+        
+        let result_type = match &result {
+            engine_cpu::EngineStatus::Found { .. } => "FOUND",
+            engine_cpu::EngineStatus::Exhausted { .. } => "EXHAUSTED",
+            engine_cpu::EngineStatus::Cancelled { .. } => "CANCELLED",
+            engine_cpu::EngineStatus::Running { .. } => "RUNNING",
+        };
+        log::debug!(
+            "[WORKER {type_str}-{thread_id}] Job {job_id} search finished: {} in {:.2}s",
+            result_type,
+            search_elapsed.as_secs_f64()
+        );
 
         // Check if job ID changed during search - if so, this result is stale
         let actual_job_id = current_job_id.load(Ordering::SeqCst);
