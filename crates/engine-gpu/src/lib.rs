@@ -11,9 +11,7 @@ use std::sync::{
     Arc,
 };
 
-/// Default batch size for GPU processing (in nonces)
-/// 10 million nonces per batch = ~50-500ms per batch depending on GPU
-const DEFAULT_BATCH_SIZE: u64 = 10_000_000;
+
 
 /// Represents a single GPU device context.
 struct GpuContext {
@@ -141,28 +139,10 @@ impl GpuContext {
     }
 }
 
-impl Default for GpuEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl GpuEngine {
-    pub fn new() -> Self {
-        block_on(Self::init(DEFAULT_BATCH_SIZE))
-            .expect("Failed to initialize GPU engine")
-    }
-
-    /// Try to initialize the GPU engine, returning an error if initialization fails.
-    pub fn try_new() -> Result<Self, Box<dyn std::error::Error>> {
-        block_on(Self::init(DEFAULT_BATCH_SIZE))
-    }
-
-    /// Try to initialize the GPU engine with custom batch size.
-    pub fn try_with_batch_size(
-        batch_size: Option<u64>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        block_on(Self::init(batch_size.unwrap_or(DEFAULT_BATCH_SIZE)))
+    /// Try to initialize the GPU engine with the given batch size.
+    pub fn try_new(batch_size: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        block_on(Self::init(batch_size))
     }
 
     async fn init(batch_size: u64) -> Result<Self, Box<dyn std::error::Error>> {
@@ -373,13 +353,15 @@ impl MinerEngine for GpuEngine {
             // Check for cancellation at host level BEFORE starting each batch
             if cancel.is_cancelled() {
                 let elapsed = search_start.elapsed();
+                let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
                 log::info!(
                     target: "gpu_engine",
-                    "GPU {} cancelled before batch {} ({} total hashes in {:.2}s)",
+                    "GPU {} cancelled before batch {} ({} total hashes in {:.2}s, {})",
                     device_index,
                     batch_num,
                     total_hashes,
-                    elapsed.as_secs_f64()
+                    elapsed.as_secs_f64(),
+                    format_hashrate(hash_rate)
                 );
                 return EngineStatus::Cancelled {
                     hash_count: total_hashes,

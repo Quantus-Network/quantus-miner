@@ -16,7 +16,7 @@ fn main() {
     // Use a fixed header and easy difficulty (1) so any nonce is valid
     let header = [1u8; 32];
     let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
-    let cpu_engine = FastCpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
     let ctx = cpu_engine.prepare_context(header, difficulty);
 
     log::info!("Context prepared. Difficulty: {}", difficulty);
@@ -26,7 +26,7 @@ fn main() {
 
     // 3. Verify with GPU engine
     log::info!("Initializing GPU engine...");
-    let gpu_engine = GpuEngine::new();
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
 
     // Search a small range around the valid nonce
     let gpu_range = Range {

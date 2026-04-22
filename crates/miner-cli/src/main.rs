@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+// CLI defaults
+const DEFAULT_GPU_BATCH_SIZE: u64 = 1_000_000;
+const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
+
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run the mining service
@@ -24,9 +28,13 @@ enum Command {
         #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
         gpu_devices: Option<usize>,
 
-        /// GPU batch size in nonces - controls how often GPU checks for cancellation (default: 10000000)
-        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE")]
-        gpu_batch_size: Option<u64>,
+        /// GPU batch size in nonces - controls how often GPU checks for cancellation
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
+        gpu_batch_size: u64,
+
+        /// CPU batch size in hashes - controls how often CPU checks for cancellation
+        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
+        cpu_batch_size: u64,
 
         /// Port for Prometheus metrics HTTP endpoint (default: 9900)
         #[arg(
@@ -85,6 +93,7 @@ async fn main() {
             cpu_workers,
             gpu_devices,
             gpu_batch_size,
+            cpu_batch_size,
             metrics_port,
             verbose,
         } => {
@@ -107,6 +116,7 @@ async fn main() {
                 cpu_workers,
                 gpu_devices,
                 gpu_batch_size,
+                cpu_batch_size,
             };
 
             if let Err(e) = run(config).await {
@@ -142,9 +152,9 @@ fn init_logger(verbose: bool) {
 async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, duration: u64) {
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
 
-    // Initialize GPU engine
+    // Initialize GPU engine (use default batch sizes for benchmark)
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices, None) {
+        match miner_service::resolve_gpu_configuration(gpu_devices, DEFAULT_GPU_BATCH_SIZE) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);
@@ -172,7 +182,7 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if effective_cpu_workers > 0 {
-        Some(Arc::new(engine_cpu::FastCpuEngine::new()))
+        Some(Arc::new(engine_cpu::FastCpuEngine::new(DEFAULT_CPU_BATCH_SIZE)))
     } else {
         None
     };

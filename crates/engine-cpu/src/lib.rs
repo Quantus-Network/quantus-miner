@@ -102,12 +102,16 @@ pub trait MinerEngine: Send + Sync {
 }
 
 /// Fast CPU engine using optimized pow-core helpers.
-#[derive(Default)]
-pub struct FastCpuEngine;
+pub struct FastCpuEngine {
+    /// How often to check for cancellation (in hashes)
+    batch_size: u64,
+}
 
 impl FastCpuEngine {
-    pub fn new() -> Self {
-        Self
+    pub fn new(batch_size: u64) -> Self {
+        Self {
+            batch_size: batch_size.max(1), // Ensure at least 1
+        }
     }
 }
 
@@ -135,7 +139,8 @@ impl MinerEngine for FastCpuEngine {
         let mut hash_count: u64 = 0;
 
         loop {
-            if cancel.is_cancelled() {
+            // Check for cancellation every batch_size hashes
+            if hash_count.is_multiple_of(self.batch_size) && cancel.is_cancelled() {
                 return EngineStatus::Cancelled { hash_count };
             }
 
@@ -188,7 +193,7 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let cancel_check = AtomicBoolCancelCheck(&cancel);
-        let engine = FastCpuEngine::new();
+        let engine = FastCpuEngine::new(1000); // check every 1000 hashes
 
         let status = engine.search_range(&ctx, range.clone(), &cancel_check);
         match status {
@@ -213,7 +218,7 @@ mod tests {
 
         let cancel = AtomicBool::new(true); // pre-cancelled
         let cancel_check = AtomicBoolCancelCheck(&cancel);
-        let engine = FastCpuEngine::new();
+        let engine = FastCpuEngine::new(1); // check every hash for immediate cancellation
 
         let status = engine.search_range(&ctx, range, &cancel_check);
         match status {

@@ -7,8 +7,8 @@ use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
 fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
@@ -58,8 +58,8 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
 }
 
 fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
@@ -109,8 +109,8 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
 }
 
 fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
@@ -160,8 +160,8 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
 }
 
 fn bench_solution_finding(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
@@ -211,8 +211,8 @@ fn bench_solution_finding(c: &mut Criterion) {
 }
 
 fn bench_throughput_per_second(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
@@ -262,7 +262,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
 }
 
 fn bench_gpu_batch_efficiency(c: &mut Criterion) {
-    let gpu_engine = GpuEngine::new();
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 

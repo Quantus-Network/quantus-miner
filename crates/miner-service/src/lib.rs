@@ -12,7 +12,7 @@ pub mod quic;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
-use pow_core::format_u512;
+use pow_core::{format_hashrate, format_u512};
 use primitive_types::U512;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,8 +27,10 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// GPU batch size in nonces (None = use default of 10,000,000)
-    pub gpu_batch_size: Option<u64>,
+    /// GPU batch size in nonces
+    pub gpu_batch_size: u64,
+    /// CPU batch size in hashes
+    pub cpu_batch_size: u64,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -36,17 +38,6 @@ pub struct ServiceConfig {
 pub enum EngineType {
     Cpu,
     Gpu,
-}
-
-impl Default for ServiceConfig {
-    fn default() -> Self {
-        Self {
-            node_addr: "127.0.0.1:9833".parse().unwrap(),
-            cpu_workers: None,
-            gpu_devices: None,
-            gpu_batch_size: None,
-        }
-    }
 }
 
 /// Result from a single worker thread.
@@ -334,9 +325,6 @@ fn worker_loop(
         // Check if job ID changed during search - if so, this result is stale
         let actual_job_id = current_job_id.load(Ordering::SeqCst);
         if actual_job_id != job_id {
-            log::debug!(
-                "⏰ {type_str} worker {thread_id} discarding stale result (job {job_id} != current {actual_job_id})"
-            );
             // Still send hash count for metrics, but without the candidate
             let hash_count = match result {
                 engine_cpu::EngineStatus::Found { hash_count, .. } => hash_count,
@@ -344,6 +332,16 @@ fn worker_loop(
                 engine_cpu::EngineStatus::Cancelled { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Running { .. } => 0,
             };
+            let hash_rate = if search_elapsed.as_secs_f64() > 0.0 {
+                hash_count as f64 / search_elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
+            log::info!(
+                "{type_str} worker {thread_id} cancelled (stale): {hash_count} hashes in {:.2}s ({})",
+                search_elapsed.as_secs_f64(),
+                format_hashrate(hash_rate)
+            );
             let _ = result_tx.try_send(WorkerResult {
                 thread_id,
                 engine_type,
@@ -370,11 +368,25 @@ fn worker_loop(
                 (Some(MiningCandidate { nonce, work, hash }), hash_count)
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
-                log::debug!("{type_str} worker {thread_id} exhausted range ({hash_count} hashes)");
+                let hash_rate = hash_count as f64 / search_elapsed.as_secs_f64();
+                log::info!(
+                    "{type_str} worker {thread_id} exhausted range: {hash_count} hashes in {:.2}s ({})",
+                    search_elapsed.as_secs_f64(),
+                    format_hashrate(hash_rate)
+                );
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                log::debug!("{type_str} worker {thread_id} cancelled ({hash_count} hashes)");
+                let hash_rate = if search_elapsed.as_secs_f64() > 0.0 {
+                    hash_count as f64 / search_elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+                log::info!(
+                    "{type_str} worker {thread_id} cancelled: {hash_count} hashes in {:.2}s ({})",
+                    search_elapsed.as_secs_f64(),
+                    format_hashrate(hash_rate)
+                );
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Running { .. } => {
@@ -405,7 +417,7 @@ fn worker_loop(
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
-    batch_size: Option<u64>,
+    batch_size: u64,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -413,7 +425,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = engine_gpu::GpuEngine::try_with_batch_size(batch_size);
+    let engine = engine_gpu::GpuEngine::try_new(batch_size);
     let engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -477,7 +489,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if cpu_workers > 0 {
-        Some(Arc::new(engine_cpu::FastCpuEngine::new()))
+        Some(Arc::new(engine_cpu::FastCpuEngine::new(config.cpu_batch_size)))
     } else {
         None
     };

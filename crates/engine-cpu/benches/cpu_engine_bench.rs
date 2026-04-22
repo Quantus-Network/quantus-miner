@@ -6,8 +6,8 @@ use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
 fn bench_cpu_fast_engine(c: &mut Criterion) {
-    // Create the engine
-    let engine = FastCpuEngine::new();
+    // Create the engine with batch size of 10000
+    let engine = FastCpuEngine::new(10_000);
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
