@@ -147,12 +147,19 @@ impl MinerEngine for FastCpuEngine {
 
         let mut current = range.start;
         let mut hash_count: u64 = 0;
+        // Use decrementing counter to avoid modulo division in hot loop
+        // Initialize to 0 so we check cancellation immediately on first iteration
+        let mut until_check: u64 = 0;
 
         loop {
             // Check for cancellation every batch_size hashes
-            if hash_count.is_multiple_of(self.batch_size) && cancel.is_cancelled() {
-                return EngineStatus::Cancelled { hash_count };
+            if until_check == 0 {
+                if cancel.is_cancelled() {
+                    return EngineStatus::Cancelled { hash_count };
+                }
+                until_check = self.batch_size;
             }
+            until_check -= 1;
 
             let hash = hash_from_nonce(ctx, current);
             hash_count = hash_count.saturating_add(1);

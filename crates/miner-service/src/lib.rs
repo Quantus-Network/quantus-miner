@@ -200,17 +200,18 @@ impl WorkerPool {
             let _ = tx.send(job.clone());
         }
 
-        log::debug!(
-            "[JOB DISPATCH] Job {} dispatched to {} workers",
-            new_job_id,
-            self.job_senders.len()
-        );
+        let worker_count = self.job_senders.len();
+        log::debug!("[JOB DISPATCH] Job {new_job_id} dispatched to {worker_count} workers");
 
         new_job_id
     }
 
     /// Cancel the current job by incrementing the job ID.
     /// Workers will detect the change and stop processing.
+    ///
+    /// Note: This increments job_id by 1, and start_job() also increments by 1,
+    /// so job IDs in logs may become non-contiguous after disconnects/cancellations.
+    /// This is expected behavior - job IDs only need to be unique, not sequential.
     pub fn cancel(&self) {
         self.current_job_id.fetch_add(1, Ordering::SeqCst);
     }
@@ -234,6 +235,26 @@ impl WorkerPool {
     pub fn gpu_worker_count(&self) -> usize {
         self.gpu_worker_count
     }
+}
+
+/// Log worker completion with hash rate info.
+fn log_worker_completion(
+    type_str: &str,
+    thread_id: usize,
+    status: &str,
+    hash_count: u64,
+    elapsed: std::time::Duration,
+) {
+    let hash_rate = if elapsed.as_secs_f64() > 0.0 {
+        hash_count as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    log::info!(
+        "{type_str} worker {thread_id} {status}: {hash_count} hashes in {:.2}s ({})",
+        elapsed.as_secs_f64(),
+        format_hashrate(hash_rate)
+    );
 }
 
 /// Main loop for a persistent worker thread.
@@ -318,15 +339,12 @@ fn worker_loop(
                 engine_cpu::EngineStatus::Cancelled { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Running { .. } => 0,
             };
-            let hash_rate = if search_elapsed.as_secs_f64() > 0.0 {
-                hash_count as f64 / search_elapsed.as_secs_f64()
-            } else {
-                0.0
-            };
-            log::info!(
-                "{type_str} worker {thread_id} cancelled (stale): {hash_count} hashes in {:.2}s ({})",
-                search_elapsed.as_secs_f64(),
-                format_hashrate(hash_rate)
+            log_worker_completion(
+                type_str,
+                thread_id,
+                "cancelled (stale)",
+                hash_count,
+                search_elapsed,
             );
             let _ = result_tx.try_send(WorkerResult {
                 thread_id,
@@ -354,25 +372,17 @@ fn worker_loop(
                 (Some(MiningCandidate { nonce, work, hash }), hash_count)
             }
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
-                let hash_rate = hash_count as f64 / search_elapsed.as_secs_f64();
-                log::info!(
-                    "{type_str} worker {thread_id} exhausted range: {hash_count} hashes in {:.2}s ({})",
-                    search_elapsed.as_secs_f64(),
-                    format_hashrate(hash_rate)
+                log_worker_completion(
+                    type_str,
+                    thread_id,
+                    "exhausted range",
+                    hash_count,
+                    search_elapsed,
                 );
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                let hash_rate = if search_elapsed.as_secs_f64() > 0.0 {
-                    hash_count as f64 / search_elapsed.as_secs_f64()
-                } else {
-                    0.0
-                };
-                log::info!(
-                    "{type_str} worker {thread_id} cancelled: {hash_count} hashes in {:.2}s ({})",
-                    search_elapsed.as_secs_f64(),
-                    format_hashrate(hash_rate)
-                );
+                log_worker_completion(type_str, thread_id, "cancelled", hash_count, search_elapsed);
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Running { .. } => {
@@ -418,7 +428,7 @@ pub fn resolve_gpu_configuration(
             if requested_devices.is_some() {
                 anyhow::bail!("Failed to initialize GPU engine: {}", e);
             }
-            log::info!("No GPU available: {}", e);
+            log::info!("No GPU available: {e}");
             return Ok((None, 0));
         }
     };
@@ -438,7 +448,7 @@ pub fn resolve_gpu_configuration(
             return Ok((None, 0));
         }
         None => {
-            log::info!("Auto-detected {} GPU device(s)", available);
+            log::info!("Auto-detected {available} GPU device(s)");
             available
         }
     };
@@ -488,19 +498,20 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     );
 
     if let Some(ref engine) = cpu_engine {
-        log::info!("🖥️  CPU engine: {}", engine.name());
+        let name = engine.name();
+        log::info!("🖥️  CPU engine: {name}");
     }
     if let Some(ref engine) = gpu_engine {
-        log::info!("🎮 GPU engine: {}", engine.name());
+        let name = engine.name();
+        log::info!("🎮 GPU engine: {name}");
     }
 
-    log::info!(
-        "⛏️  Mining service ready with {} total workers",
-        cpu_workers + gpu_devices
-    );
+    let total_workers = cpu_workers + gpu_devices;
+    log::info!("⛏️  Mining service ready with {total_workers} total workers");
 
     // Connect to node and start mining
-    log::info!("🌐 Connecting to node at {}", config.node_addr);
+    let node_addr = config.node_addr;
+    log::info!("🌐 Connecting to node at {node_addr}");
     quic::connect_and_mine(
         config.node_addr,
         cpu_engine,

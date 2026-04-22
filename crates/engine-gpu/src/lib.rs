@@ -206,7 +206,7 @@ impl GpuEngine {
             log::debug!(target: "gpu_engine", "Pipeline initialized for adapter {}", i);
 
             // Calculate vendor-specific configuration once during initialization
-            let optimal_workgroups = Self::get_vendor_specific_dispatch(&info, &device);
+            let optimal_workgroups = get_vendor_specific_dispatch(&info, &device);
 
             contexts.push(Arc::new(GpuContext {
                 device,
@@ -385,7 +385,7 @@ impl MinerEngine for GpuEngine {
 
             // Run single batch
             let batch_result =
-                self.run_single_batch(gpu_ctx, &resources, current_start, this_batch_size);
+                run_single_batch(gpu_ctx, &resources, current_start, this_batch_size);
 
             match batch_result {
                 BatchResult::Found {
@@ -469,418 +469,412 @@ enum BatchResult {
     },
 }
 
-impl GpuEngine {
-    /// Run a single batch of GPU computation
-    fn run_single_batch(
-        &self,
-        gpu_ctx: &GpuContext,
-        resources: &GpuResources,
-        batch_start: U512,
-        batch_size: u64,
-    ) -> BatchResult {
-        // Calculate dispatch configuration for this batch
-        let threads_per_workgroup = 256u32;
-        let limits = gpu_ctx.device.limits();
-        let max_workgroups = limits.max_compute_workgroups_per_dimension;
+/// Run a single batch of GPU computation
+fn run_single_batch(
+    gpu_ctx: &GpuContext,
+    resources: &GpuResources,
+    batch_start: U512,
+    batch_size: u64,
+) -> BatchResult {
+    // Calculate dispatch configuration for this batch
+    let threads_per_workgroup = 256u32;
+    let limits = gpu_ctx.device.limits();
+    let max_workgroups = limits.max_compute_workgroups_per_dimension;
 
-        let hinted_workgroups = gpu_ctx.optimal_workgroups.max(1).min(max_workgroups);
-        let hinted_threads = hinted_workgroups as u64 * threads_per_workgroup as u64;
+    let hinted_workgroups = gpu_ctx.optimal_workgroups.max(1).min(max_workgroups);
+    let hinted_threads = hinted_workgroups as u64 * threads_per_workgroup as u64;
 
-        let logical_threads = batch_size.min(hinted_threads).max(1);
-        let num_workgroups = ((logical_threads as u32).div_ceil(threads_per_workgroup)).max(1);
-        let total_threads = (num_workgroups * threads_per_workgroup) as u64;
-        let nonces_per_thread = (batch_size.div_ceil(total_threads)).max(1) as u32;
+    let logical_threads = batch_size.min(hinted_threads).max(1);
+    let num_workgroups = ((logical_threads as u32).div_ceil(threads_per_workgroup)).max(1);
+    let total_threads = (num_workgroups * threads_per_workgroup) as u64;
+    let nonces_per_thread = (batch_size.div_ceil(total_threads)).max(1) as u32;
 
-        // Dispatch config: [total_threads, nonces_per_thread, total_nonces]
-        let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size as u32];
+    // Dispatch config: [total_threads, nonces_per_thread, total_nonces]
+    let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size as u32];
 
-        // Write dispatch config
-        gpu_ctx.queue.write_buffer(
-            &resources.dispatch_config_buffer,
-            0,
-            bytemuck::cast_slice(&dispatch_config),
-        );
+    // Write dispatch config
+    gpu_ctx.queue.write_buffer(
+        &resources.dispatch_config_buffer,
+        0,
+        bytemuck::cast_slice(&dispatch_config),
+    );
 
-        // Write start nonce for this batch
-        let start_nonce_bytes = batch_start.to_little_endian();
-        gpu_ctx
-            .queue
-            .write_buffer(&resources.start_nonce_buffer, 0, &start_nonce_bytes);
+    // Write start nonce for this batch
+    let start_nonce_bytes = batch_start.to_little_endian();
+    gpu_ctx
+        .queue
+        .write_buffer(&resources.start_nonce_buffer, 0, &start_nonce_bytes);
 
-        // Reset results buffer
-        const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
-        const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
-        gpu_ctx
-            .queue
-            .write_buffer(&resources.results_buffer, 0, &ZEROS);
+    // Reset results buffer
+    const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;
+    const ZEROS: [u8; RESULTS_SIZE] = [0; RESULTS_SIZE];
+    gpu_ctx
+        .queue
+        .write_buffer(&resources.results_buffer, 0, &ZEROS);
 
-        // Create and submit command buffer
-        let mut encoder = gpu_ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&gpu_ctx.pipeline);
-            cpass.set_bind_group(0, &resources.bind_group, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+    // Create and submit command buffer
+    let mut encoder = gpu_ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&gpu_ctx.pipeline);
+        cpass.set_bind_group(0, &resources.bind_group, &[]);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(
+        &resources.results_buffer,
+        0,
+        &resources.staging_buffer,
+        0,
+        RESULTS_SIZE as u64,
+    );
+
+    gpu_ctx.queue.submit(Some(encoder.finish()));
+
+    // Wait for GPU to complete (blocking)
+    let buffer_slice = resources.staging_buffer.slice(..);
+    let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mapped_clone = mapped.clone();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        if result.is_ok() {
+            mapped_clone.store(true, Ordering::Release);
         }
-        encoder.copy_buffer_to_buffer(
-            &resources.results_buffer,
-            0,
-            &resources.staging_buffer,
-            0,
-            RESULTS_SIZE as u64,
-        );
+    });
 
-        gpu_ctx.queue.submit(Some(encoder.finish()));
-
-        // Wait for GPU to complete (blocking)
-        let buffer_slice = resources.staging_buffer.slice(..);
-        let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mapped_clone = mapped.clone();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            if result.is_ok() {
-                mapped_clone.store(true, Ordering::Release);
-            }
+    // Poll until complete
+    loop {
+        let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_millis(10)),
         });
 
-        // Poll until complete
-        loop {
-            let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(std::time::Duration::from_millis(10)),
-            });
-
-            if mapped.load(Ordering::Acquire) {
-                break;
-            }
+        if mapped.load(Ordering::Acquire) {
+            break;
         }
+    }
 
-        // Read results
-        let data = buffer_slice.get_mapped_range();
-        let result_u32s: &[u32] = bytemuck::cast_slice(&data);
+    // Read results
+    let data = buffer_slice.get_mapped_range();
+    let result_u32s: &[u32] = bytemuck::cast_slice(&data);
 
-        // Calculate the actual number of nonces dispatched
-        let dispatched_nonces = (total_threads * nonces_per_thread as u64).min(batch_size);
+    // Calculate the actual number of nonces dispatched
+    let dispatched_nonces = (total_threads * nonces_per_thread as u64).min(batch_size);
 
-        if result_u32s[0] != 0 {
-            // Solution found!
-            let nonce_u32s = &result_u32s[1..17];
-            let hash_u32s = &result_u32s[17..33];
-            let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
-            let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
-            let work = nonce.to_big_endian();
+    if result_u32s[0] != 0 {
+        // Solution found!
+        let nonce_u32s = &result_u32s[1..17];
+        let hash_u32s = &result_u32s[17..33];
+        let nonce = U512::from_little_endian(bytemuck::cast_slice(nonce_u32s));
+        let hash = U512::from_little_endian(bytemuck::cast_slice(hash_u32s));
+        let work = nonce.to_big_endian();
 
-            // Calculate hashes computed based on GPU parallel execution model
-            let hashes_computed = if nonce >= batch_start {
-                let logical_index = (nonce - batch_start).as_u64();
-                let winning_iteration = logical_index % (nonces_per_thread as u64);
-                (total_threads * (winning_iteration + 1)).min(dispatched_nonces)
-            } else {
-                dispatched_nonces
-            };
-
-            drop(data);
-            resources.staging_buffer.unmap();
-
-            return BatchResult::Found {
-                candidate: Candidate { nonce, work, hash },
-                hash_count: hashes_computed,
-            };
-        }
+        // Calculate hashes computed based on GPU parallel execution model
+        let hashes_computed = if nonce >= batch_start {
+            let logical_index = (nonce - batch_start).as_u64();
+            let winning_iteration = logical_index % (nonces_per_thread as u64);
+            (total_threads * (winning_iteration + 1)).min(dispatched_nonces)
+        } else {
+            dispatched_nonces
+        };
 
         drop(data);
         resources.staging_buffer.unmap();
 
-        BatchResult::NotFound {
-            hash_count: dispatched_nonces,
-        }
+        return BatchResult::Found {
+            candidate: Candidate { nonce, work, hash },
+            hash_count: hashes_computed,
+        };
     }
 
-    /// Get vendor-specific optimal dispatch configuration
-    fn get_vendor_specific_dispatch(
-        adapter_info: &wgpu::AdapterInfo,
-        device: &wgpu::Device,
-    ) -> u32 {
-        let limits = device.limits();
-        let max_workgroups = limits.max_compute_workgroups_per_dimension.min(65535);
+    drop(data);
+    resources.staging_buffer.unmap();
 
-        // Parse vendor from adapter info
-        let vendor_name = adapter_info.name.to_lowercase();
-        let _device_name = adapter_info.device.to_string().to_lowercase();
+    BatchResult::NotFound {
+        hash_count: dispatched_nonces,
+    }
+}
 
-        // Vendor-specific heuristics based on architecture knowledge
-        // Returns (workgroups, tier_name, is_fallback)
-        let (optimal_workgroups, tier, is_fallback) =
-            if vendor_name.contains("nvidia") || adapter_info.vendor == 4318 {
-                // NVIDIA GPUs (vendor ID 0x10DE = 4318)
-                if vendor_name.contains("5090") || vendor_name.contains("5080") {
-                    (
-                        (max_workgroups / 6).max(5120),
-                        "NVIDIA RTX 50 Flagship (Blackwell)",
-                        false,
-                    )
-                } else if vendor_name.contains("5070")
-                    || vendor_name.contains("5060")
-                    || vendor_name.contains("rtx 50")
-                {
-                    (
-                        (max_workgroups / 7).max(4608),
-                        "NVIDIA RTX 50 (Blackwell)",
-                        false,
-                    )
-                } else if vendor_name.contains("4090") || vendor_name.contains("4080") {
-                    (
-                        (max_workgroups / 8).max(4096),
-                        "NVIDIA RTX 40 Flagship (Ada)",
-                        false,
-                    )
-                } else if vendor_name.contains("rtx 40")
-                    || vendor_name.contains("4070")
-                    || vendor_name.contains("4060")
-                {
-                    (
-                        (max_workgroups / 10).max(3072),
-                        "NVIDIA RTX 40 (Ada)",
-                        false,
-                    )
-                } else if vendor_name.contains("rtx 30")
-                    || vendor_name.contains("rtx 20")
-                    || vendor_name.contains("3090")
-                    || vendor_name.contains("3080")
-                    || vendor_name.contains("3070")
-                    || vendor_name.contains("2080")
-                    || vendor_name.contains("2070")
-                    || vendor_name.contains("2060")
-                {
-                    (
-                        (max_workgroups / 12).max(2048),
-                        "NVIDIA RTX 30/20 (Ampere/Turing)",
-                        false,
-                    )
-                } else if vendor_name.contains("gtx 16")
-                    || vendor_name.contains("gtx 10")
-                    || vendor_name.contains("1660")
-                    || vendor_name.contains("1650")
-                    || vendor_name.contains("1080")
-                    || vendor_name.contains("1070")
-                    || vendor_name.contains("1060")
-                {
-                    (
-                        (max_workgroups / 16).max(1024),
-                        "NVIDIA GTX 16/10 (Turing/Pascal)",
-                        false,
-                    )
-                } else if vendor_name.contains("gtx") {
-                    ((max_workgroups / 18).max(768), "NVIDIA GTX (Legacy)", false)
-                } else if vendor_name.contains("quadro")
-                    || vendor_name.contains("rtx a")
-                    || vendor_name.contains("tesla")
-                {
-                    (
-                        (max_workgroups / 10).max(2560),
-                        "NVIDIA Quadro/Professional",
-                        false,
-                    )
-                } else {
-                    ((max_workgroups / 20).max(512), "NVIDIA Unknown", true)
-                }
-            } else if vendor_name.contains("amd")
-                || vendor_name.contains("radeon")
-                || adapter_info.vendor == 4098
+/// Get vendor-specific optimal dispatch configuration
+fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu::Device) -> u32 {
+    let limits = device.limits();
+    let max_workgroups = limits.max_compute_workgroups_per_dimension.min(65535);
+
+    // Parse vendor from adapter info
+    let vendor_name = adapter_info.name.to_lowercase();
+    let _device_name = adapter_info.device.to_string().to_lowercase();
+
+    // Vendor-specific heuristics based on architecture knowledge
+    // Returns (workgroups, tier_name, is_fallback)
+    let (optimal_workgroups, tier, is_fallback) =
+        if vendor_name.contains("nvidia") || adapter_info.vendor == 4318 {
+            // NVIDIA GPUs (vendor ID 0x10DE = 4318)
+            if vendor_name.contains("5090") || vendor_name.contains("5080") {
+                (
+                    (max_workgroups / 6).max(5120),
+                    "NVIDIA RTX 50 Flagship (Blackwell)",
+                    false,
+                )
+            } else if vendor_name.contains("5070")
+                || vendor_name.contains("5060")
+                || vendor_name.contains("rtx 50")
             {
-                // AMD GPUs (vendor ID 0x1002 = 4098)
-                if vendor_name.contains("rx 9")
-                    || vendor_name.contains("9070")
-                    || vendor_name.contains("9080")
-                {
-                    (
-                        (max_workgroups / 8).max(4096),
-                        "AMD RX 9000 (RDNA 4)",
-                        false,
-                    )
-                } else if vendor_name.contains("7900") {
-                    (
-                        (max_workgroups / 9).max(3584),
-                        "AMD RX 7900 (RDNA 3 Flagship)",
-                        false,
-                    )
-                } else if vendor_name.contains("rx 7")
-                    || vendor_name.contains("7800")
-                    || vendor_name.contains("7700")
-                    || vendor_name.contains("7600")
-                {
-                    (
-                        (max_workgroups / 10).max(3072),
-                        "AMD RX 7000 (RDNA 3)",
-                        false,
-                    )
-                } else if vendor_name.contains("6900") || vendor_name.contains("6800") {
-                    (
-                        (max_workgroups / 12).max(2560),
-                        "AMD RX 6900/6800 (RDNA 2 Flagship)",
-                        false,
-                    )
-                } else if vendor_name.contains("rx 6")
-                    || vendor_name.contains("6700")
-                    || vendor_name.contains("6600")
-                {
-                    (
-                        (max_workgroups / 14).max(2048),
-                        "AMD RX 6000 (RDNA 2)",
-                        false,
-                    )
-                } else if vendor_name.contains("5700") {
-                    (
-                        (max_workgroups / 16).max(1536),
-                        "AMD RX 5700 (RDNA 1)",
-                        false,
-                    )
-                } else if vendor_name.contains("rx 5")
-                    || vendor_name.contains("5600")
-                    || vendor_name.contains("5500")
-                {
-                    (
-                        (max_workgroups / 18).max(1024),
-                        "AMD RX 5000 (RDNA 1)",
-                        false,
-                    )
-                } else if vendor_name.contains("rx 4")
-                    || vendor_name.contains("580")
-                    || vendor_name.contains("570")
-                {
-                    (
-                        (max_workgroups / 20).max(768),
-                        "AMD RX 500/400 (Polaris)",
-                        false,
-                    )
-                } else if vendor_name.contains("radeon pro")
-                    || vendor_name.contains("instinct")
-                    || vendor_name.contains("mi")
-                {
-                    (
-                        (max_workgroups / 10).max(2560),
-                        "AMD Radeon Pro/Instinct",
-                        false,
-                    )
-                } else {
-                    ((max_workgroups / 24).max(512), "AMD Unknown", true)
-                }
-            } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
-                // Intel GPUs (vendor ID 0x8086 = 32902)
-                if vendor_name.contains("arc b")
-                    || vendor_name.contains("b580")
-                    || vendor_name.contains("b570")
-                {
-                    (
-                        (max_workgroups / 10).max(2560),
-                        "Intel Arc B-Series (Battlemage)",
-                        false,
-                    )
-                } else if vendor_name.contains("a770") || vendor_name.contains("a750") {
-                    (
-                        (max_workgroups / 12).max(2048),
-                        "Intel Arc A7 (Alchemist)",
-                        false,
-                    )
-                } else if vendor_name.contains("a580")
-                    || vendor_name.contains("a380")
-                    || vendor_name.contains("arc a5")
-                    || vendor_name.contains("arc a3")
-                {
-                    (
-                        (max_workgroups / 16).max(1024),
-                        "Intel Arc A5/A3 (Alchemist)",
-                        false,
-                    )
-                } else if vendor_name.contains("a310") {
-                    ((max_workgroups / 20).max(512), "Intel Arc A3 Entry", false)
-                } else if vendor_name.contains("iris xe") || vendor_name.contains("iris plus") {
-                    (
-                        (max_workgroups / 24).max(384),
-                        "Intel Iris Xe/Plus (Integrated)",
-                        false,
-                    )
-                } else if vendor_name.contains("uhd") || vendor_name.contains("hd graphics") {
-                    (
-                        (max_workgroups / 28).max(256),
-                        "Intel UHD/HD Graphics (Integrated)",
-                        false,
-                    )
-                } else {
-                    ((max_workgroups / 24).max(256), "Intel Unknown", true)
-                }
-            } else if adapter_info.backend == wgpu::Backend::Metal {
-                // Apple GPUs (detected by Metal backend)
-                let (gpu_cores, workgroups, tier) = if vendor_name.contains("m4 ultra") {
-                    (80, 1600, "Apple M4 Ultra")
-                } else if vendor_name.contains("m4 max") {
-                    (40, 800, "Apple M4 Max")
-                } else if vendor_name.contains("m4 pro") {
-                    (20, 400, "Apple M4 Pro")
-                } else if vendor_name.contains("m4") {
-                    (10, 200, "Apple M4")
-                } else if vendor_name.contains("m3 ultra") {
-                    (76, 1520, "Apple M3 Ultra")
-                } else if vendor_name.contains("m3 max") {
-                    (40, 800, "Apple M3 Max")
-                } else if vendor_name.contains("m3 pro") {
-                    (18, 360, "Apple M3 Pro")
-                } else if vendor_name.contains("m3") {
-                    (10, 200, "Apple M3")
-                } else if vendor_name.contains("m2 ultra") {
-                    (76, 1520, "Apple M2 Ultra")
-                } else if vendor_name.contains("m2 max") {
-                    (38, 760, "Apple M2 Max")
-                } else if vendor_name.contains("m2 pro") {
-                    (19, 380, "Apple M2 Pro")
-                } else if vendor_name.contains("m2") {
-                    (10, 200, "Apple M2")
-                } else if vendor_name.contains("m1 ultra") {
-                    (64, 1280, "Apple M1 Ultra")
-                } else if vendor_name.contains("m1 max") {
-                    (32, 640, "Apple M1 Max")
-                } else if vendor_name.contains("m1 pro") {
-                    (16, 320, "Apple M1 Pro")
-                } else if vendor_name.contains("m1") {
-                    (8, 160, "Apple M1")
-                } else {
-                    (8, 160, "Apple Silicon Unknown")
-                };
-
-                let clamped_workgroups = workgroups.min(max_workgroups / 4).max(64);
-                let _ = gpu_cores; // gpu_cores currently unused but kept for potential future tuning
-                let is_fallback = tier == "Apple Silicon Unknown";
-                (clamped_workgroups, tier, is_fallback)
+                (
+                    (max_workgroups / 7).max(4608),
+                    "NVIDIA RTX 50 (Blackwell)",
+                    false,
+                )
+            } else if vendor_name.contains("4090") || vendor_name.contains("4080") {
+                (
+                    (max_workgroups / 8).max(4096),
+                    "NVIDIA RTX 40 Flagship (Ada)",
+                    false,
+                )
+            } else if vendor_name.contains("rtx 40")
+                || vendor_name.contains("4070")
+                || vendor_name.contains("4060")
+            {
+                (
+                    (max_workgroups / 10).max(3072),
+                    "NVIDIA RTX 40 (Ada)",
+                    false,
+                )
+            } else if vendor_name.contains("rtx 30")
+                || vendor_name.contains("rtx 20")
+                || vendor_name.contains("3090")
+                || vendor_name.contains("3080")
+                || vendor_name.contains("3070")
+                || vendor_name.contains("2080")
+                || vendor_name.contains("2070")
+                || vendor_name.contains("2060")
+            {
+                (
+                    (max_workgroups / 12).max(2048),
+                    "NVIDIA RTX 30/20 (Ampere/Turing)",
+                    false,
+                )
+            } else if vendor_name.contains("gtx 16")
+                || vendor_name.contains("gtx 10")
+                || vendor_name.contains("1660")
+                || vendor_name.contains("1650")
+                || vendor_name.contains("1080")
+                || vendor_name.contains("1070")
+                || vendor_name.contains("1060")
+            {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "NVIDIA GTX 16/10 (Turing/Pascal)",
+                    false,
+                )
+            } else if vendor_name.contains("gtx") {
+                ((max_workgroups / 18).max(768), "NVIDIA GTX (Legacy)", false)
+            } else if vendor_name.contains("quadro")
+                || vendor_name.contains("rtx a")
+                || vendor_name.contains("tesla")
+            {
+                (
+                    (max_workgroups / 10).max(2560),
+                    "NVIDIA Quadro/Professional",
+                    false,
+                )
             } else {
-                // Unknown/Generic GPU - use conservative defaults
-                ((max_workgroups / 16).max(512), "Unknown GPU", true)
+                ((max_workgroups / 20).max(512), "NVIDIA Unknown", true)
+            }
+        } else if vendor_name.contains("amd")
+            || vendor_name.contains("radeon")
+            || adapter_info.vendor == 4098
+        {
+            // AMD GPUs (vendor ID 0x1002 = 4098)
+            if vendor_name.contains("rx 9")
+                || vendor_name.contains("9070")
+                || vendor_name.contains("9080")
+            {
+                (
+                    (max_workgroups / 8).max(4096),
+                    "AMD RX 9000 (RDNA 4)",
+                    false,
+                )
+            } else if vendor_name.contains("7900") {
+                (
+                    (max_workgroups / 9).max(3584),
+                    "AMD RX 7900 (RDNA 3 Flagship)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 7")
+                || vendor_name.contains("7800")
+                || vendor_name.contains("7700")
+                || vendor_name.contains("7600")
+            {
+                (
+                    (max_workgroups / 10).max(3072),
+                    "AMD RX 7000 (RDNA 3)",
+                    false,
+                )
+            } else if vendor_name.contains("6900") || vendor_name.contains("6800") {
+                (
+                    (max_workgroups / 12).max(2560),
+                    "AMD RX 6900/6800 (RDNA 2 Flagship)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 6")
+                || vendor_name.contains("6700")
+                || vendor_name.contains("6600")
+            {
+                (
+                    (max_workgroups / 14).max(2048),
+                    "AMD RX 6000 (RDNA 2)",
+                    false,
+                )
+            } else if vendor_name.contains("5700") {
+                (
+                    (max_workgroups / 16).max(1536),
+                    "AMD RX 5700 (RDNA 1)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 5")
+                || vendor_name.contains("5600")
+                || vendor_name.contains("5500")
+            {
+                (
+                    (max_workgroups / 18).max(1024),
+                    "AMD RX 5000 (RDNA 1)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 4")
+                || vendor_name.contains("580")
+                || vendor_name.contains("570")
+            {
+                (
+                    (max_workgroups / 20).max(768),
+                    "AMD RX 500/400 (Polaris)",
+                    false,
+                )
+            } else if vendor_name.contains("radeon pro")
+                || vendor_name.contains("instinct")
+                || vendor_name.contains("mi")
+            {
+                (
+                    (max_workgroups / 10).max(2560),
+                    "AMD Radeon Pro/Instinct",
+                    false,
+                )
+            } else {
+                ((max_workgroups / 24).max(512), "AMD Unknown", true)
+            }
+        } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
+            // Intel GPUs (vendor ID 0x8086 = 32902)
+            if vendor_name.contains("arc b")
+                || vendor_name.contains("b580")
+                || vendor_name.contains("b570")
+            {
+                (
+                    (max_workgroups / 10).max(2560),
+                    "Intel Arc B-Series (Battlemage)",
+                    false,
+                )
+            } else if vendor_name.contains("a770") || vendor_name.contains("a750") {
+                (
+                    (max_workgroups / 12).max(2048),
+                    "Intel Arc A7 (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a580")
+                || vendor_name.contains("a380")
+                || vendor_name.contains("arc a5")
+                || vendor_name.contains("arc a3")
+            {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "Intel Arc A5/A3 (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a310") {
+                ((max_workgroups / 20).max(512), "Intel Arc A3 Entry", false)
+            } else if vendor_name.contains("iris xe") || vendor_name.contains("iris plus") {
+                (
+                    (max_workgroups / 24).max(384),
+                    "Intel Iris Xe/Plus (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("uhd") || vendor_name.contains("hd graphics") {
+                (
+                    (max_workgroups / 28).max(256),
+                    "Intel UHD/HD Graphics (Integrated)",
+                    false,
+                )
+            } else {
+                ((max_workgroups / 24).max(256), "Intel Unknown", true)
+            }
+        } else if adapter_info.backend == wgpu::Backend::Metal {
+            // Apple GPUs (detected by Metal backend)
+            let (gpu_cores, workgroups, tier) = if vendor_name.contains("m4 ultra") {
+                (80, 1600, "Apple M4 Ultra")
+            } else if vendor_name.contains("m4 max") {
+                (40, 800, "Apple M4 Max")
+            } else if vendor_name.contains("m4 pro") {
+                (20, 400, "Apple M4 Pro")
+            } else if vendor_name.contains("m4") {
+                (10, 200, "Apple M4")
+            } else if vendor_name.contains("m3 ultra") {
+                (76, 1520, "Apple M3 Ultra")
+            } else if vendor_name.contains("m3 max") {
+                (40, 800, "Apple M3 Max")
+            } else if vendor_name.contains("m3 pro") {
+                (18, 360, "Apple M3 Pro")
+            } else if vendor_name.contains("m3") {
+                (10, 200, "Apple M3")
+            } else if vendor_name.contains("m2 ultra") {
+                (76, 1520, "Apple M2 Ultra")
+            } else if vendor_name.contains("m2 max") {
+                (38, 760, "Apple M2 Max")
+            } else if vendor_name.contains("m2 pro") {
+                (19, 380, "Apple M2 Pro")
+            } else if vendor_name.contains("m2") {
+                (10, 200, "Apple M2")
+            } else if vendor_name.contains("m1 ultra") {
+                (64, 1280, "Apple M1 Ultra")
+            } else if vendor_name.contains("m1 max") {
+                (32, 640, "Apple M1 Max")
+            } else if vendor_name.contains("m1 pro") {
+                (16, 320, "Apple M1 Pro")
+            } else if vendor_name.contains("m1") {
+                (8, 160, "Apple M1")
+            } else {
+                (8, 160, "Apple Silicon Unknown")
             };
 
-        // Log GPU detection result
-        log::info!(
+            let clamped_workgroups = workgroups.min(max_workgroups / 4).max(64);
+            let _ = gpu_cores; // gpu_cores currently unused but kept for potential future tuning
+            let is_fallback = tier == "Apple Silicon Unknown";
+            (clamped_workgroups, tier, is_fallback)
+        } else {
+            // Unknown/Generic GPU - use conservative defaults
+            ((max_workgroups / 16).max(512), "Unknown GPU", true)
+        };
+
+    // Log GPU detection result
+    log::info!(
+        target: "gpu_engine",
+        "GPU detected: {} | tier: {} | workgroups: {} (max: {})",
+        adapter_info.name,
+        tier,
+        optimal_workgroups,
+        max_workgroups
+    );
+
+    if is_fallback {
+        log::warn!(
             target: "gpu_engine",
-            "GPU detected: {} | tier: {} | workgroups: {} (max: {})",
+            "GPU not recognized, using fallback config. Please report: name='{}', vendor=0x{:04X}, device={}",
             adapter_info.name,
-            tier,
-            optimal_workgroups,
-            max_workgroups
+            adapter_info.vendor,
+            adapter_info.device
         );
-
-        if is_fallback {
-            log::warn!(
-                target: "gpu_engine",
-                "GPU not recognized, using fallback config. Please report: name='{}', vendor=0x{:04X}, device={}",
-                adapter_info.name,
-                adapter_info.vendor,
-                adapter_info.device
-            );
-            log::warn!(target: "gpu_engine", "Report at: https://github.com/Quantus-Network/quantus-miner/issues");
-        }
-
-        optimal_workgroups
+        log::warn!(target: "gpu_engine", "Report at: https://github.com/Quantus-Network/quantus-miner/issues");
     }
+
+    optimal_workgroups
 }

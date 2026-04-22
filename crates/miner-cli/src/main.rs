@@ -59,6 +59,14 @@ enum Command {
         #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
         gpu_devices: Option<usize>,
 
+        /// GPU batch size in nonces - controls how often GPU checks for cancellation
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
+        gpu_batch_size: u64,
+
+        /// CPU batch size in hashes - controls how often CPU checks for cancellation
+        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
+        cpu_batch_size: u64,
+
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
         duration: u64,
@@ -128,11 +136,20 @@ async fn main() {
         Command::Benchmark {
             cpu_workers,
             gpu_devices,
+            gpu_batch_size,
+            cpu_batch_size,
             duration,
             verbose,
         } => {
             init_logger(verbose);
-            run_benchmark(cpu_workers, gpu_devices, duration).await;
+            run_benchmark(
+                cpu_workers,
+                gpu_devices,
+                gpu_batch_size,
+                cpu_batch_size,
+                duration,
+            )
+            .await;
         }
     }
 }
@@ -149,12 +166,18 @@ fn init_logger(verbose: bool) {
     env_logger::init();
 }
 
-async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, duration: u64) {
+async fn run_benchmark(
+    cpu_workers: Option<usize>,
+    gpu_devices: Option<usize>,
+    gpu_batch_size: u64,
+    cpu_batch_size: u64,
+    duration: u64,
+) {
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
 
-    // Initialize GPU engine (use default batch sizes for benchmark)
+    // Initialize GPU engine
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices, DEFAULT_GPU_BATCH_SIZE) {
+        match miner_service::resolve_gpu_configuration(gpu_devices, gpu_batch_size) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);
@@ -182,9 +205,7 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if effective_cpu_workers > 0 {
-        Some(Arc::new(engine_cpu::FastCpuEngine::new(
-            DEFAULT_CPU_BATCH_SIZE,
-        )))
+        Some(Arc::new(engine_cpu::FastCpuEngine::new(cpu_batch_size)))
     } else {
         None
     };
