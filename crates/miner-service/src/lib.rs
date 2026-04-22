@@ -138,14 +138,7 @@ impl WorkerPool {
                     let tid = thread_id;
 
                     let handle = thread::spawn(move || {
-                        worker_loop(
-                            tid,
-                            EngineType::Cpu,
-                            eng,
-                            job_rx,
-                            tx,
-                            job_id_counter,
-                        );
+                        worker_loop(tid, EngineType::Cpu, eng, job_rx, tx, job_id_counter);
                     });
                     handles.push(handle);
                     thread_id += 1;
@@ -166,14 +159,7 @@ impl WorkerPool {
                     let tid = thread_id;
 
                     let handle = thread::spawn(move || {
-                        worker_loop(
-                            tid,
-                            EngineType::Gpu,
-                            eng,
-                            job_rx,
-                            tx,
-                            job_id_counter,
-                        );
+                        worker_loop(tid, EngineType::Gpu, eng, job_rx, tx, job_id_counter);
                     });
                     handles.push(handle);
                     thread_id += 1;
@@ -269,7 +255,7 @@ fn worker_loop(
     // Main job processing loop
     loop {
         log::debug!("[WORKER {type_str}-{thread_id}] Waiting for job...");
-        
+
         // Wait for a job (blocking)
         let mut job = match job_rx.recv() {
             Ok(job) => job,
@@ -309,7 +295,7 @@ fn worker_loop(
         };
         let result = engine.search_range(&job.ctx, range, &cancel_check);
         let search_elapsed = search_start.elapsed();
-        
+
         let result_type = match &result {
             engine_cpu::EngineStatus::Found { .. } => "FOUND",
             engine_cpu::EngineStatus::Exhausted { .. } => "EXHAUSTED",
@@ -466,10 +452,8 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let effective_cpus = num_cpus::get().max(1);
 
     // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(
-        config.gpu_devices,
-        config.gpu_batch_size,
-    )?;
+    let (gpu_engine, gpu_devices) =
+        resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_size)?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
@@ -489,7 +473,9 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if cpu_workers > 0 {
-        Some(Arc::new(engine_cpu::FastCpuEngine::new(config.cpu_batch_size)))
+        Some(Arc::new(engine_cpu::FastCpuEngine::new(
+            config.cpu_batch_size,
+        )))
     } else {
         None
     };

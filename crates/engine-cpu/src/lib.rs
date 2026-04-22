@@ -95,7 +95,12 @@ pub trait MinerEngine: Send + Sync {
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext;
 
     /// Search an inclusive nonce range with cancellation support.
-    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &dyn CancelCheck) -> EngineStatus;
+    fn search_range(
+        &self,
+        ctx: &JobContext,
+        range: Range,
+        cancel: &dyn CancelCheck,
+    ) -> EngineStatus;
 
     /// Enable downcasting to concrete engine types.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -128,7 +133,12 @@ impl MinerEngine for FastCpuEngine {
         self
     }
 
-    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &dyn CancelCheck) -> EngineStatus {
+    fn search_range(
+        &self,
+        ctx: &JobContext,
+        range: Range,
+        cancel: &dyn CancelCheck,
+    ) -> EngineStatus {
         use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
 
         if range.start > range.end {

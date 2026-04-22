@@ -182,7 +182,9 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if effective_cpu_workers > 0 {
-        Some(Arc::new(engine_cpu::FastCpuEngine::new(DEFAULT_CPU_BATCH_SIZE)))
+        Some(Arc::new(engine_cpu::FastCpuEngine::new(
+            DEFAULT_CPU_BATCH_SIZE,
+        )))
     } else {
         None
     };
