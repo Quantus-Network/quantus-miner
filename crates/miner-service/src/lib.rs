@@ -11,10 +11,10 @@
 pub mod quic;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-use engine_cpu::{EngineCandidate, EngineRange, MinerEngine};
+use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
 use pow_core::format_u512;
 use primitive_types::U512;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -27,8 +27,8 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// GPU cancel check interval in nonces (None = use default of 100,000)
-    pub gpu_cancel_interval: Option<u32>,
+    /// GPU batch size in nonces (None = use default of 10,000,000)
+    pub gpu_batch_size: Option<u64>,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -44,7 +44,7 @@ impl Default for ServiceConfig {
             node_addr: "127.0.0.1:9833".parse().unwrap(),
             cpu_workers: None,
             gpu_devices: None,
-            gpu_cancel_interval: None,
+            gpu_batch_size: None,
         }
     }
 }
@@ -102,8 +102,6 @@ pub struct WorkerPool {
     job_senders: Vec<Sender<MiningJob>>,
     /// Receiver for collecting results from all workers
     result_rx: Receiver<WorkerResult>,
-    /// Shared cancellation flag for all workers
-    cancel_flag: Arc<AtomicBool>,
     /// Job ID counter - incremented on each new job to detect stale results
     current_job_id: Arc<AtomicU64>,
     /// Thread handles (for cleanup)
@@ -124,7 +122,6 @@ impl WorkerPool {
     ) -> Self {
         let total_workers = cpu_workers + gpu_devices;
         let (result_tx, result_rx) = bounded(total_workers * 64);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
         let current_job_id = Arc::new(AtomicU64::new(0));
 
         let mut job_senders = Vec::with_capacity(total_workers);
@@ -146,7 +143,6 @@ impl WorkerPool {
 
                     let eng = engine.clone();
                     let tx = result_tx.clone();
-                    let cancel = cancel_flag.clone();
                     let job_id_counter = current_job_id.clone();
                     let tid = thread_id;
 
@@ -157,7 +153,6 @@ impl WorkerPool {
                             eng,
                             job_rx,
                             tx,
-                            cancel,
                             job_id_counter,
                         );
                     });
@@ -176,7 +171,6 @@ impl WorkerPool {
 
                     let eng = engine.clone();
                     let tx = result_tx.clone();
-                    let cancel = cancel_flag.clone();
                     let job_id_counter = current_job_id.clone();
                     let tid = thread_id;
 
@@ -187,7 +181,6 @@ impl WorkerPool {
                             eng,
                             job_rx,
                             tx,
-                            cancel,
                             job_id_counter,
                         );
                     });
@@ -200,7 +193,6 @@ impl WorkerPool {
         Self {
             job_senders,
             result_rx,
-            cancel_flag,
             current_job_id,
             _handles: handles,
             cpu_worker_count: cpu_workers,
@@ -216,16 +208,7 @@ impl WorkerPool {
         // will be detected as stale when workers check the job ID before sending results
         let new_job_id = self.current_job_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-        log::debug!("[JOB DISPATCH] Starting job {} - setting cancel flag", new_job_id);
-
-        // Cancel any running job
-        self.cancel_flag.store(true, Ordering::SeqCst);
-
-        // Brief pause to let workers see the cancellation
-        std::thread::sleep(std::time::Duration::from_millis(1));
-
-        // Reset cancel flag for new job
-        self.cancel_flag.store(false, Ordering::SeqCst);
+        log::debug!("[JOB DISPATCH] Starting job {new_job_id}");
 
         // Create job context (shared across all workers)
         let ctx = pow_core::JobContext::new(header_hash, difficulty);
@@ -249,19 +232,15 @@ impl WorkerPool {
         new_job_id
     }
 
-    /// Cancel the current job.
+    /// Cancel the current job by incrementing the job ID.
+    /// Workers will detect the change and stop processing.
     pub fn cancel(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.current_job_id.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Get the result receiver for collecting worker results.
     pub fn result_receiver(&self) -> &Receiver<WorkerResult> {
         &self.result_rx
-    }
-
-    /// Get the shared cancel flag.
-    pub fn cancel_flag(&self) -> &Arc<AtomicBool> {
-        &self.cancel_flag
     }
 
     /// Total number of workers.
@@ -287,7 +266,6 @@ fn worker_loop(
     engine: Arc<dyn MinerEngine>,
     job_rx: Receiver<MiningJob>,
     result_tx: Sender<WorkerResult>,
-    cancel_flag: Arc<AtomicBool>,
     current_job_id: Arc<AtomicU64>,
 ) {
     let type_str = match engine_type {
@@ -325,22 +303,20 @@ fn worker_loop(
         let job_id = job.job_id;
         log::debug!("[WORKER {type_str}-{thread_id}] Received job {job_id}");
 
-        // Check if already cancelled before starting
-        if cancel_flag.load(Ordering::Relaxed) {
-            log::debug!("[WORKER {type_str}-{thread_id}] Job {job_id} already cancelled, skipping");
-            continue;
-        }
-
         // Generate random starting nonce for this job
         let start = generate_random_nonce();
         let end = U512::MAX;
 
         log::debug!("[WORKER {type_str}-{thread_id}] Starting search for job {job_id}");
 
-        // Execute the search
+        // Execute the search - both CPU and GPU use job ID comparison for cancellation
         let search_start = std::time::Instant::now();
         let range = EngineRange { start, end };
-        let result = engine.search_range(&job.ctx, range, &cancel_flag);
+        let cancel_check = JobIdCancelCheck {
+            current_job_id: &current_job_id,
+            my_job_id: job_id,
+        };
+        let result = engine.search_range(&job.ctx, range, &cancel_check);
         let search_elapsed = search_start.elapsed();
         
         let result_type = match &result {
@@ -429,7 +405,7 @@ fn worker_loop(
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
-    cancel_interval: Option<u32>,
+    batch_size: Option<u64>,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -437,10 +413,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = match cancel_interval {
-        Some(interval) => engine_gpu::GpuEngine::try_with_cancel_interval(interval),
-        None => engine_gpu::GpuEngine::try_new(),
-    };
+    let engine = engine_gpu::GpuEngine::try_with_batch_size(batch_size);
     let engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -481,8 +454,10 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let effective_cpus = num_cpus::get().max(1);
 
     // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) =
-        resolve_gpu_configuration(config.gpu_devices, config.gpu_cancel_interval)?;
+    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(
+        config.gpu_devices,
+        config.gpu_batch_size,
+    )?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use engine_cpu::{EngineRange, MinerEngine};
+use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
 use miner_service::{run, ServiceConfig};
 use primitive_types::U512;
 use rand::RngCore;
@@ -24,9 +24,9 @@ enum Command {
         #[arg(long = "gpu-devices", env = "MINER_GPU_DEVICES")]
         gpu_devices: Option<usize>,
 
-        /// GPU cancel check interval in nonces (default: 10000)
-        #[arg(long = "gpu-cancel-interval", env = "MINER_GPU_CANCEL_INTERVAL")]
-        gpu_cancel_interval: Option<u32>,
+        /// GPU batch size in nonces - controls how often GPU checks for cancellation (default: 10000000)
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE")]
+        gpu_batch_size: Option<u64>,
 
         /// Port for Prometheus metrics HTTP endpoint (default: 9900)
         #[arg(
@@ -84,7 +84,7 @@ async fn main() {
             node_addr,
             cpu_workers,
             gpu_devices,
-            gpu_cancel_interval,
+            gpu_batch_size,
             metrics_port,
             verbose,
         } => {
@@ -106,7 +106,7 @@ async fn main() {
                 node_addr,
                 cpu_workers,
                 gpu_devices,
-                gpu_cancel_interval,
+                gpu_batch_size,
             };
 
             if let Err(e) = run(config).await {
@@ -224,7 +224,8 @@ async fn run_benchmark(cpu_workers: Option<usize>, gpu_devices: Option<usize>, d
                     break;
                 }
 
-                let result = engine.search_range(&ctx, worker_range.clone(), &cancel);
+                let cancel_check = AtomicBoolCancelCheck(&cancel);
+                let result = engine.search_range(&ctx, worker_range.clone(), &cancel_check);
 
                 match result {
                     engine_cpu::EngineStatus::Found { hash_count, .. }

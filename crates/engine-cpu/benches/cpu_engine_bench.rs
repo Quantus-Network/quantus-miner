@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use engine_cpu::{FastCpuEngine, MinerEngine, Range};
+use engine_cpu::{AtomicBoolCancelCheck, FastCpuEngine, MinerEngine, Range};
 use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::RngCore;
@@ -9,6 +9,7 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
     // Create the engine
     let engine = FastCpuEngine::new();
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     let large_range = Range {
         start: U512::from(0u64),
@@ -25,7 +26,7 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
             let result = engine.search_range(
                 black_box(&ctx),
                 black_box(large_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
