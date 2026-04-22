@@ -1,4 +1,4 @@
-use engine_cpu::{EngineStatus, FastCpuEngine, MinerEngine, Range};
+use engine_cpu::{AtomicBoolCancelCheck, EngineStatus, FastCpuEngine, MinerEngine, Range};
 use engine_gpu::GpuEngine;
 use primitive_types::U512;
 use std::sync::atomic::AtomicBool;
@@ -16,16 +16,17 @@ fn main() {
     // Use a fixed header and easy difficulty (1) so any nonce is valid
     let header = [1u8; 32];
     let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
-    let cpu_engine = FastCpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
     let ctx = cpu_engine.prepare_context(header, difficulty);
 
     log::info!("Context prepared. Difficulty: {}", difficulty);
 
     let cancel = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel);
 
     // 3. Verify with GPU engine
     log::info!("Initializing GPU engine...");
-    let gpu_engine = GpuEngine::new();
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
 
     // Search a small range around the valid nonce
     let gpu_range = Range {
@@ -39,7 +40,7 @@ fn main() {
         gpu_range.end
     );
     let start = std::time::Instant::now();
-    let gpu_result = gpu_engine.search_range(&ctx, gpu_range, &cancel);
+    let gpu_result = gpu_engine.search_range(&ctx, gpu_range, &cancel_check);
     let elapsed = start.elapsed();
 
     log::info!("GPU search took {:?}", elapsed);

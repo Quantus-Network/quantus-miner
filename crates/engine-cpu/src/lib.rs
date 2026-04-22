@@ -8,7 +8,7 @@
 
 use pow_core::JobContext;
 use primitive_types::U512;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// An inclusive nonce range to search.
 #[derive(Clone, Debug)]
@@ -53,6 +53,36 @@ pub enum EngineStatus {
     },
 }
 
+/// Cancellation checker passed to search_range.
+/// Returns true if the search should be cancelled.
+pub trait CancelCheck: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
+/// Simple cancel check using an AtomicBool flag.
+/// Useful for benchmarks and simple scenarios.
+pub struct AtomicBoolCancelCheck<'a>(pub &'a AtomicBool);
+
+impl CancelCheck for AtomicBoolCancelCheck<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Cancel check using job ID comparison.
+/// When a new job starts, the current_job_id is incremented.
+/// Workers compare their job_id against the current to detect cancellation.
+pub struct JobIdCancelCheck<'a> {
+    pub current_job_id: &'a AtomicU64,
+    pub my_job_id: u64,
+}
+
+impl CancelCheck for JobIdCancelCheck<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.current_job_id.load(Ordering::Relaxed) != self.my_job_id
+    }
+}
+
 /// Abstract mining engine interface.
 ///
 /// The service layer depends only on this trait to manage jobs.
@@ -65,19 +95,28 @@ pub trait MinerEngine: Send + Sync {
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext;
 
     /// Search an inclusive nonce range with cancellation support.
-    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus;
+    fn search_range(
+        &self,
+        ctx: &JobContext,
+        range: Range,
+        cancel: &dyn CancelCheck,
+    ) -> EngineStatus;
 
     /// Enable downcasting to concrete engine types.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Fast CPU engine using optimized pow-core helpers.
-#[derive(Default)]
-pub struct FastCpuEngine;
+pub struct FastCpuEngine {
+    /// How often to check for cancellation (in hashes)
+    batch_size: u64,
+}
 
 impl FastCpuEngine {
-    pub fn new() -> Self {
-        Self
+    pub fn new(batch_size: u64) -> Self {
+        Self {
+            batch_size: batch_size.max(1), // Ensure at least 1
+        }
     }
 }
 
@@ -94,7 +133,12 @@ impl MinerEngine for FastCpuEngine {
         self
     }
 
-    fn search_range(&self, ctx: &JobContext, range: Range, cancel: &AtomicBool) -> EngineStatus {
+    fn search_range(
+        &self,
+        ctx: &JobContext,
+        range: Range,
+        cancel: &dyn CancelCheck,
+    ) -> EngineStatus {
         use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
 
         if range.start > range.end {
@@ -103,11 +147,19 @@ impl MinerEngine for FastCpuEngine {
 
         let mut current = range.start;
         let mut hash_count: u64 = 0;
+        // Use decrementing counter to avoid modulo division in hot loop
+        // Initialize to 0 so we check cancellation immediately on first iteration
+        let mut until_check: u64 = 0;
 
         loop {
-            if cancel.load(AtomicOrdering::Relaxed) {
-                return EngineStatus::Cancelled { hash_count };
+            // Check for cancellation every batch_size hashes
+            if until_check == 0 {
+                if cancel.is_cancelled() {
+                    return EngineStatus::Cancelled { hash_count };
+                }
+                until_check = self.batch_size;
             }
+            until_check -= 1;
 
             let hash = hash_from_nonce(ctx, current);
             hash_count = hash_count.saturating_add(1);
@@ -157,9 +209,10 @@ mod tests {
         };
 
         let cancel = AtomicBool::new(false);
-        let engine = FastCpuEngine::new();
+        let cancel_check = AtomicBoolCancelCheck(&cancel);
+        let engine = FastCpuEngine::new(1000); // check every 1000 hashes
 
-        let status = engine.search_range(&ctx, range.clone(), &cancel);
+        let status = engine.search_range(&ctx, range.clone(), &cancel_check);
         match status {
             EngineStatus::Exhausted { hash_count } => {
                 let expected = (range.end - range.start + U512::one()).as_u64();
@@ -181,9 +234,10 @@ mod tests {
         };
 
         let cancel = AtomicBool::new(true); // pre-cancelled
-        let engine = FastCpuEngine::new();
+        let cancel_check = AtomicBoolCancelCheck(&cancel);
+        let engine = FastCpuEngine::new(1); // check every hash for immediate cancellation
 
-        let status = engine.search_range(&ctx, range, &cancel);
+        let status = engine.search_range(&ctx, range, &cancel_check);
         match status {
             EngineStatus::Cancelled { hash_count } => {
                 assert_eq!(hash_count, 0);

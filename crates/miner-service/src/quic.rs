@@ -227,9 +227,9 @@ async fn handle_connection(
                 match msg_result {
                     Ok(MinerMessage::NewJob(request)) => {
                         log::info!(
-                            "⛏️ Received job: id={}, hash={}...",
+                            "⛏️ Received job: id={}, hash=0x{}",
                             request.job_id,
-                            &request.mining_hash[..8]
+                            request.mining_hash
                         );
 
                         // Parse header hash

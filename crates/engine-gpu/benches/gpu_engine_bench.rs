@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use engine_cpu::{FastCpuEngine, MinerEngine, Range};
+use engine_cpu::{AtomicBoolCancelCheck, FastCpuEngine, MinerEngine, Range};
 use engine_gpu::GpuEngine;
 use pow_core::JobContext;
 use primitive_types::U512;
@@ -7,9 +7,10 @@ use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
 fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     // Small range: 10K nonces - reasonable for benchmarking
     let small_range = Range {
@@ -31,7 +32,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
             let result = cpu_engine.search_range(
                 black_box(&ctx),
                 black_box(small_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -47,7 +48,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(small_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -57,9 +58,10 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
 }
 
 fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     // Medium range: 100K nonces
     let medium_range = Range {
@@ -81,7 +83,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
             let result = cpu_engine.search_range(
                 black_box(&ctx),
                 black_box(medium_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -97,7 +99,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(medium_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -107,9 +109,10 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
 }
 
 fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     // Large range: 1M nonces - where GPU should really shine
     let large_range = Range {
@@ -131,7 +134,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
             let result = cpu_engine.search_range(
                 black_box(&ctx),
                 black_box(large_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -147,7 +150,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(large_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -157,9 +160,10 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
 }
 
 fn bench_solution_finding(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     // Range where we expect to find solutions quickly
     let solution_range = Range {
@@ -181,7 +185,7 @@ fn bench_solution_finding(c: &mut Criterion) {
             let result = cpu_engine.search_range(
                 black_box(&ctx),
                 black_box(solution_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -197,7 +201,7 @@ fn bench_solution_finding(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(solution_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -207,9 +211,10 @@ fn bench_solution_finding(c: &mut Criterion) {
 }
 
 fn bench_throughput_per_second(c: &mut Criterion) {
-    let cpu_engine = FastCpuEngine::new();
-    let gpu_engine = GpuEngine::new();
+    let cpu_engine = FastCpuEngine::new(10_000);
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     // Fixed time benchmark - see how many hashes we can do in 1 second
     let throughput_range = Range {
@@ -231,7 +236,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
             let result = cpu_engine.search_range(
                 black_box(&ctx),
                 black_box(throughput_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -247,7 +252,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(throughput_range.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -257,8 +262,9 @@ fn bench_throughput_per_second(c: &mut Criterion) {
 }
 
 fn bench_gpu_batch_efficiency(c: &mut Criterion) {
-    let gpu_engine = GpuEngine::new();
+    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
     let cancel_flag = AtomicBool::new(false);
+    let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
 
     let mut group = c.benchmark_group("gpu_batch_sizes");
     group.sample_size(10);
@@ -290,7 +296,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(small_batch.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -306,7 +312,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(medium_batch.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
@@ -322,7 +328,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
             let result = gpu_engine.search_range(
                 black_box(&ctx),
                 black_box(large_batch.clone()),
-                black_box(&cancel_flag),
+                black_box(&cancel_check),
             );
             black_box(result)
         })
