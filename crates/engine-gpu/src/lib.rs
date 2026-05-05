@@ -137,6 +137,100 @@ impl GpuContext {
     }
 }
 
+/// Mining-friendliness ranking for wgpu backends. Lower is better.
+///
+/// Vulkan and Metal are the native compute paths on Linux/Windows and macOS
+/// respectively, and benchmark on par with or above DX12 for PoW-style
+/// dispatch on most hardware. DX12 is kept as a strong fallback for Windows
+/// when a vendor's Vulkan driver is missing or buggy.
+fn backend_priority(backend: wgpu::Backend) -> u8 {
+    match backend {
+        wgpu::Backend::Vulkan => 0,
+        wgpu::Backend::Metal => 0,
+        wgpu::Backend::Dx12 => 1,
+        wgpu::Backend::Gl => 2,
+        wgpu::Backend::BrowserWebGpu => 3,
+        // Forward-compatible: `wgpu::Backend` is non-exhaustive.
+        _ => 99,
+    }
+}
+
+/// Drop CPU-emulated adapters and collapse per-backend duplicates of the
+/// same physical GPU into a single entry. See call site for context.
+fn filter_and_dedupe_adapters(adapters: Vec<wgpu::Adapter>) -> Vec<wgpu::Adapter> {
+    use std::collections::HashMap;
+
+    // Group by (vendor, device) — wgpu reports the same numeric pair for
+    // Vulkan and DX12 entries of the same physical card.
+    let mut groups: HashMap<(u32, u32), Vec<wgpu::Adapter>> = HashMap::new();
+    let mut filtered_cpu = 0usize;
+
+    for adapter in adapters {
+        let info = adapter.get_info();
+        if matches!(info.device_type, wgpu::DeviceType::Cpu) {
+            log::info!(
+                target: "gpu_engine",
+                "Skipping CPU-emulated adapter: {} (backend: {:?})",
+                info.name,
+                info.backend
+            );
+            filtered_cpu += 1;
+            continue;
+        }
+        groups.entry((info.vendor, info.device)).or_default().push(adapter);
+    }
+
+    if filtered_cpu > 0 {
+        log::info!(
+            target: "gpu_engine",
+            "Filtered {} CPU-emulated adapter(s).",
+            filtered_cpu
+        );
+    }
+
+    let mut selected = Vec::with_capacity(groups.len());
+    for ((vendor, device), mut group) in groups {
+        group.sort_by_key(|a| backend_priority(a.get_info().backend));
+        let chosen = group.remove(0);
+        let chosen_info = chosen.get_info();
+        if !group.is_empty() {
+            let dropped: Vec<String> = group
+                .iter()
+                .map(|a| format!("{:?}", a.get_info().backend))
+                .collect();
+            log::info!(
+                target: "gpu_engine",
+                "Adapter {} (vendor=0x{:04x}, device=0x{:04x}): kept backend {:?}, \
+                 dropped duplicates: [{}]",
+                chosen_info.name,
+                vendor,
+                device,
+                chosen_info.backend,
+                dropped.join(", ")
+            );
+        }
+        selected.push(chosen);
+    }
+
+    // Stable, predictable order: discrete first, then integrated, then
+    // virtual; vendor/device id as tiebreakers so the same machine always
+    // enumerates adapters in the same order across runs.
+    selected.sort_by_key(|a| {
+        let info = a.get_info();
+        let type_score = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            wgpu::DeviceType::VirtualGpu => 2,
+            wgpu::DeviceType::Cpu => 4, // unreachable post-filter
+            // Forward-compatible: `wgpu::DeviceType` is non-exhaustive.
+            _ => 3,
+        };
+        (type_score, info.vendor, info.device)
+    });
+
+    selected
+}
+
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size.
     pub fn try_new(batch_size: u64) -> Result<Self, Box<dyn std::error::Error>> {
@@ -150,14 +244,31 @@ impl GpuEngine {
             ..Default::default()
         });
 
-        let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY);
+        let raw_adapters: Vec<_> = instance
+            .enumerate_adapters(wgpu::Backends::PRIMARY)
+            .into_iter()
+            .collect();
 
-        // Collect adapters to a vector to check count and iterate with index
-        let adapters: Vec<_> = adapters.into_iter().collect();
-
-        if adapters.is_empty() {
+        if raw_adapters.is_empty() {
             log::error!(target: "gpu_engine", "No suitable GPU adapters found.");
             return Err("No suitable GPU adapters found".into());
+        }
+
+        // On Windows wgpu enumerates each physical GPU once per backend
+        // (Vulkan + DX12) plus a CPU-emulated software fallback ("Microsoft
+        // Basic Render Driver"). Spawning workers on every entry causes
+        // VRAM contention and OOMs the process. Filter CPU-emulated entries
+        // and dedupe by (vendor, device), keeping the entry with the
+        // highest-priority backend (Vulkan > DX12 > Metal > Gl).
+        let adapters = filter_and_dedupe_adapters(raw_adapters);
+
+        if adapters.is_empty() {
+            log::error!(
+                target: "gpu_engine",
+                "No usable GPU adapters after filtering software fallbacks. \
+                 Set MINER_GPU_DEVICES=0 to disable GPU mining."
+            );
+            return Err("No suitable GPU adapters found after filtering".into());
         }
 
         let mut contexts = Vec::new();
