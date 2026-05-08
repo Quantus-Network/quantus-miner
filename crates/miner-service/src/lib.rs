@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod quic;
+pub mod zk_aggregation;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
@@ -31,6 +32,8 @@ pub struct ServiceConfig {
     pub gpu_batch_size: u64,
     /// CPU batch size in hashes
     pub cpu_batch_size: u64,
+    /// Optional delegated ZK aggregation worker configuration.
+    pub zk_aggregation: Option<zk_aggregation::ZkAggregationConfig>,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -458,6 +461,18 @@ pub fn resolve_gpu_configuration(
 
 /// Start the miner service with the given configuration.
 pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
+    if let Some(ref zk_config) = config.zk_aggregation {
+        zk_config.validate()?;
+        log::info!(
+            "ZK aggregation enabled: rpc={}, workers={}, max_active_jobs={}, strategy={:?}, dry_run={}",
+            zk_config.node_rpc,
+            zk_config.workers,
+            zk_config.max_active_jobs,
+            zk_config.claim_strategy,
+            zk_config.dry_run
+        );
+    }
+
     // Detect effective CPU count
     let effective_cpus = num_cpus::get().max(1);
 

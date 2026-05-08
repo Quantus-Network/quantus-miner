@@ -1,8 +1,13 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
-use miner_service::{run, ServiceConfig};
+use miner_service::{
+    run,
+    zk_aggregation::{ClaimStrategy, ZkAggregationConfig},
+    ServiceConfig,
+};
 use primitive_types::U512;
 use rand::RngCore;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -11,6 +16,21 @@ use std::time::{Duration, Instant};
 // CLI defaults
 const DEFAULT_GPU_BATCH_SIZE: u64 = 1_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliClaimStrategy {
+    Oldest,
+    RewardDensity,
+}
+
+impl From<CliClaimStrategy> for ClaimStrategy {
+    fn from(value: CliClaimStrategy) -> Self {
+        match value {
+            CliClaimStrategy::Oldest => ClaimStrategy::Oldest,
+            CliClaimStrategy::RewardDensity => ClaimStrategy::RewardDensity,
+        }
+    }
+}
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -47,6 +67,63 @@ enum Command {
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
         verbose: bool,
+
+        /// Enable delegated ZK L1 aggregation worker
+        #[arg(long = "enable-zk-aggregation", env = "MINER_ENABLE_ZK_AGGREGATION")]
+        enable_zk_aggregation: bool,
+
+        /// Chain RPC endpoint used by the ZK aggregation watcher
+        #[arg(
+            long = "node-rpc",
+            env = "MINER_NODE_RPC",
+            default_value = "ws://127.0.0.1:9944"
+        )]
+        node_rpc: String,
+
+        /// Aggregation account address
+        #[arg(long = "aggregation-account", env = "MINER_AGGREGATION_ACCOUNT")]
+        aggregation_account: Option<String>,
+
+        /// Aggregation signing key or keystore path
+        #[arg(long = "aggregation-key", env = "MINER_AGGREGATION_KEY")]
+        aggregation_key: Option<String>,
+
+        /// Directory containing generated ZK proving/verifier artifacts
+        #[arg(long = "zk-bins-dir", env = "MINER_ZK_BINS_DIR")]
+        zk_bins_dir: Option<PathBuf>,
+
+        /// Number of dedicated ZK aggregation workers
+        #[arg(long = "zk-workers", env = "MINER_ZK_WORKERS", default_value_t = 1)]
+        zk_workers: usize,
+
+        /// Maximum active bonded ZK aggregation jobs
+        #[arg(
+            long = "max-active-zk-jobs",
+            env = "MINER_MAX_ACTIVE_ZK_JOBS",
+            default_value_t = 1
+        )]
+        max_active_zk_jobs: usize,
+
+        /// Minimum aggregation reward required before claiming a bundle
+        #[arg(
+            long = "min-aggregation-reward",
+            env = "MINER_MIN_AGGREGATION_REWARD",
+            default_value_t = 0
+        )]
+        min_aggregation_reward: u128,
+
+        /// Bundle claiming strategy
+        #[arg(
+            long = "claim-strategy",
+            env = "MINER_CLAIM_STRATEGY",
+            value_enum,
+            default_value = "oldest"
+        )]
+        claim_strategy: CliClaimStrategy,
+
+        /// Validate opportunities without claiming or proving
+        #[arg(long = "dry-run-zk-aggregation", env = "MINER_DRY_RUN_ZK_AGGREGATION")]
+        dry_run_zk_aggregation: bool,
     },
 
     /// Run a quick benchmark of the mining engines
@@ -104,6 +181,16 @@ async fn main() {
             cpu_batch_size,
             metrics_port,
             verbose,
+            enable_zk_aggregation,
+            node_rpc,
+            aggregation_account,
+            aggregation_key,
+            zk_bins_dir,
+            zk_workers,
+            max_active_zk_jobs,
+            min_aggregation_reward,
+            claim_strategy,
+            dry_run_zk_aggregation,
         } => {
             init_logger(verbose);
 
@@ -125,6 +212,17 @@ async fn main() {
                 gpu_devices,
                 gpu_batch_size,
                 cpu_batch_size,
+                zk_aggregation: enable_zk_aggregation.then_some(ZkAggregationConfig {
+                    node_rpc,
+                    aggregation_account,
+                    aggregation_key,
+                    zk_bins_dir,
+                    workers: zk_workers,
+                    max_active_jobs: max_active_zk_jobs,
+                    min_aggregation_reward,
+                    claim_strategy: claim_strategy.into(),
+                    dry_run: dry_run_zk_aggregation,
+                }),
             };
 
             if let Err(e) = run(config).await {
@@ -333,5 +431,65 @@ fn format_hash_rate(rate: f64) -> String {
         format!("{:.2}K", rate / 1_000.0)
     } else {
         format!("{:.0}", rate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_parses_zk_aggregation_flags() {
+        let args = Args::try_parse_from([
+            "quantus-miner",
+            "serve",
+            "--enable-zk-aggregation",
+            "--node-rpc",
+            "ws://127.0.0.1:9944",
+            "--aggregation-account",
+            "alice",
+            "--aggregation-key",
+            "test-key",
+            "--zk-bins-dir",
+            "/tmp/zk-bins",
+            "--zk-workers",
+            "2",
+            "--max-active-zk-jobs",
+            "3",
+            "--min-aggregation-reward",
+            "42",
+            "--claim-strategy",
+            "reward-density",
+            "--dry-run-zk-aggregation",
+        ])
+        .expect("serve args should parse");
+
+        let Some(Command::Serve {
+            enable_zk_aggregation,
+            node_rpc,
+            aggregation_account,
+            aggregation_key,
+            zk_bins_dir,
+            zk_workers,
+            max_active_zk_jobs,
+            min_aggregation_reward,
+            claim_strategy,
+            dry_run_zk_aggregation,
+            ..
+        }) = args.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert!(enable_zk_aggregation);
+        assert_eq!(node_rpc, "ws://127.0.0.1:9944");
+        assert_eq!(aggregation_account.as_deref(), Some("alice"));
+        assert_eq!(aggregation_key.as_deref(), Some("test-key"));
+        assert_eq!(zk_bins_dir, Some(PathBuf::from("/tmp/zk-bins")));
+        assert_eq!(zk_workers, 2);
+        assert_eq!(max_active_zk_jobs, 3);
+        assert_eq!(min_aggregation_reward, 42);
+        assert_eq!(claim_strategy, CliClaimStrategy::RewardDensity);
+        assert!(dry_run_zk_aggregation);
     }
 }
