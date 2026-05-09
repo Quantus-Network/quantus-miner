@@ -18,6 +18,10 @@ log = { workspace = true }
 crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+qp-plonky2 = { workspace = true }
+qp-wormhole-aggregator = { workspace = true }
+qp-wormhole-verifier = { workspace = true }
 
 # QUIC transport
 quinn = "0.10"

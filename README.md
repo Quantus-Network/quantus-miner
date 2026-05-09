@@ -14,6 +14,17 @@ cargo build -p miner-cli --release
 
 The binary will be available at `target/release/quantus-miner`.
 
+## Delegated ZK Aggregation
+
+The delegated L1 aggregation worker depends on the same `qp-zk-circuits` revision as the chain
+runtime.
+
+Any command that generates ZK proofs must run in release mode (otherwise proving time will take several minutes instead of seconds):
+
+```bash
+cargo test --release -p miner-service zk_aggregation_prove -- --nocapture
+```
+
 ## Running
 
 ```bash

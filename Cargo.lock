@@ -111,6 +111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -467,6 +478,12 @@ dependencies = [
  "cast",
  "itertools 0.10.5",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-channel"
@@ -1518,6 +1535,7 @@ name = "miner-service"
 version = "3.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "crossbeam-channel",
  "engine-cpu",
  "engine-gpu",
@@ -1528,6 +1546,9 @@ dependencies = [
  "num_cpus",
  "pow-core",
  "primitive-types 0.13.1",
+ "qp-plonky2",
+ "qp-wormhole-aggregator",
+ "qp-wormhole-verifier",
  "quantus-miner-api",
  "quinn",
  "rustls 0.21.12",
@@ -1713,6 +1734,10 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "once_cell_polyfill"
@@ -2114,18 +2139,20 @@ dependencies = [
 
 [[package]]
 name = "qp-plonky2"
-version = "1.1.5"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "593bccf15b8e2f9eb904ef4010f68b81ddcceb70aaf90116ce29ec09d7578dd4"
+checksum = "a1d18516ef5ecd81ddcccb6beacdfe1578f44e4f05ccb0890998afcd3b87d01f"
 dependencies = [
  "ahash",
  "anyhow",
+ "critical-section",
  "getrandom 0.2.17",
  "hashbrown 0.14.5",
  "itertools 0.11.0",
  "keccak-hash",
  "log",
  "num",
+ "once_cell",
  "p3-field",
  "p3-goldilocks",
  "p3-poseidon2",
@@ -2146,9 +2173,9 @@ dependencies = [
 
 [[package]]
 name = "qp-plonky2-core"
-version = "1.1.5"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7d30fabfd90e359640f2371c8b3e9b377d215f7dcf4e61da1f38776c5b84540"
+checksum = "0ad9961c2e2f6aca563eefd902697b0d21e9807c2c3b719ba1d4488bb03383c4"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2172,9 +2199,9 @@ dependencies = [
 
 [[package]]
 name = "qp-plonky2-field"
-version = "1.1.5"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20c9f8259bf4f220b1d81001458cc6c09a1372f2b3e8dac2fb489a66230385c3"
+checksum = "ecc7089b7ae09ef8fe4889353d2f2be7dffe6d87edfb5b03f9553ca0a1ca55da"
 dependencies = [
  "anyhow",
  "itertools 0.11.0",
@@ -2189,17 +2216,19 @@ dependencies = [
 
 [[package]]
 name = "qp-plonky2-verifier"
-version = "1.1.5"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd0eb89fd3cc40c4b25be95399635957d416406328169ba939db989c0444f364"
+checksum = "eb155f950f3df3c0cf5fce846290f19c6b7a059fbefd9bdf9011fd6f01f84e79"
 dependencies = [
  "ahash",
  "anyhow",
+ "critical-section",
  "hashbrown 0.14.5",
  "itertools 0.11.0",
  "keccak-hash",
  "log",
  "num",
+ "once_cell",
  "p3-field",
  "p3-goldilocks",
  "p3-poseidon2",
@@ -2238,6 +2267,80 @@ dependencies = [
  "p3-symmetric",
  "qp-poseidon-constants",
  "rand_chacha 0.9.0",
+]
+
+[[package]]
+name = "qp-wormhole-aggregator"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+ "hex",
+ "qp-plonky2",
+ "qp-wormhole-circuit",
+ "qp-wormhole-inputs",
+ "qp-wormhole-prover",
+ "qp-zk-circuits-common",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qp-wormhole-circuit"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+ "hex",
+ "qp-plonky2",
+ "qp-wormhole-inputs",
+ "qp-zk-circuits-common",
+]
+
+[[package]]
+name = "qp-wormhole-inputs"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "qp-wormhole-prover"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+ "qp-plonky2",
+ "qp-wormhole-circuit",
+ "qp-wormhole-inputs",
+ "qp-zk-circuits-common",
+]
+
+[[package]]
+name = "qp-wormhole-verifier"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+ "qp-plonky2-verifier",
+ "qp-wormhole-inputs",
+]
+
+[[package]]
+name = "qp-zk-circuits-common"
+version = "2.0.1"
+source = "git+https://github.com/Quantus-Network/qp-zk-circuits?rev=982fd4de36019c108169fedcff348003a06ad465#982fd4de36019c108169fedcff348003a06ad465"
+dependencies = [
+ "anyhow",
+ "hex",
+ "qp-plonky2",
+ "qp-poseidon-constants",
+ "qp-poseidon-core",
+ "qp-wormhole-inputs",
+ "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]

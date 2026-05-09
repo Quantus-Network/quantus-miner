@@ -112,6 +112,14 @@ enum Command {
         )]
         min_aggregation_reward: u128,
 
+        /// Miner bond amount reserved when claiming a ZK aggregation bundle
+        #[arg(
+            long = "zk-miner-bond",
+            env = "MINER_ZK_MINER_BOND",
+            default_value_t = 0
+        )]
+        zk_miner_bond: u128,
+
         /// Bundle claiming strategy
         #[arg(
             long = "claim-strategy",
@@ -189,6 +197,7 @@ async fn main() {
             zk_workers,
             max_active_zk_jobs,
             min_aggregation_reward,
+            zk_miner_bond,
             claim_strategy,
             dry_run_zk_aggregation,
         } => {
@@ -220,6 +229,7 @@ async fn main() {
                     workers: zk_workers,
                     max_active_jobs: max_active_zk_jobs,
                     min_aggregation_reward,
+                    miner_bond: zk_miner_bond,
                     claim_strategy: claim_strategy.into(),
                     dry_run: dry_run_zk_aggregation,
                 }),
@@ -458,6 +468,8 @@ mod tests {
             "3",
             "--min-aggregation-reward",
             "42",
+            "--zk-miner-bond",
+            "50",
             "--claim-strategy",
             "reward-density",
             "--dry-run-zk-aggregation",
@@ -473,6 +485,7 @@ mod tests {
             zk_workers,
             max_active_zk_jobs,
             min_aggregation_reward,
+            zk_miner_bond,
             claim_strategy,
             dry_run_zk_aggregation,
             ..
@@ -489,6 +502,7 @@ mod tests {
         assert_eq!(zk_workers, 2);
         assert_eq!(max_active_zk_jobs, 3);
         assert_eq!(min_aggregation_reward, 42);
+        assert_eq!(zk_miner_bond, 50);
         assert_eq!(claim_strategy, CliClaimStrategy::RewardDensity);
         assert!(dry_run_zk_aggregation);
     }
