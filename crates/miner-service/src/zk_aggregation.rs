@@ -9,7 +9,8 @@ use qp_wormhole_verifier::{
 };
 use std::{
     cmp::Ordering,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -28,11 +29,11 @@ pub enum ClaimStrategy {
     RewardDensity,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ZkAggregationConfig {
     pub node_rpc: String,
     pub aggregation_account: Option<String>,
-    pub aggregation_key: Option<String>,
+    pub aggregation_keystore: Option<PathBuf>,
     pub zk_bins_dir: Option<PathBuf>,
     pub workers: usize,
     pub max_active_jobs: usize,
@@ -40,6 +41,23 @@ pub struct ZkAggregationConfig {
     pub miner_bond: u128,
     pub claim_strategy: ClaimStrategy,
     pub dry_run: bool,
+}
+
+impl fmt::Debug for ZkAggregationConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZkAggregationConfig")
+            .field("node_rpc", &redact_rpc_url(&self.node_rpc))
+            .field("aggregation_account", &self.aggregation_account)
+            .field("aggregation_keystore", &self.aggregation_keystore)
+            .field("zk_bins_dir", &self.zk_bins_dir)
+            .field("workers", &self.workers)
+            .field("max_active_jobs", &self.max_active_jobs)
+            .field("min_aggregation_reward", &self.min_aggregation_reward)
+            .field("miner_bond", &self.miner_bond)
+            .field("claim_strategy", &self.claim_strategy)
+            .field("dry_run", &self.dry_run)
+            .finish()
+    }
 }
 
 impl ZkAggregationConfig {
@@ -58,12 +76,98 @@ impl ZkAggregationConfig {
                 "--zk-miner-bond must be greater than zero unless --dry-run-zk-aggregation is set"
             );
         }
+        if !self.dry_run {
+            match self.aggregation_account.as_deref().map(str::trim) {
+                Some(account) if !account.is_empty() => {}
+                _ => bail!(
+                    "--aggregation-account is required unless --dry-run-zk-aggregation is set"
+                ),
+            }
+            let Some(keystore_path) = &self.aggregation_keystore else {
+                bail!("--aggregation-keystore is required unless --dry-run-zk-aggregation is set");
+            };
+            validate_keystore_path(keystore_path)?;
+        } else if let Some(keystore_path) = &self.aggregation_keystore {
+            validate_keystore_path(keystore_path)?;
+        }
 
         let Some(zk_bins_dir) = &self.zk_bins_dir else {
             bail!("--zk-bins-dir is required when ZK aggregation is enabled");
         };
         validate_zk_bins_dir(zk_bins_dir)
     }
+}
+
+pub fn redact_rpc_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return redact_authority(url);
+    };
+    let (scheme, rest_with_sep) = url.split_at(scheme_end);
+    let rest = &rest_with_sep[3..];
+    match rest.find('@') {
+        Some(at) => {
+            let after_auth = &rest[at + 1..];
+            let redacted_auth = if rest[..at].contains(':') {
+                "***:***"
+            } else {
+                "***"
+            };
+            format!("{scheme}://{redacted_auth}@{after_auth}")
+        }
+        None => url.to_string(),
+    }
+}
+
+fn redact_authority(value: &str) -> String {
+    match value.find('@') {
+        Some(at) if value[..at].contains(':') => format!("***:***@{}", &value[at + 1..]),
+        Some(at) => format!("***@{}", &value[at + 1..]),
+        None => value.to_string(),
+    }
+}
+
+pub fn validate_keystore_path(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        bail!(
+            "aggregation keystore path does not exist: {}",
+            path.display()
+        );
+    }
+    let metadata = path.metadata().with_context(|| {
+        format!(
+            "failed to read aggregation keystore metadata: {}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        bail!(
+            "aggregation keystore path must be a file or directory: {}",
+            path.display()
+        );
+    }
+    validate_keystore_permissions(path, &metadata)
+}
+
+#[cfg(unix)]
+fn validate_keystore_permissions(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        bail!(
+            "aggregation keystore path permissions are too broad for {}: expected no group/other permissions",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_keystore_permissions(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> anyhow::Result<()> {
+    Ok(())
 }
 
 pub fn validate_zk_bins_dir(path: &Path) -> anyhow::Result<()> {
@@ -212,6 +316,8 @@ pub trait L1ProofGenerator: Send + Sync {
         bundle: &ClaimedBundle,
         candidate_proofs: Vec<Vec<u8>>,
     ) -> anyhow::Result<Vec<u8>>;
+
+    fn verify_l1(&self, proof_bytes: &[u8]) -> anyhow::Result<()>;
 }
 
 #[derive(Debug)]
@@ -311,7 +417,26 @@ impl L1ProofGenerator for ZkBinsL1ProofGenerator {
         }
 
         let proof = aggregator.aggregate().context("layer-1 proving failed")?;
+        aggregator
+            .verify(proof.clone())
+            .context("local layer-1 proof verification failed")?;
         Ok(proof.to_bytes())
+    }
+
+    fn verify_l1(&self, proof_bytes: &[u8]) -> anyhow::Result<()> {
+        let aggregator = Layer1Aggregator::new(&self.bins_dir, BytesDigest::new_unchecked([0; 32]))
+            .context("failed to load layer-1 verifier")?;
+        let layer1_common = aggregator
+            .load_common_data(CircuitType::Root)
+            .context("failed to load layer-1 common data")?;
+        let proof = ProverProofWithPublicInputs::<F, C, D>::from_bytes(
+            proof_bytes.to_vec(),
+            &layer1_common,
+        )
+        .map_err(|err| anyhow!("failed to deserialize L1 aggregate proof: {}", err))?;
+        aggregator
+            .verify(proof)
+            .context("local layer-1 proof verification failed")
     }
 }
 
@@ -453,12 +578,36 @@ impl AggregationWorkerPool {
             .await?;
         let claimed = client.fetch_bundle(claimed.bundle_id).await?;
 
+        let selected_by_id = batch
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.candidate_id, candidate))
+            .collect::<BTreeMap<_, _>>();
         let mut claimed_proofs = Vec::with_capacity(claimed.ordered_candidate_ids.len());
+        let mut claimed_validated = Vec::with_capacity(claimed.ordered_candidate_ids.len());
         for candidate_id in &claimed.ordered_candidate_ids {
-            claimed_proofs.push(client.fetch_candidate_proof(*candidate_id).await?);
+            let candidate = selected_by_id.get(candidate_id).ok_or_else(|| {
+                anyhow!(
+                    "claimed bundle contains candidate {:02x?} that was not selected pre-claim",
+                    candidate_id
+                )
+            })?;
+            let bytes = client.fetch_candidate_proof(*candidate_id).await?;
+            let validated_candidate =
+                validator.validate_candidate(&claimed.group_key, candidate, &bytes)?;
+            claimed_proofs.push(bytes);
+            claimed_validated.push(validated_candidate);
         }
+        let claimed_nullifiers = claimed_validated
+            .iter()
+            .flat_map(|candidate| candidate.nullifiers.iter().copied())
+            .collect::<Vec<_>>();
+        ensure_no_duplicate_nullifiers(&claimed_nullifiers)?;
 
         let l1_proof = prover.prove_l1(&claimed, claimed_proofs).await?;
+        prover
+            .verify_l1(&l1_proof)
+            .context("local L1 aggregate proof verification failed before submission")?;
         let proof_len = l1_proof.len();
         client
             .submit_l1_aggregate(claimed.bundle_id, l1_proof)
@@ -563,11 +712,22 @@ mod tests {
         }
     }
 
+    fn write_secure_keystore(dir: &Path) -> PathBuf {
+        let keystore = dir.join("aggregation-keystore");
+        fs::create_dir_all(&keystore).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&keystore, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        keystore
+    }
+
     fn test_config(dir: &Path, dry_run: bool, strategy: ClaimStrategy) -> ZkAggregationConfig {
         ZkAggregationConfig {
             node_rpc: "ws://127.0.0.1:9944".to_string(),
             aggregation_account: Some("aggregator".to_string()),
-            aggregation_key: Some("key".to_string()),
+            aggregation_keystore: (!dry_run).then(|| write_secure_keystore(dir)),
             zk_bins_dir: Some(dir.to_path_buf()),
             workers: 1,
             max_active_jobs: 1,
@@ -624,6 +784,7 @@ mod tests {
         groups: Vec<BundleGroupKey>,
         candidates: BTreeMap<BundleGroupKey, Vec<L0CandidateSummary>>,
         proofs: BTreeMap<[u8; 32], Vec<u8>>,
+        post_claim_proofs: BTreeMap<[u8; 32], Vec<u8>>,
         claimed_bundle: Option<ClaimedBundle>,
         registered_count: usize,
         claim_count: usize,
@@ -688,9 +849,13 @@ mod tests {
         }
 
         async fn fetch_candidate_proof(&self, candidate_id: [u8; 32]) -> anyhow::Result<Vec<u8>> {
-            self.state
-                .lock()
-                .unwrap()
+            let state = self.state.lock().unwrap();
+            if state.claim_count > 0 {
+                if let Some(proof) = state.post_claim_proofs.get(&candidate_id) {
+                    return Ok(proof.clone());
+                }
+            }
+            state
                 .proofs
                 .get(&candidate_id)
                 .cloned()
@@ -764,10 +929,13 @@ mod tests {
             &self,
             group: &BundleGroupKey,
             candidate: &L0CandidateSummary,
-            _proof_bytes: &[u8],
+            proof_bytes: &[u8],
         ) -> anyhow::Result<ValidatedL0Candidate> {
             if candidate.group_key != *group {
                 bail!("candidate group does not match selected bundle group");
+            }
+            if proof_bytes.first().copied() != Some(candidate.candidate_id[0]) {
+                bail!("candidate proof bytes do not match candidate id");
             }
             ensure_no_duplicate_nullifiers(&candidate.nullifiers)?;
             Ok(ValidatedL0Candidate {
@@ -789,6 +957,31 @@ mod tests {
         ) -> anyhow::Result<Vec<u8>> {
             Ok(vec![1, 2, 3])
         }
+
+        fn verify_l1(&self, proof_bytes: &[u8]) -> anyhow::Result<()> {
+            if proof_bytes == [1, 2, 3] {
+                Ok(())
+            } else {
+                bail!("mock L1 proof failed local verification")
+            }
+        }
+    }
+
+    struct UnverifiedProofGenerator;
+
+    #[async_trait]
+    impl L1ProofGenerator for UnverifiedProofGenerator {
+        async fn prove_l1(
+            &self,
+            _bundle: &ClaimedBundle,
+            _candidate_proofs: Vec<Vec<u8>>,
+        ) -> anyhow::Result<Vec<u8>> {
+            Ok(vec![9, 9, 9])
+        }
+
+        fn verify_l1(&self, _proof_bytes: &[u8]) -> anyhow::Result<()> {
+            bail!("mock L1 proof failed local verification")
+        }
     }
 
     #[test]
@@ -796,7 +989,7 @@ mod tests {
         let config = ZkAggregationConfig {
             node_rpc: "ws://127.0.0.1:9944".to_string(),
             aggregation_account: None,
-            aggregation_key: None,
+            aggregation_keystore: None,
             zk_bins_dir: None,
             workers: 1,
             max_active_jobs: 1,
@@ -817,6 +1010,70 @@ mod tests {
             .validate()
             .unwrap_err();
         assert!(err.to_string().contains("missing required artifact"));
+    }
+
+    #[test]
+    fn dry_run_config_allows_missing_signing_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        write_required_artifacts(dir.path());
+        let config = ZkAggregationConfig {
+            node_rpc: "ws://127.0.0.1:9944".to_string(),
+            aggregation_account: None,
+            aggregation_keystore: None,
+            zk_bins_dir: Some(dir.path().to_path_buf()),
+            workers: 1,
+            max_active_jobs: 1,
+            min_aggregation_reward: 0,
+            miner_bond: 0,
+            claim_strategy: ClaimStrategy::Oldest,
+            dry_run: true,
+        };
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn non_dry_run_config_requires_account_and_keystore() {
+        let dir = tempfile::tempdir().unwrap();
+        write_required_artifacts(dir.path());
+        let mut config = test_config(dir.path(), false, ClaimStrategy::Oldest);
+        config.aggregation_account = None;
+        let err = config.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--aggregation-account is required"));
+
+        let mut config = test_config(dir.path(), false, ClaimStrategy::Oldest);
+        config.aggregation_keystore = None;
+        let err = config.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--aggregation-keystore is required"));
+    }
+
+    #[test]
+    fn rpc_url_redaction_hides_credentials() {
+        assert_eq!(
+            redact_rpc_url("wss://user:token@example.com/path"),
+            "wss://***:***@example.com/path"
+        );
+        assert_eq!(
+            redact_rpc_url("https://token@example.com"),
+            "https://***@example.com"
+        );
+        assert_eq!(redact_rpc_url("ws://127.0.0.1:9944"), "ws://127.0.0.1:9944");
+    }
+
+    #[test]
+    fn config_debug_redacts_rpc_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        write_required_artifacts(dir.path());
+        let mut config = test_config(dir.path(), false, ClaimStrategy::Oldest);
+        config.node_rpc = "wss://user:token@example.com/path".to_string();
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("wss://***:***@example.com/path"));
+        assert!(!debug.contains("user:token"));
     }
 
     #[test]
@@ -970,6 +1227,55 @@ mod tests {
             AggregationRunOutcome::Submitted { proof_len: 3, .. }
         ));
         assert_eq!(client.counters(), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn worker_revalidates_exact_claimed_proofs_after_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        write_required_artifacts(dir.path());
+        let group = group(1, 1);
+        let candidate = candidate(1, group.clone(), 3, 10);
+        let candidate_id = candidate.candidate_id;
+        let client = MockChainClient::with_group(group.clone(), vec![candidate]);
+        {
+            let mut state = client.state.lock().unwrap();
+            state.post_claim_proofs.insert(candidate_id, vec![0]);
+        }
+        let pool =
+            AggregationWorkerPool::new(test_config(dir.path(), false, ClaimStrategy::Oldest))
+                .unwrap();
+
+        let err = pool
+            .run_once(&client, &SummaryProofValidator, &StaticProofGenerator)
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("candidate proof bytes do not match"));
+        assert_eq!(client.counters(), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn worker_does_not_submit_l1_proof_that_fails_local_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        write_required_artifacts(dir.path());
+        let group = group(1, 1);
+        let client =
+            MockChainClient::with_group(group.clone(), vec![candidate(1, group.clone(), 3, 10)]);
+        let pool =
+            AggregationWorkerPool::new(test_config(dir.path(), false, ClaimStrategy::Oldest))
+                .unwrap();
+
+        let err = pool
+            .run_once(&client, &SummaryProofValidator, &UnverifiedProofGenerator)
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("local L1 aggregate proof verification failed"));
+        assert_eq!(client.counters(), (1, 1, 0));
     }
 
     #[test]

@@ -465,7 +465,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         zk_config.validate()?;
         log::info!(
             "ZK aggregation enabled: rpc={}, workers={}, max_active_jobs={}, strategy={:?}, dry_run={}",
-            zk_config.node_rpc,
+            zk_aggregation::redact_rpc_url(&zk_config.node_rpc),
             zk_config.workers,
             zk_config.max_active_jobs,
             zk_config.claim_strategy,

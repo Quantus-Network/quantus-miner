@@ -84,9 +84,9 @@ enum Command {
         #[arg(long = "aggregation-account", env = "MINER_AGGREGATION_ACCOUNT")]
         aggregation_account: Option<String>,
 
-        /// Aggregation signing key or keystore path
-        #[arg(long = "aggregation-key", env = "MINER_AGGREGATION_KEY")]
-        aggregation_key: Option<String>,
+        /// Secure signer/keystore path for delegated aggregation signing
+        #[arg(long = "aggregation-keystore", env = "MINER_AGGREGATION_KEYSTORE")]
+        aggregation_keystore: Option<PathBuf>,
 
         /// Directory containing generated ZK proving/verifier artifacts
         #[arg(long = "zk-bins-dir", env = "MINER_ZK_BINS_DIR")]
@@ -192,7 +192,7 @@ async fn main() {
             enable_zk_aggregation,
             node_rpc,
             aggregation_account,
-            aggregation_key,
+            aggregation_keystore,
             zk_bins_dir,
             zk_workers,
             max_active_zk_jobs,
@@ -224,7 +224,7 @@ async fn main() {
                 zk_aggregation: enable_zk_aggregation.then_some(ZkAggregationConfig {
                     node_rpc,
                     aggregation_account,
-                    aggregation_key,
+                    aggregation_keystore,
                     zk_bins_dir,
                     workers: zk_workers,
                     max_active_jobs: max_active_zk_jobs,
@@ -458,8 +458,8 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--aggregation-account",
             "alice",
-            "--aggregation-key",
-            "test-key",
+            "--aggregation-keystore",
+            "/tmp/miner-keystore",
             "--zk-bins-dir",
             "/tmp/zk-bins",
             "--zk-workers",
@@ -480,7 +480,7 @@ mod tests {
             enable_zk_aggregation,
             node_rpc,
             aggregation_account,
-            aggregation_key,
+            aggregation_keystore,
             zk_bins_dir,
             zk_workers,
             max_active_zk_jobs,
@@ -497,7 +497,10 @@ mod tests {
         assert!(enable_zk_aggregation);
         assert_eq!(node_rpc, "ws://127.0.0.1:9944");
         assert_eq!(aggregation_account.as_deref(), Some("alice"));
-        assert_eq!(aggregation_key.as_deref(), Some("test-key"));
+        assert_eq!(
+            aggregation_keystore,
+            Some(PathBuf::from("/tmp/miner-keystore"))
+        );
         assert_eq!(zk_bins_dir, Some(PathBuf::from("/tmp/zk-bins")));
         assert_eq!(zk_workers, 2);
         assert_eq!(max_active_zk_jobs, 3);
