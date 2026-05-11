@@ -621,10 +621,10 @@ impl AggregationWorkerPool {
     }
 }
 
-fn select_batch<'a>(
-    batches: &'a [CandidateBatch],
+fn select_batch(
+    batches: &[CandidateBatch],
     strategy: ClaimStrategy,
-) -> Option<&'a CandidateBatch> {
+) -> Option<&CandidateBatch> {
     match strategy {
         ClaimStrategy::Oldest => batches.iter().min_by_key(|batch| batch.oldest_submitted_at),
         ClaimStrategy::RewardDensity => batches.iter().max_by(|left, right| {
