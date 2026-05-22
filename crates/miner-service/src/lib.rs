@@ -31,6 +31,8 @@ pub struct ServiceConfig {
     pub gpu_batch_size: u64,
     /// CPU batch size in hashes
     pub cpu_batch_size: u64,
+    /// GPU throttle delay in milliseconds between batches (0 = no throttle)
+    pub gpu_throttle_ms: u64,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -414,6 +416,7 @@ fn worker_loop(
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
     batch_size: u64,
+    throttle_ms: u64,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -421,7 +424,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = engine_gpu::GpuEngine::try_new(batch_size);
+    let engine = engine_gpu::GpuEngine::try_new(batch_size, throttle_ms);
     let engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -462,8 +465,11 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     let effective_cpus = num_cpus::get().max(1);
 
     // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) =
-        resolve_gpu_configuration(config.gpu_devices, config.gpu_batch_size)?;
+    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(
+        config.gpu_devices,
+        config.gpu_batch_size,
+        config.gpu_throttle_ms,
+    )?;
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {
@@ -504,6 +510,12 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     if let Some(ref engine) = gpu_engine {
         let name = engine.name();
         log::info!("🎮 GPU engine: {name}");
+        if config.gpu_throttle_ms > 0 {
+            log::info!(
+                "⏳ GPU throttle: {}ms between batches",
+                config.gpu_throttle_ms
+            );
+        }
     }
 
     let total_workers = cpu_workers + gpu_devices;

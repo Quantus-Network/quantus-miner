@@ -44,6 +44,10 @@ enum Command {
         )]
         metrics_port: u16,
 
+        /// GPU throttle delay in milliseconds between batches (0 = no throttle)
+        #[arg(long = "gpu-throttle-ms", env = "MINER_GPU_THROTTLE_MS", default_value_t = 0)]
+        gpu_throttle_ms: u64,
+
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
         verbose: bool,
@@ -102,6 +106,7 @@ async fn main() {
             gpu_devices,
             gpu_batch_size,
             cpu_batch_size,
+            gpu_throttle_ms,
             metrics_port,
             verbose,
         } => {
@@ -125,6 +130,7 @@ async fn main() {
                 gpu_devices,
                 gpu_batch_size,
                 cpu_batch_size,
+                gpu_throttle_ms,
             };
 
             if let Err(e) = run(config).await {
@@ -175,9 +181,9 @@ async fn run_benchmark(
 ) {
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
 
-    // Initialize GPU engine
+    // Initialize GPU engine (no throttle for benchmark)
     let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices, gpu_batch_size) {
+        match miner_service::resolve_gpu_configuration(gpu_devices, gpu_batch_size, 0) {
             Ok((engine, count)) => (engine, count),
             Err(e) => {
                 eprintln!("❌ ERROR: {}", e);
