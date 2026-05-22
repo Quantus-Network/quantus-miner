@@ -45,7 +45,11 @@ enum Command {
         metrics_port: u16,
 
         /// GPU throttle delay in milliseconds between batches (0 = no throttle)
-        #[arg(long = "gpu-throttle-ms", env = "MINER_GPU_THROTTLE_MS", default_value_t = 0)]
+        #[arg(
+            long = "gpu-throttle-ms",
+            env = "MINER_GPU_THROTTLE_MS",
+            default_value_t = 0
+        )]
         gpu_throttle_ms: u64,
 
         /// Enable verbose logging

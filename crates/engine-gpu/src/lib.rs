@@ -426,9 +426,22 @@ impl MinerEngine for GpuEngine {
             current_start = current_start.saturating_add(U512::from(this_batch_size));
             batch_num += 1;
 
-            // Apply throttle delay between batches (if configured)
-            if self.throttle_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(self.throttle_ms));
+            // Apply throttle delay between batches (if configured and more batches remain)
+            // Sleep in small increments to remain responsive to cancellation
+            if self.throttle_ms > 0 && current_start <= range.end {
+                let sleep_interval =
+                    std::time::Duration::from_millis((self.throttle_ms / 10).max(1));
+                let mut remaining = std::time::Duration::from_millis(self.throttle_ms);
+                while remaining > std::time::Duration::ZERO {
+                    if cancel.is_cancelled() {
+                        return EngineStatus::Cancelled {
+                            hash_count: total_hashes,
+                        };
+                    }
+                    let sleep_time = remaining.min(sleep_interval);
+                    std::thread::sleep(sleep_time);
+                    remaining = remaining.saturating_sub(sleep_time);
+                }
             }
 
             // Log progress periodically (every 10 batches)
