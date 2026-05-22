@@ -36,6 +36,7 @@ pub struct GpuEngine {
     contexts: Vec<Arc<GpuContext>>,
     device_counter: AtomicUsize,
     batch_size: u64,
+    throttle_ms: u64,
 }
 
 // Thread-local storage for consistent GPU device assignment per worker thread
@@ -138,12 +139,12 @@ impl GpuContext {
 }
 
 impl GpuEngine {
-    /// Try to initialize the GPU engine with the given batch size.
-    pub fn try_new(batch_size: u64) -> Result<Self, Box<dyn std::error::Error>> {
-        block_on(Self::init(batch_size))
+    /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
+    pub fn try_new(batch_size: u64, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        block_on(Self::init(batch_size, throttle_ms))
     }
 
-    async fn init(batch_size: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn init(batch_size: u64, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!(target: "gpu_engine", "Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -218,15 +219,17 @@ impl GpuEngine {
 
         log::info!(
             target: "gpu_engine",
-            "GPU engine initialized with {} devices (batch size: {} nonces)",
+            "GPU engine initialized with {} devices (batch size: {} nonces, throttle: {}ms)",
             contexts.len(),
-            batch_size
+            batch_size,
+            throttle_ms
         );
 
         Ok(Self {
             contexts,
             device_counter: AtomicUsize::new(0),
             batch_size,
+            throttle_ms,
         })
     }
 
@@ -422,6 +425,24 @@ impl MinerEngine for GpuEngine {
             // Move to next batch
             current_start = current_start.saturating_add(U512::from(this_batch_size));
             batch_num += 1;
+
+            // Apply throttle delay between batches (if configured and more batches remain)
+            // Sleep in small increments to remain responsive to cancellation
+            if self.throttle_ms > 0 && current_start <= range.end {
+                let sleep_interval =
+                    std::time::Duration::from_millis((self.throttle_ms / 10).max(1));
+                let mut remaining = std::time::Duration::from_millis(self.throttle_ms);
+                while remaining > std::time::Duration::ZERO {
+                    if cancel.is_cancelled() {
+                        return EngineStatus::Cancelled {
+                            hash_count: total_hashes,
+                        };
+                    }
+                    let sleep_time = remaining.min(sleep_interval);
+                    std::thread::sleep(sleep_time);
+                    remaining = remaining.saturating_sub(sleep_time);
+                }
+            }
 
             // Log progress periodically (every 10 batches)
             if batch_num.is_multiple_of(10) {

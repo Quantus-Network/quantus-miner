@@ -26,7 +26,7 @@ fn main() {
 
     // 3. Verify with GPU engine
     log::info!("Initializing GPU engine...");
-    let gpu_engine = GpuEngine::try_new(10_000_000).expect("Failed to init GPU");
+    let gpu_engine = GpuEngine::try_new(10_000_000, 0).expect("Failed to init GPU");
 
     // Search a small range around the valid nonce
     let gpu_range = Range {

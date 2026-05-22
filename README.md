@@ -34,10 +34,13 @@ The binary will be available at `target/release/quantus-miner`.
 
 | Argument | Environment Variable | Description | Default |
 |----------|---------------------|-------------|---------|
+| `--node-addr <ADDR>` | `MINER_NODE_ADDR` | Node address to connect to | `127.0.0.1:9833` |
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
-| `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | 0 |
-| `--port <PORT>` | `MINER_PORT` | QUIC server port | 9833 |
-| `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | Disabled |
+| `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
+| `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 |
+| `--cpu-batch-size <N>` | `MINER_CPU_BATCH_SIZE` | CPU batch size in hashes | 10000 |
+| `--gpu-throttle-ms <MS>` | `MINER_GPU_THROTTLE_MS` | Sleep duration (ms) between GPU batches | 0 |
+| `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | 9900 |
 
 ## GPU Mining
 
@@ -73,6 +76,9 @@ cargo build -p miner-cli --release
 
 # Pure GPU mining
 ./target/release/quantus-miner serve --gpu-devices 1
+
+# GPU mining with throttle (reduce GPU utilization)
+./target/release/quantus-miner serve --gpu-devices 1 --gpu-throttle-ms 50
 
 # Hybrid mining: 4 CPU + 1 GPU workers
 ./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
