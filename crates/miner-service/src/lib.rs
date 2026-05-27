@@ -10,7 +10,7 @@
 
 pub mod quic;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
 use pow_core::{format_hashrate, format_u512};
 use primitive_types::U512;
@@ -131,7 +131,11 @@ impl WorkerPool {
         if cpu_workers > 0 {
             if let Some(ref engine) = cpu_engine {
                 for _ in 0..cpu_workers {
-                    let (job_tx, job_rx) = unbounded::<MiningJob>();
+                    // Use bounded channel to prevent unbounded queue growth.
+                    // Capacity of 16 allows sender to queue jobs without realistic
+                    // risk of drops during normal operation. Worker drains to get
+                    // the latest job.
+                    let (job_tx, job_rx) = bounded::<MiningJob>(16);
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -152,7 +156,11 @@ impl WorkerPool {
         if gpu_devices > 0 {
             if let Some(ref engine) = gpu_engine {
                 for _ in 0..gpu_devices {
-                    let (job_tx, job_rx) = unbounded::<MiningJob>();
+                    // Use bounded channel to prevent unbounded queue growth.
+                    // Capacity of 16 allows sender to queue jobs without realistic
+                    // risk of drops during normal operation. Worker drains to get
+                    // the latest job.
+                    let (job_tx, job_rx) = bounded::<MiningJob>(16);
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -196,10 +204,15 @@ impl WorkerPool {
             job_id: new_job_id,
         };
 
-        // Dispatch job to all workers (unbounded channels - always succeeds unless worker died)
-        for tx in &self.job_senders {
-            // Send will only fail if receiver is dropped (worker thread died)
-            let _ = tx.send(job.clone());
+        // Dispatch job to all workers using bounded channels (capacity 16).
+        // Workers drain to get the latest job, so we just need room to queue.
+        for (i, tx) in self.job_senders.iter().enumerate() {
+            if let Err(e) = tx.try_send(job.clone()) {
+                log::error!(
+                    "Failed to send job {new_job_id} to worker {i}: {e}. \
+                     Channel full - worker may be stuck or jobs arriving too fast."
+                );
+            }
         }
 
         let worker_count = self.job_senders.len();
