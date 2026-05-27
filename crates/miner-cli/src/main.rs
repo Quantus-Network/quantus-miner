@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // CLI defaults
-const DEFAULT_GPU_BATCH_SIZE: u64 = 1_000_000;
+const DEFAULT_GPU_BATCH_SIZE: u32 = 1_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
 
 #[derive(Subcommand, Debug)]
@@ -30,7 +30,7 @@ enum Command {
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
         #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
-        gpu_batch_size: u64,
+        gpu_batch_size: u32,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
         #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
@@ -69,7 +69,7 @@ enum Command {
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
         #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
-        gpu_batch_size: u64,
+        gpu_batch_size: u32,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
         #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
@@ -179,7 +179,7 @@ fn init_logger(verbose: bool) {
 async fn run_benchmark(
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
-    gpu_batch_size: u64,
+    gpu_batch_size: u32,
     cpu_batch_size: u64,
     duration: u64,
 ) {

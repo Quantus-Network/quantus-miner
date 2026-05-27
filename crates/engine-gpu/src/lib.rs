@@ -35,7 +35,7 @@ struct GpuResources {
 pub struct GpuEngine {
     contexts: Vec<Arc<GpuContext>>,
     device_counter: AtomicUsize,
-    batch_size: u64,
+    batch_size: u32,
     throttle_ms: u64,
 }
 
@@ -140,11 +140,20 @@ impl GpuContext {
 
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
-    pub fn try_new(batch_size: u64, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `batch_size` is zero (no work would be performed)
+    /// - No suitable GPU adapters are found
+    pub fn try_new(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        if batch_size == 0 {
+            return Err("batch_size must be non-zero".into());
+        }
         block_on(Self::init(batch_size, throttle_ms))
     }
 
-    async fn init(batch_size: u64, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn init(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!(target: "gpu_engine", "Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -380,10 +389,11 @@ impl MinerEngine for GpuEngine {
                 .saturating_sub(current_start)
                 .saturating_add(U512::one());
             let batch_size_u512 = U512::from(self.batch_size);
-            let this_batch_size = if remaining > batch_size_u512 {
+            let this_batch_size: u32 = if remaining > batch_size_u512 {
                 self.batch_size
             } else {
-                remaining.as_u64()
+                // remaining fits in u32 since it's <= batch_size which is u32
+                remaining.low_u32()
             };
 
             // Run single batch
@@ -495,7 +505,7 @@ fn run_single_batch(
     gpu_ctx: &GpuContext,
     resources: &GpuResources,
     batch_start: U512,
-    batch_size: u64,
+    batch_size: u32,
 ) -> BatchResult {
     // Calculate dispatch configuration for this batch
     let threads_per_workgroup = 256u32;
@@ -505,13 +515,13 @@ fn run_single_batch(
     let hinted_workgroups = gpu_ctx.optimal_workgroups.max(1).min(max_workgroups);
     let hinted_threads = hinted_workgroups as u64 * threads_per_workgroup as u64;
 
-    let logical_threads = batch_size.min(hinted_threads).max(1);
+    let logical_threads = (batch_size as u64).min(hinted_threads).max(1);
     let num_workgroups = ((logical_threads as u32).div_ceil(threads_per_workgroup)).max(1);
     let total_threads = (num_workgroups * threads_per_workgroup) as u64;
-    let nonces_per_thread = (batch_size.div_ceil(total_threads)).max(1) as u32;
+    let nonces_per_thread = ((batch_size as u64).div_ceil(total_threads)).max(1) as u32;
 
     // Dispatch config: [total_threads, nonces_per_thread, total_nonces]
-    let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size as u32];
+    let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size];
 
     // Write dispatch config
     gpu_ctx.queue.write_buffer(
@@ -583,7 +593,7 @@ fn run_single_batch(
     let result_u32s: &[u32] = bytemuck::cast_slice(&data);
 
     // Calculate the actual number of nonces dispatched
-    let dispatched_nonces = (total_threads * nonces_per_thread as u64).min(batch_size);
+    let dispatched_nonces = (total_threads * nonces_per_thread as u64).min(batch_size as u64);
 
     if result_u32s[0] != 0 {
         // Solution found!

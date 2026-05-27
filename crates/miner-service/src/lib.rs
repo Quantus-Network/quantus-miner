@@ -27,8 +27,8 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// GPU batch size in nonces
-    pub gpu_batch_size: u64,
+    /// GPU batch size in nonces (u32 since GPU dispatch protocol uses 32-bit counts)
+    pub gpu_batch_size: u32,
     /// CPU batch size in hashes
     pub cpu_batch_size: u64,
     /// GPU throttle delay in milliseconds between batches (0 = no throttle)
@@ -428,7 +428,7 @@ fn worker_loop(
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
-    batch_size: u64,
+    batch_size: u32,
     throttle_ms: u64,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
