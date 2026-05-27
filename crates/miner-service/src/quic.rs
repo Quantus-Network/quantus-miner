@@ -253,7 +253,7 @@ async fn handle_connection(
                         };
 
                         // Parse difficulty
-                        let difficulty = match U512::from_dec_str(&request.distance_threshold) {
+                        let difficulty = match U512::from_dec_str(&request.difficulty) {
                             Ok(d) => d,
                             Err(_) => {
                                 log::warn!("Invalid difficulty in request: parse error");
