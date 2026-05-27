@@ -87,7 +87,7 @@ enum Command {
 
 /// Quantus External Miner CLI
 #[derive(Parser, Debug)]
-#[command(author, version = option_env!("MINER_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about, long_about = None)]
+#[command(author, version, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
