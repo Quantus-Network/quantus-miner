@@ -38,7 +38,12 @@ pub struct JobContext {
 }
 
 impl JobContext {
-    /// Build a new context from header and difficulty
+    /// Build a new context from header and difficulty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `difficulty` is zero (division by zero in target calculation).
+    /// Callers must validate that difficulty is non-zero before calling this function.
     pub fn new(header: [u8; 32], difficulty: U512) -> Self {
         // In Bitcoin-style PoW, target = max_target / difficulty
         let max_target = U512::MAX;
@@ -215,5 +220,15 @@ mod tests {
 
         // With impossible difficulty, should not find solution
         assert!(result.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn test_zero_difficulty_panics() {
+        // Zero difficulty causes division by zero in target calculation.
+        // Callers MUST validate difficulty > 0 before calling JobContext::new.
+        let header = [7u8; 32];
+        let zero_difficulty = U512::zero();
+        let _ctx = JobContext::new(header, zero_difficulty);
     }
 }
