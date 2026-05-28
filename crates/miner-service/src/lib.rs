@@ -374,7 +374,7 @@ fn worker_loop(
             log_worker_completion(
                 type_str,
                 thread_id,
-                "cancelled (stale)",
+                "interrupted by new block",
                 hash_count,
                 search_elapsed,
             );
@@ -397,7 +397,7 @@ fn worker_loop(
                 ..
             } => {
                 log::info!(
-                    "🎉 {type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
+                    "{type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
                     format_u512(nonce),
                     format_u512(hash),
                 );
@@ -414,7 +414,7 @@ fn worker_loop(
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                log_worker_completion(type_str, thread_id, "cancelled", hash_count, search_elapsed);
+                log_worker_completion(type_str, thread_id, "new block", hash_count, search_elapsed);
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Running { .. } => {
