@@ -4,6 +4,12 @@
 //! - Engine initialization (CPU and GPU)
 //! - Persistent worker thread pool for efficient job processing
 //! - QUIC-based communication with the node
+//!
+//! # Certificate Verification
+//!
+//! The miner supports certificate pinning for secure connections to nodes:
+//! - Use `--node-cert-fingerprint sha256:<hex>` to pin to a specific certificate
+//! - Use `--insecure` for development (skips all verification)
 
 #![deny(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -17,6 +23,15 @@ use primitive_types::U512;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
+
+/// Certificate verification mode for TLS connections.
+#[derive(Clone, Debug)]
+pub enum CertVerification {
+    /// Verify certificate against a pinned fingerprint (format: `sha256:<hex>`)
+    Pinned(String),
+    /// Skip certificate verification (suitable for localhost or trusted local network)
+    Insecure,
+}
 
 /// Service runtime configuration provided by the CLI/binary.
 #[derive(Clone, Debug)]
@@ -33,6 +48,8 @@ pub struct ServiceConfig {
     pub cpu_batch_size: u64,
     /// GPU throttle delay in milliseconds between batches (0 = no throttle)
     pub gpu_throttle_ms: u64,
+    /// Certificate verification mode
+    pub cert_verification: CertVerification,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -543,6 +560,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         gpu_engine,
         cpu_workers,
         gpu_devices,
+        config.cert_verification,
     )
     .await
 }

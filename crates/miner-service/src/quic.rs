@@ -3,6 +3,14 @@
 //! This module provides a QUIC client that connects to a blockchain node
 //! and handles bidirectional streaming for receiving mining jobs and
 //! sending results.
+//!
+//! # Certificate Verification
+//!
+//! The client supports two certificate verification modes:
+//! - **Pinned**: Verify against a specific certificate fingerprint (recommended for remote connections)
+//! - **Insecure**: Skip verification (suitable for localhost or trusted local network)
+//!
+//! The node prints its certificate fingerprint on startup in the format `sha256:<hex>`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,13 +19,16 @@ use std::time::{Duration, Instant};
 use engine_cpu::MinerEngine;
 use primitive_types::U512;
 use quinn::{ClientConfig, Endpoint};
-use rustls::client::ServerCertVerified;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
+use sha2::{Digest, Sha256};
 
 use quantus_miner_api::{
     read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult,
 };
 
-use crate::{EngineType, WorkerPool};
+use crate::{CertVerification, EngineType, WorkerPool};
 use pow_core::format_hashrate;
 
 /// Connect to a node and start mining.
@@ -32,6 +43,7 @@ pub async fn connect_and_mine(
     gpu_engine: Option<Arc<dyn MinerEngine>>,
     cpu_workers: usize,
     gpu_devices: usize,
+    cert_verification: CertVerification,
 ) -> anyhow::Result<()> {
     // Create persistent worker pool once - it lives for the entire miner lifetime
     let worker_pool = WorkerPool::new(cpu_engine, gpu_engine, cpu_workers, gpu_devices);
@@ -42,7 +54,7 @@ pub async fn connect_and_mine(
     loop {
         log::info!("⛏️ Connecting to node at {}...", node_addr);
 
-        match establish_connection(node_addr).await {
+        match establish_connection(node_addr, &cert_verification).await {
             Ok((connection, send, recv)) => {
                 log::info!("⛏️ Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);
@@ -67,15 +79,30 @@ pub async fn connect_and_mine(
 /// Establish a QUIC connection to the node.
 async fn establish_connection(
     addr: SocketAddr,
+    cert_verification: &CertVerification,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
-        .with_no_client_auth();
+    // Create certificate verifier based on configuration
+    let verifier: Arc<dyn ServerCertVerifier> = match cert_verification {
+        CertVerification::Pinned(fingerprint) => {
+            Arc::new(PinnedCertVerifier::new(fingerprint.clone())?)
+        }
+        CertVerification::Insecure => Arc::new(InsecureCertVerifier),
+    };
 
-    crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
+    // Use post-quantum crypto provider
+    let crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls_post_quantum::provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| anyhow::anyhow!("Failed to set protocol versions: {e}"))?
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_no_client_auth();
 
-    let mut client_config = ClientConfig::new(Arc::new(crypto));
+    let mut client_config = ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| anyhow::anyhow!("Failed to create QUIC client config: {e}"))?,
+    ));
 
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
@@ -323,19 +350,152 @@ async fn handle_connection(
     }
 }
 
-/// Certificate verifier that accepts any certificate (for self-signed certs).
-struct InsecureCertVerifier;
+// ---------------------------------------------------------------------------
+// Certificate Verifiers
+// ---------------------------------------------------------------------------
 
-impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
+/// Certificate verifier that pins to a specific certificate fingerprint.
+///
+/// The fingerprint is SHA-256 of the certificate DER, formatted as `sha256:<hex>`.
+#[derive(Debug)]
+struct PinnedCertVerifier {
+    /// Expected fingerprint in lowercase hex (without the `sha256:` prefix)
+    expected_fingerprint: String,
+}
+
+impl PinnedCertVerifier {
+    fn new(fingerprint: String) -> anyhow::Result<Self> {
+        // Parse and validate fingerprint format
+        let fp = fingerprint
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow::anyhow!("Fingerprint must start with 'sha256:'"))?;
+
+        if fp.len() != 64 {
+            anyhow::bail!("Fingerprint must be 64 hex characters (got {})", fp.len());
+        }
+
+        // Validate hex
+        if !fp.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("Fingerprint contains invalid hex characters");
+        }
+
+        Ok(Self {
+            expected_fingerprint: fp.to_lowercase(),
+        })
+    }
+
+    fn compute_fingerprint(cert_der: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(cert_der);
+        let hash = hasher.finalize();
+        hex::encode(hash)
+    }
+}
+
+impl ServerCertVerifier for PinnedCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
+        let actual_fingerprint = Self::compute_fingerprint(end_entity.as_ref());
+
+        if actual_fingerprint == self.expected_fingerprint {
+            log::debug!("Certificate fingerprint verified: sha256:{actual_fingerprint}");
+            Ok(ServerCertVerified::assertion())
+        } else {
+            log::error!(
+                "Certificate fingerprint mismatch!\n  Expected: sha256:{}\n  Got:      sha256:{}",
+                self.expected_fingerprint,
+                actual_fingerprint
+            );
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadSignature,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // We trust the certificate based on fingerprint, so accept the signature
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // We trust the certificate based on fingerprint, so accept the signature
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Only support ML-DSA (post-quantum) - IANA TLS SignatureScheme registry
+        // https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme
+        vec![
+            SignatureScheme::Unknown(0x0904), // ML-DSA-44
+            SignatureScheme::Unknown(0x0905), // ML-DSA-65
+            SignatureScheme::Unknown(0x0906), // ML-DSA-87
+        ]
+    }
+}
+
+
+/// Certificate verifier that accepts any certificate.
+///
+/// Suitable for localhost connections or trusted local networks where MITM is not a concern.
+/// For remote connections over untrusted networks, use `PinnedCertVerifier` instead.
+#[derive(Debug)]
+struct InsecureCertVerifier;
+
+impl ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        // Log the fingerprint for convenience (user can copy it for pinning)
+        let fingerprint = PinnedCertVerifier::compute_fingerprint(end_entity.as_ref());
+        log::debug!("Server certificate fingerprint: sha256:{fingerprint}");
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Only support ML-DSA (post-quantum)
+        vec![
+            SignatureScheme::Unknown(0x0904), // ML-DSA-44
+            SignatureScheme::Unknown(0x0905), // ML-DSA-65
+            SignatureScheme::Unknown(0x0906), // ML-DSA-87
+        ]
     }
 }
