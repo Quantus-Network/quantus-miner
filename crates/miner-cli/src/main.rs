@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
-use miner_service::{run, CertVerification, ServiceConfig};
+use miner_service::{run, ServiceConfig};
 use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
@@ -51,20 +51,6 @@ enum Command {
             default_value_t = 0
         )]
         gpu_throttle_ms: u64,
-
-        /// Node certificate fingerprint for TLS pinning (format: sha256:<hex>)
-        ///
-        /// The node prints this fingerprint on startup. Use this to verify you're
-        /// connecting to the correct node and prevent MITM attacks.
-        #[arg(long = "node-cert-fingerprint", env = "MINER_NODE_CERT_FINGERPRINT", conflicts_with = "no_tls_verify")]
-        node_cert_fingerprint: Option<String>,
-
-        /// Skip TLS certificate verification
-        ///
-        /// Safe when miner and node run on the same machine or trusted local network.
-        /// For remote connections over untrusted networks, use --node-cert-fingerprint instead.
-        #[arg(long = "no-tls-verify", env = "MINER_NO_TLS_VERIFY")]
-        no_tls_verify: bool,
 
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
@@ -126,37 +112,9 @@ async fn main() {
             cpu_batch_size,
             gpu_throttle_ms,
             metrics_port,
-            node_cert_fingerprint,
-            no_tls_verify,
             verbose,
         } => {
             init_logger(verbose);
-
-            // Determine certificate verification mode
-            let cert_verification = if let Some(fp) = node_cert_fingerprint {
-                // Validate fingerprint format
-                if !fp.starts_with("sha256:") || fp.len() != 71 {
-                    eprintln!(
-                        "Error: Invalid fingerprint format. Expected: sha256:<64 hex chars>"
-                    );
-                    eprintln!("Got: {fp}");
-                    std::process::exit(1);
-                }
-                log::info!("Using certificate pinning: {fp}");
-                CertVerification::Pinned(fp)
-            } else if no_tls_verify {
-                log::info!("TLS verification disabled (--no-tls-verify)");
-                CertVerification::Insecure
-            } else {
-                // Default: no verification, suitable for local connections
-                log::info!(
-                    "No --node-cert-fingerprint provided, skipping TLS verification"
-                );
-                log::info!(
-                    "For remote connections, use --node-cert-fingerprint sha256:<hex>"
-                );
-                CertVerification::Insecure
-            };
 
             log::info!("Starting external miner service...");
 
@@ -177,7 +135,6 @@ async fn main() {
                 gpu_batch_size,
                 cpu_batch_size,
                 gpu_throttle_ms,
-                cert_verification,
             };
 
             if let Err(e) = run(config).await {

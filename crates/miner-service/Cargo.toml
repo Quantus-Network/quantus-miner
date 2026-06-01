@@ -18,14 +18,11 @@ log = { workspace = true }
 crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 anyhow = { workspace = true }
-sha2 = "0.10"
-getrandom = "0.2"
 
-# QUIC transport with post-quantum support
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-rustls-pki-types = "1"
-rustls-post-quantum = "0.2"
+# QUIC transport
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+getrandom = "0.2"
 
 # Protocol types from the node repo
 quantus-miner-api = { workspace = true }
