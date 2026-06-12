@@ -10,7 +10,7 @@
 
 pub mod quic;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
 use pow_core::{format_hashrate, format_u512};
 use primitive_types::U512;
@@ -27,8 +27,8 @@ pub struct ServiceConfig {
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
     pub gpu_devices: Option<usize>,
-    /// GPU batch size in nonces
-    pub gpu_batch_size: u64,
+    /// GPU batch size in nonces (u32 since GPU dispatch protocol uses 32-bit counts)
+    pub gpu_batch_size: u32,
     /// CPU batch size in hashes
     pub cpu_batch_size: u64,
     /// GPU throttle delay in milliseconds between batches (0 = no throttle)
@@ -131,7 +131,11 @@ impl WorkerPool {
         if cpu_workers > 0 {
             if let Some(ref engine) = cpu_engine {
                 for _ in 0..cpu_workers {
-                    let (job_tx, job_rx) = unbounded::<MiningJob>();
+                    // Use bounded channel to prevent unbounded queue growth.
+                    // Capacity of 16 allows sender to queue jobs without realistic
+                    // risk of drops during normal operation. Worker drains to get
+                    // the latest job.
+                    let (job_tx, job_rx) = bounded::<MiningJob>(16);
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -152,7 +156,11 @@ impl WorkerPool {
         if gpu_devices > 0 {
             if let Some(ref engine) = gpu_engine {
                 for _ in 0..gpu_devices {
-                    let (job_tx, job_rx) = unbounded::<MiningJob>();
+                    // Use bounded channel to prevent unbounded queue growth.
+                    // Capacity of 16 allows sender to queue jobs without realistic
+                    // risk of drops during normal operation. Worker drains to get
+                    // the latest job.
+                    let (job_tx, job_rx) = bounded::<MiningJob>(16);
                     job_senders.push(job_tx);
 
                     let eng = engine.clone();
@@ -196,10 +204,15 @@ impl WorkerPool {
             job_id: new_job_id,
         };
 
-        // Dispatch job to all workers (unbounded channels - always succeeds unless worker died)
-        for tx in &self.job_senders {
-            // Send will only fail if receiver is dropped (worker thread died)
-            let _ = tx.send(job.clone());
+        // Dispatch job to all workers using bounded channels (capacity 16).
+        // Workers drain to get the latest job, so we just need room to queue.
+        for (i, tx) in self.job_senders.iter().enumerate() {
+            if let Err(e) = tx.try_send(job.clone()) {
+                log::error!(
+                    "Failed to send job {new_job_id} to worker {i}: {e}. \
+                     Channel full - worker may be stuck or jobs arriving too fast."
+                );
+            }
         }
 
         let worker_count = self.job_senders.len();
@@ -344,7 +357,7 @@ fn worker_loop(
             log_worker_completion(
                 type_str,
                 thread_id,
-                "cancelled (stale)",
+                "interrupted by new block",
                 hash_count,
                 search_elapsed,
             );
@@ -367,7 +380,7 @@ fn worker_loop(
                 ..
             } => {
                 log::info!(
-                    "🎉 {type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
+                    "{type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
                     format_u512(nonce),
                     format_u512(hash),
                 );
@@ -384,7 +397,7 @@ fn worker_loop(
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                log_worker_completion(type_str, thread_id, "cancelled", hash_count, search_elapsed);
+                log_worker_completion(type_str, thread_id, "new block", hash_count, search_elapsed);
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Running { .. } => {
@@ -415,7 +428,7 @@ fn worker_loop(
 /// Resolve GPU configuration and initialize the engine.
 pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
-    batch_size: u64,
+    batch_size: u32,
     throttle_ms: u64,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU

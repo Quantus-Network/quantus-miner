@@ -106,33 +106,28 @@ impl TelemetryHandle {
     }
 
     /// Emit a fully custom payload (must include `"msg"`).
-    pub async fn emit_payload(&self, payload: Value, verbosity: Option<u8>) {
+    ///
+    /// This is intentionally lossy: if the internal channel is full, the message is dropped
+    /// silently to avoid blocking mining paths or causing unbounded memory growth.
+    pub fn emit_payload(&self, payload: Value, verbosity: Option<u8>) {
         if self.senders.is_empty() {
             return;
         }
         let msg = EnvelopeMsg { payload, verbosity };
         for tx in self.senders.iter() {
-            // Drop on full; do not block mining paths. This is intentionally lossy under backpressure.
-            if tx.try_send(msg.clone()).is_err() {
-                // Best-effort: if try_send failed due to full buffer, attempt bounded send with small timeout.
-                // Avoid blocking indefinitely.
-                let tx = tx.clone();
-                let msg = msg.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(msg).await;
-                });
-            }
+            // Drop on full; do not block mining paths.
+            let _ = tx.try_send(msg.clone());
         }
     }
 
     /// Emit a `system.connected` message using configuration defaults and an optional link.
-    pub async fn emit_system_connected(&self, link: Option<&TelemetryNodeLink>) {
+    pub fn emit_system_connected(&self, link: Option<&TelemetryNodeLink>) {
         let payload = build_system_connected_payload(&self.config, link);
-        self.emit_payload(payload, Some(self.verbosity)).await;
+        self.emit_payload(payload, Some(self.verbosity));
     }
 
     /// Emit a `system.interval` message with lightweight health stats and an optional link hint.
-    pub async fn emit_system_interval(&self, interval: &SystemInterval, link_hint: Option<&str>) {
+    pub fn emit_system_interval(&self, interval: &SystemInterval, link_hint: Option<&str>) {
         let mut payload = json!({
             "msg": "system.interval",
             "uptime_ms": interval.uptime_ms,
@@ -169,7 +164,7 @@ impl TelemetryHandle {
                 .insert("linked_node_hint".to_string(), json!(hint));
         }
 
-        self.emit_payload(payload, Some(self.verbosity)).await;
+        self.emit_payload(payload, Some(self.verbosity));
     }
 }
 
@@ -463,9 +458,7 @@ mod tests {
         let cfg = TelemetryConfig::default();
         let handle = start(cfg);
         assert!(!handle.is_enabled());
-        handle
-            .emit_system_interval(&SystemInterval::default(), None)
-            .await;
-        handle.emit_system_connected(None).await;
+        handle.emit_system_interval(&SystemInterval::default(), None);
+        handle.emit_system_connected(None);
     }
 }

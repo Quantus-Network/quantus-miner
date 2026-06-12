@@ -253,10 +253,10 @@ async fn handle_connection(
                         };
 
                         // Parse difficulty
-                        let difficulty = match U512::from_dec_str(&request.distance_threshold) {
+                        let difficulty = match U512::from_dec_str(&request.difficulty) {
                             Ok(d) => d,
                             Err(_) => {
-                                log::warn!("Invalid difficulty in request");
+                                log::warn!("Invalid difficulty in request: parse error");
                                 let result = MiningResult {
                                     status: ApiResponseStatus::Failed,
                                     job_id: request.job_id,
@@ -271,6 +271,23 @@ async fn handle_connection(
                                 continue;
                             }
                         };
+
+                        // Reject zero difficulty to prevent division-by-zero panic in JobContext::new
+                        if difficulty.is_zero() {
+                            log::warn!("Invalid difficulty in request: zero is not allowed");
+                            let result = MiningResult {
+                                status: ApiResponseStatus::Failed,
+                                job_id: request.job_id,
+                                nonce: None,
+                                work: None,
+                                hash_count: 0,
+                                elapsed_time: 0.0,
+                                miner_id: None,
+                            };
+                            let msg = MinerMessage::JobResult(result);
+                            send_message_checked(&connection, &mut send, &msg).await?;
+                            continue;
+                        }
 
                         // Reset state for new job
                         cpu_hashes = 0;
