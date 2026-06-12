@@ -225,7 +225,7 @@ async fn run_benchmark(
 
     // Random header hash for benchmark
     let mut header = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut header);
+    rand::rng().fill_bytes(&mut header);
     let difficulty = U512::MAX; // High difficulty - no solutions expected
 
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();

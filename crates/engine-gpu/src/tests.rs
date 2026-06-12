@@ -1,8 +1,7 @@
-use p3_field::PrimeField64 as P3PrimeField64;
-use p3_goldilocks::Goldilocks as P3Goldilocks;
 use plonky2::hash::poseidon2::P2Permuter;
 use qp_plonky2_field::goldilocks_field::GoldilocksField;
 use qp_plonky2_field::types::{Field, Field64, PrimeField64};
+use qp_poseidon_core::Goldilocks as QpGoldilocks;
 use rand::{Rng, SeedableRng};
 use wgpu::util::DeviceExt;
 
@@ -204,8 +203,8 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Random small values (both operands < 2^32)
     for _ in 0..50 {
-        let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
-        let b = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        let a = GoldilocksField::from_canonical_u64(rng.random::<u32>() as u64);
+        let b = GoldilocksField::from_canonical_u64(rng.random::<u32>() as u64);
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -215,8 +214,8 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Random mixed cases (one small, one large)
     for _ in 0..80 {
-        let a = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
-        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
+        let a = GoldilocksField::from_canonical_u64(rng.random::<u32>() as u64);
+        let b = GoldilocksField::from_canonical_u64(rng.random::<u64>());
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -226,8 +225,8 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Random large values (both operands >= 2^32)
     for _ in 0..100 {
-        let a = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
-        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        let a = GoldilocksField::from_canonical_u64(rng.random::<u64>() | 0x100000000u64);
+        let b = GoldilocksField::from_canonical_u64(rng.random::<u64>() | 0x100000000u64);
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -237,9 +236,9 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Random values near the field modulus
     for _ in 0..30 {
-        let offset = rng.gen::<u32>() as u64;
+        let offset = rng.random::<u32>() as u64;
         let a = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
-        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
+        let b = GoldilocksField::from_canonical_u64(rng.random::<u64>());
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -250,7 +249,7 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
     // Add more specific high-limb test cases to detect patterns
     for i in 20..40 {
         let val1 = 1u64 << i; // Powers of 2 from 2^20 to 2^39
-        let val2 = rng.gen::<u32>() as u64 | (1u64 << 32); // Random value with high bit set
+        let val2 = rng.random::<u32>() as u64 | (1u64 << 32); // Random value with high bit set
         let a = GoldilocksField::from_canonical_u64(val1);
         let b = GoldilocksField::from_canonical_u64(val2);
         vectors.push(GfMulTestCase {
@@ -262,9 +261,9 @@ fn generate_gf_mul_test_vectors() -> Vec<GfMulTestCase> {
 
     // Test values with specific limb patterns
     for _ in 0..20 {
-        let high_val = (rng.gen::<u32>() as u64) << 32;
+        let high_val = (rng.random::<u32>() as u64) << 32;
         let a = GoldilocksField::from_canonical_u64(high_val);
-        let b = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        let b = GoldilocksField::from_canonical_u64(rng.random::<u64>() | 0x100000000u64);
         vectors.push(GfMulTestCase {
             a,
             b,
@@ -331,21 +330,21 @@ fn generate_sbox_test_vectors() -> Vec<SboxTestCase> {
 
     // Random small values (< 2^32)
     for _ in 0..20 {
-        let input = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+        let input = GoldilocksField::from_canonical_u64(rng.random::<u32>() as u64);
         let expected = input.exp_u64(7);
         vectors.push(SboxTestCase { input, expected });
     }
 
     // Random large values (>= 2^32)
     for _ in 0..30 {
-        let input = GoldilocksField::from_canonical_u64(rng.gen::<u64>() | 0x100000000u64);
+        let input = GoldilocksField::from_canonical_u64(rng.random::<u64>() | 0x100000000u64);
         let expected = input.exp_u64(7);
         vectors.push(SboxTestCase { input, expected });
     }
 
     // Values near the field modulus
     for _ in 0..10 {
-        let offset = rng.gen::<u32>() as u64;
+        let offset = rng.random::<u32>() as u64;
         let input = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
         let expected = input.exp_u64(7);
         vectors.push(SboxTestCase { input, expected });
@@ -387,7 +386,7 @@ fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestC
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen::<u16>() as u64;
+            let val = rng.random::<u16>() as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = apply_full_external_linear_layer_to_state(&input);
@@ -398,7 +397,7 @@ fn generate_external_linear_layer_test_vectors() -> Vec<ExternalLinearLayerTestC
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen::<u32>() as u64;
+            let val = rng.random::<u32>() as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = apply_full_external_linear_layer_to_state(&input);
@@ -432,7 +431,7 @@ fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestC
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            *item = GoldilocksField::from_canonical_u64(rng.gen_range(0..100));
+            *item = GoldilocksField::from_canonical_u64(rng.random_range(0..100));
         }
         let expected = apply_internal_linear_layer_to_state(&input);
         vectors.push(InternalLinearLayerTestCase { input, expected });
@@ -442,7 +441,7 @@ fn generate_internal_linear_layer_test_vectors() -> Vec<InternalLinearLayerTestC
     for _ in 0..20 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            *item = GoldilocksField::from_noncanonical_u64(rng.gen());
+            *item = GoldilocksField::from_noncanonical_u64(rng.random());
         }
         let expected = apply_internal_linear_layer_to_state(&input);
         vectors.push(InternalLinearLayerTestCase { input, expected });
@@ -487,7 +486,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     for _ in 0..50 {
         let mut input = [GoldilocksField::ZERO; 4];
         for item in &mut input {
-            *item = GoldilocksField::from_canonical_u64(rng.gen::<u16>() as u64);
+            *item = GoldilocksField::from_canonical_u64(rng.random::<u16>() as u64);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -497,7 +496,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     for _ in 0..30 {
         let mut input = [GoldilocksField::ZERO; 4];
         for item in &mut input {
-            *item = GoldilocksField::from_canonical_u64(rng.gen::<u32>() as u64);
+            *item = GoldilocksField::from_canonical_u64(rng.random::<u32>() as u64);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -507,7 +506,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     for _ in 0..30 {
         let mut input = [GoldilocksField::ZERO; 4];
         for item in &mut input {
-            *item = GoldilocksField::from_canonical_u64(rng.gen::<u64>());
+            *item = GoldilocksField::from_canonical_u64(rng.random::<u64>());
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
         vectors.push(MdsTestCase { input, expected });
@@ -517,7 +516,7 @@ fn generate_mds_test_vectors() -> Vec<MdsTestCase> {
     for _ in 0..10 {
         let mut input = [GoldilocksField::ZERO; 4];
         for item in &mut input {
-            let offset = rng.gen::<u32>() as u64;
+            let offset = rng.random::<u32>() as u64;
             *item = GoldilocksField::from_canonical_u64(GoldilocksField::ORDER - offset);
         }
         let expected = apply_external_linear_layer_to_chunk(&input);
@@ -710,7 +709,7 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen::<u16>() as u64;
+            let val = rng.random::<u16>() as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
@@ -721,7 +720,7 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     for _ in 0..20 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen::<u16>() as u64;
+            let val = rng.random::<u16>() as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
@@ -732,7 +731,7 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen::<u32>() as u64;
+            let val = rng.random::<u32>() as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
@@ -744,7 +743,7 @@ fn generate_poseidon2_test_vectors() -> Vec<Poseidon2TestCase> {
     for _ in 0..15 {
         let mut input = [GoldilocksField::ZERO; 12];
         for item in &mut input {
-            let val = rng.gen_range(65536..u32::MAX) as u64;
+            let val = rng.random_range(65536..u32::MAX) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let expected = <GoldilocksField as P2Permuter>::permute(input);
@@ -802,10 +801,10 @@ fn generate_field_to_bytes_test_vectors() -> Vec<FieldToBytesTestCase> {
     // Test 4: Random values
     for _ in 0..10 {
         let input = [
-            GoldilocksField::from_canonical_u64(rng.gen::<u64>() % GoldilocksField::ORDER),
-            GoldilocksField::from_canonical_u64(rng.gen::<u64>() % GoldilocksField::ORDER),
-            GoldilocksField::from_canonical_u64(rng.gen::<u64>() % GoldilocksField::ORDER),
-            GoldilocksField::from_canonical_u64(rng.gen::<u64>() % GoldilocksField::ORDER),
+            GoldilocksField::from_canonical_u64(rng.random::<u64>() % GoldilocksField::ORDER),
+            GoldilocksField::from_canonical_u64(rng.random::<u64>() % GoldilocksField::ORDER),
+            GoldilocksField::from_canonical_u64(rng.random::<u64>() % GoldilocksField::ORDER),
+            GoldilocksField::from_canonical_u64(rng.random::<u64>() % GoldilocksField::ORDER),
         ];
         let mut expected = [0u8; 32];
         for (i, &felt) in input.iter().enumerate() {
@@ -888,8 +887,8 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     let mut vectors = Vec::new();
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x98765432);
 
-    // Helper to convert P3 Goldilocks to P2 (Plonky2) GoldilocksField
-    fn p3_to_p2(felts: Vec<P3Goldilocks>) -> Vec<GoldilocksField> {
+    // Helper to convert qp_poseidon_core::Goldilocks to Plonky2 GoldilocksField
+    fn qp_to_p2(felts: Vec<QpGoldilocks>) -> Vec<GoldilocksField> {
         felts
             .into_iter()
             .map(|g| GoldilocksField::from_noncanonical_u64(g.as_canonical_u64()))
@@ -898,7 +897,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
 
     // Test 1: All zeros
     let zero_input = [0u8; 96];
-    let zero_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&zero_input));
+    let zero_expected = qp_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&zero_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: zero_input,
         expected_felts: zero_expected,
@@ -906,7 +905,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
 
     // Test 2: All 0xFF
     let ff_input = [0xFFu8; 96];
-    let ff_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&ff_input));
+    let ff_expected = qp_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&ff_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: ff_input,
         expected_felts: ff_expected,
@@ -917,7 +916,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for (i, byte) in seq_input.iter_mut().enumerate() {
         *byte = (i % 256) as u8;
     }
-    let seq_expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&seq_input));
+    let seq_expected = qp_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&seq_input));
     vectors.push(BytesToFieldTestCase {
         input_bytes: seq_input,
         expected_felts: seq_expected,
@@ -927,7 +926,7 @@ fn generate_bytes_to_field_test_vectors() -> Vec<BytesToFieldTestCase> {
     for _ in 0..10 {
         let mut input = [0u8; 96];
         rng.fill(&mut input[..]);
-        let expected = p3_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&input));
+        let expected = qp_to_p2(qp_poseidon_core::serialization::bytes_to_felts(&input));
         vectors.push(BytesToFieldTestCase {
             input_bytes: input,
             expected_felts: expected,
@@ -1135,7 +1134,7 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
     for _ in 0..15 {
         let mut random_input = [GoldilocksField::ZERO; 12];
         for item in &mut random_input {
-            let val = (rng.gen::<u8>()) as u64;
+            let val = (rng.random::<u8>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let after_initial_external = apply_initial_external(random_input);
@@ -1150,7 +1149,7 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
     for _ in 0..10 {
         let mut random_input = [GoldilocksField::ZERO; 12];
         for item in &mut random_input {
-            let val = (rng.gen::<u32>()) as u64;
+            let val = (rng.random::<u32>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         let after_initial_external = apply_initial_external(random_input);
@@ -1461,7 +1460,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     for _ in 0..15 {
         let mut state = [GoldilocksField::ZERO; 12];
         for item in &mut state {
-            let val = (rng.gen::<u32>()) as u64;
+            let val = (rng.random::<u32>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
@@ -1471,7 +1470,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     for _ in 0..10 {
         let mut state = [GoldilocksField::ZERO; 12];
         for item in &mut state {
-            let val = (rng.gen::<u16>()) as u64;
+            let val = (rng.random::<u16>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
@@ -1720,7 +1719,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     for _ in 0..15 {
         let mut state = [GoldilocksField::ZERO; 12];
         for item in &mut state {
-            let val = (rng.gen::<u8>()) as u64;
+            let val = (rng.random::<u8>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);
@@ -1730,7 +1729,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     for _ in 0..10 {
         let mut state = [GoldilocksField::ZERO; 12];
         for item in &mut state {
-            let val = (rng.gen::<u16>()) as u64;
+            let val = (rng.random::<u16>()) as u64;
             *item = GoldilocksField::from_canonical_u64(val);
         }
         test_cases.push(state);

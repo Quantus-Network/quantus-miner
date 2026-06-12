@@ -25,7 +25,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
     group.bench_function("cpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -41,7 +41,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
     group.bench_function("gpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -76,7 +76,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
     group.bench_function("cpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -92,7 +92,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
     group.bench_function("gpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -127,7 +127,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
     group.bench_function("cpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -143,7 +143,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
     group.bench_function("gpu", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -178,7 +178,7 @@ fn bench_solution_finding(c: &mut Criterion) {
     group.bench_function("cpu_find_solution", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(10_000u64); // Easy difficulty - should find solution
             let ctx = JobContext::new(header, difficulty);
 
@@ -194,7 +194,7 @@ fn bench_solution_finding(c: &mut Criterion) {
     group.bench_function("gpu_find_solution", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(10_000u64); // Easy difficulty - should find solution
             let ctx = JobContext::new(header, difficulty);
 
@@ -229,7 +229,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
     group.bench_function("cpu_throughput", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -245,7 +245,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
     group.bench_function("gpu_throughput", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX); // High difficulty - no solutions expected
             let ctx = JobContext::new(header, difficulty);
 
@@ -289,7 +289,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
     group.bench_function("gpu_1k_batch", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX);
             let ctx = JobContext::new(header, difficulty);
 
@@ -305,7 +305,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
     group.bench_function("gpu_50k_batch", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX);
             let ctx = JobContext::new(header, difficulty);
 
@@ -321,7 +321,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
     group.bench_function("gpu_500k_batch", |b| {
         b.iter(|| {
             let mut header = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut header);
+            rand::rng().fill_bytes(&mut header);
             let difficulty = U512::from(u64::MAX);
             let ctx = JobContext::new(header, difficulty);
 
