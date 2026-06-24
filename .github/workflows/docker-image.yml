@@ -7,6 +7,11 @@ on:
         description: "Optional: Specify a full version (e.g., v0.3.0 or v0.3.1-beta.1) to build. If empty, uses the latest release tag. MUST start with 'v'."
         required: false
         default: ""
+      use_main_dockerfile:
+        description: "Optional: Use the main Dockerfile instead of the tag version-specific Dockerfile. If empty, uses the tag version-specific Dockerfile."
+        required: false
+        default: false 
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -96,19 +101,8 @@ jobs:
         with:
           ref: ${{ env.TARGET_VERSION_WITH_V }}
 
-      - name: Check if Dockerfile exists in tag
-        id: check_dockerfile
-        run: |
-          if [ ! -f Dockerfile ]; then
-            echo "::warning::Dockerfile not found in tag ${{ env.TARGET_VERSION_WITH_V }}, falling back to main branch Dockerfile"
-            echo "use_main=true" >> $GITHUB_OUTPUT
-          else
-            echo "Dockerfile found in tag"
-            echo "use_main=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Checkout main branch for Dockerfile (if needed)
-        if: steps.check_dockerfile.outputs.use_main == 'true'
+        if: github.event.inputs.use_main_dockerfile == 'true'
         uses: actions/checkout@v4
         with:
           ref: main
@@ -119,7 +113,7 @@ jobs:
           path: dockerfile-source
 
       - name: Copy Dockerfile from main (if needed)
-        if: steps.check_dockerfile.outputs.use_main == 'true'
+        if: github.event.inputs.use_main_dockerfile == 'true'
         run: |
           cp dockerfile-source/Dockerfile ./
           [ -f dockerfile-source/.dockerignore ] && cp dockerfile-source/.dockerignore ./ || true
