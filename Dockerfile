@@ -18,7 +18,6 @@ WORKDIR /build
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain taplo.toml ./
 COPY crates ./crates
-COPY tests ./tests
 
 # Build the miner-cli in release mode
 RUN cargo build --release -p miner-cli --locked
