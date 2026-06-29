@@ -3,6 +3,9 @@
 
 mod gpu_tiers;
 
+pub mod end_to_end_tests;
+pub mod tests;
+
 use engine_cpu::{CancelCheck, Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use futures::executor::block_on;
 use pow_core::{format_hashrate, format_u512, JobContext};
