@@ -172,12 +172,34 @@ impl GpuEngine {
 
         let mut contexts = Vec::new();
         let mut adapter_infos = Vec::new();
+        
+        // Timeout for initializing each adapter (30 seconds should be plenty)
+        let init_timeout = std::time::Duration::from_secs(30);
+        
         for (i, adapter) in adapters.into_iter().enumerate() {
             let info = adapter.get_info();
-            log::debug!(target: "gpu_engine", "Adapter {} raw info: {:?}", i, info);
+            log::info!(target: "gpu_engine", "Initializing adapter {}: {} ...", i, info.name);
+            
+            // Skip software renderers - they're too slow for mining
+            if info.name.to_lowercase().contains("microsoft basic")
+                || info.name.to_lowercase().contains("software")
+                || info.name.to_lowercase().contains("llvmpipe")
+                || info.device_type == wgpu::DeviceType::Cpu
+            {
+                log::warn!(
+                    target: "gpu_engine",
+                    "Skipping software renderer adapter {}: {}",
+                    i, info.name
+                );
+                continue;
+            }
+            
             adapter_infos.push(info.clone());
 
-            let (device, queue) = adapter
+            // Try to initialize this adapter with a timeout
+            let init_start = std::time::Instant::now();
+            
+            let device_result = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Mining Device"),
                     required_features: wgpu::Features::empty(),
@@ -185,7 +207,29 @@ impl GpuEngine {
                     memory_hints: Default::default(),
                     ..Default::default()
                 })
-                .await?;
+                .await;
+            
+            // Check if request_device took too long (it completed but was slow)
+            if init_start.elapsed() > init_timeout {
+                log::warn!(
+                    target: "gpu_engine",
+                    "Adapter {} ({}) took too long to initialize ({:.1}s), skipping",
+                    i, info.name, init_start.elapsed().as_secs_f64()
+                );
+                continue;
+            }
+                
+            let (device, queue) = match device_result {
+                Ok(dq) => dq,
+                Err(e) => {
+                    log::warn!(
+                        target: "gpu_engine",
+                        "Failed to initialize adapter {} ({}): {}. Skipping.",
+                        i, info.name, e
+                    );
+                    continue;
+                }
+            };
 
             // Log device limits at debug level
             let limits = device.limits();
@@ -212,8 +256,23 @@ impl GpuEngine {
                 compilation_options: Default::default(),
                 cache: None,
             });
+            
+            // Check total init time for this adapter
+            let init_elapsed = init_start.elapsed();
+            if init_elapsed > init_timeout {
+                log::warn!(
+                    target: "gpu_engine",
+                    "Adapter {} ({}) pipeline creation took too long ({:.1}s), skipping",
+                    i, info.name, init_elapsed.as_secs_f64()
+                );
+                continue;
+            }
 
-            log::debug!(target: "gpu_engine", "Pipeline initialized for adapter {}", i);
+            log::info!(
+                target: "gpu_engine",
+                "Adapter {} ({}) initialized successfully in {:.1}s",
+                i, info.name, init_elapsed.as_secs_f64()
+            );
 
             // Calculate vendor-specific configuration once during initialization
             let optimal_workgroups = get_vendor_specific_dispatch(&info, &device);
@@ -224,6 +283,11 @@ impl GpuEngine {
                 pipeline,
                 optimal_workgroups,
             }));
+        }
+        
+        if contexts.is_empty() {
+            log::error!(target: "gpu_engine", "No GPU adapters could be initialized successfully.");
+            return Err("No GPU adapters could be initialized".into());
         }
 
         log::info!(
@@ -568,23 +632,48 @@ fn run_single_batch(
 
     // Wait for GPU to complete (blocking)
     let buffer_slice = resources.staging_buffer.slice(..);
-    let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mapped_clone = mapped.clone();
+    // Use atomic to track completion: 0 = pending, 1 = success, 2 = error
+    let map_status = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let map_status_clone = map_status.clone();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        if result.is_ok() {
-            mapped_clone.store(true, Ordering::Release);
-        }
+        map_status_clone.store(
+            if result.is_ok() { 1 } else { 2 },
+            Ordering::Release,
+        );
     });
 
-    // Poll until complete
+    // Poll until complete, error, or timeout (30 seconds max to prevent infinite hang)
+    let poll_start = std::time::Instant::now();
+    let max_poll_duration = std::time::Duration::from_secs(30);
     loop {
         let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: Some(std::time::Duration::from_millis(10)),
         });
 
-        if mapped.load(Ordering::Acquire) {
-            break;
+        match map_status.load(Ordering::Acquire) {
+            1 => break, // Success
+            2 => {
+                // Mapping failed - return empty result to avoid infinite loop
+                log::error!(
+                    target: "gpu_engine",
+                    "GPU buffer mapping failed - possible device lost or resource error"
+                );
+                resources.staging_buffer.unmap();
+                return BatchResult::NotFound { hash_count: 0 };
+            }
+            _ => {
+                // Still pending - check timeout
+                if poll_start.elapsed() > max_poll_duration {
+                    log::error!(
+                        target: "gpu_engine",
+                        "GPU buffer mapping timed out after {}s - GPU may be unresponsive",
+                        max_poll_duration.as_secs()
+                    );
+                    resources.staging_buffer.unmap();
+                    return BatchResult::NotFound { hash_count: 0 };
+                }
+            }
         }
     }
 
