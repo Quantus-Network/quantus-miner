@@ -964,39 +964,61 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     false,
                 )
             }
-            // === Polaris (RX 400/500 series) ===
-            // Check BEFORE RDNA 1 to avoid "560X" matching "5600" pattern
-            else if vendor_name.contains("rx 4")
-                || vendor_name.contains("590")
-                || vendor_name.contains("580")
-                || vendor_name.contains("570")
-                || vendor_name.contains("560")
-                || vendor_name.contains("550")
-                || vendor_name.contains("rx 5x")
-                || vendor_name.contains("480")
-                || vendor_name.contains("470")
-                || vendor_name.contains("460")
-            {
-                (
-                    (max_workgroups / 20).max(768),
-                    "AMD RX 500/400 (Polaris)",
-                    false,
-                )
-            }
             // === RDNA 1 (RX 5000 series) ===
+            // Check BEFORE Polaris - RDNA 1 has 4-digit model numbers (5500, 5600, 5700)
+            // that would otherwise match Polaris 3-digit patterns (550, 560, 570)
             else if vendor_name.contains("5700") {
                 (
                     (max_workgroups / 16).max(1536),
                     "AMD RX 5700 (RDNA 1)",
                     false,
                 )
-            } else if vendor_name.contains("rx 5")
-                || vendor_name.contains("5600")
-                || vendor_name.contains("5500")
-            {
+            } else if vendor_name.contains("5600") || vendor_name.contains("5500") {
                 (
                     (max_workgroups / 18).max(1024),
                     "AMD RX 5000 (RDNA 1)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 5") {
+                // Generic RX 5000 fallback (but not "rx 5x0" which is Polaris mobile)
+                if !vendor_name.contains("rx 5x") {
+                    (
+                        (max_workgroups / 18).max(1024),
+                        "AMD RX 5000 (RDNA 1)",
+                        false,
+                    )
+                } else {
+                    // RX 5x0 mobile variants are Polaris
+                    (
+                        (max_workgroups / 20).max(768),
+                        "AMD RX 500/400 (Polaris)",
+                        false,
+                    )
+                }
+            }
+            // === Polaris (RX 400/500 series) ===
+            // Use specific 3-digit patterns with word boundaries where possible
+            else if vendor_name.contains("rx 4")
+                || vendor_name.contains("rx 590")
+                || vendor_name.contains("rx 580")
+                || vendor_name.contains("rx 570")
+                || vendor_name.contains("rx 560")
+                || vendor_name.contains("rx 550")
+                || vendor_name.contains("rx 480")
+                || vendor_name.contains("rx 470")
+                || vendor_name.contains("rx 460")
+                || vendor_name.contains(" 590")
+                || vendor_name.contains(" 580")
+                || vendor_name.contains(" 570")
+                || vendor_name.contains(" 560")
+                || vendor_name.contains(" 550")
+                || vendor_name.contains(" 480")
+                || vendor_name.contains(" 470")
+                || vendor_name.contains(" 460")
+            {
+                (
+                    (max_workgroups / 20).max(768),
+                    "AMD RX 500/400 (Polaris)",
                     false,
                 )
             }
@@ -1110,6 +1132,27 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     false,
                 )
             }
+            // === Alchemist Mobile (Arc A-Series laptops) ===
+            // Check mobile BEFORE desktop - "a770m" contains "a770" substring
+            else if vendor_name.contains("a770m") || vendor_name.contains("a730m") {
+                (
+                    (max_workgroups / 14).max(1536),
+                    "Intel Arc A7 Mobile (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a550m") || vendor_name.contains("a570m") {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "Intel Arc A5 Mobile (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a370m") || vendor_name.contains("a350m") {
+                (
+                    (max_workgroups / 20).max(512),
+                    "Intel Arc A3 Mobile (Alchemist)",
+                    false,
+                )
+            }
             // === Alchemist Desktop (Arc A-Series) ===
             else if vendor_name.contains("a770") || vendor_name.contains("a750") {
                 (
@@ -1127,26 +1170,6 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 (
                     (max_workgroups / 18).max(768),
                     "Intel Arc A3 (Alchemist)",
-                    false,
-                )
-            }
-            // === Alchemist Mobile (Arc A-Series laptops) ===
-            else if vendor_name.contains("a770m") || vendor_name.contains("a730m") {
-                (
-                    (max_workgroups / 14).max(1536),
-                    "Intel Arc A7 Mobile (Alchemist)",
-                    false,
-                )
-            } else if vendor_name.contains("a550m") || vendor_name.contains("a570m") {
-                (
-                    (max_workgroups / 16).max(1024),
-                    "Intel Arc A5 Mobile (Alchemist)",
-                    false,
-                )
-            } else if vendor_name.contains("a370m") || vendor_name.contains("a350m") {
-                (
-                    (max_workgroups / 20).max(512),
-                    "Intel Arc A3 Mobile (Alchemist)",
                     false,
                 )
             }
