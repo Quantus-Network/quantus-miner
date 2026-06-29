@@ -759,6 +759,20 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "AMD RX 6000 (RDNA 2)",
                     false,
                 )
+            } else if vendor_name.contains("rx 4")
+                || vendor_name.contains("580")
+                || vendor_name.contains("570")
+                || vendor_name.contains("560")
+                || vendor_name.contains("550")
+                || vendor_name.contains("rx 5x")
+            {
+                // Polaris (RX 400/500 series) - check BEFORE RDNA 1 to avoid
+                // "560X" matching "5600" pattern
+                (
+                    (max_workgroups / 20).max(768),
+                    "AMD RX 500/400 (Polaris)",
+                    false,
+                )
             } else if vendor_name.contains("5700") {
                 (
                     (max_workgroups / 16).max(1536),
@@ -774,15 +788,22 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "AMD RX 5000 (RDNA 1)",
                     false,
                 )
-            } else if vendor_name.contains("rx 4")
-                || vendor_name.contains("580")
-                || vendor_name.contains("570")
-            {
-                (
-                    (max_workgroups / 20).max(768),
-                    "AMD RX 500/400 (Polaris)",
-                    false,
-                )
+            } else if vendor_name.contains("vega") {
+                // AMD Vega APUs (Vega 8, Vega 11) and discrete Vega (56, 64)
+                if vendor_name.contains("vega 56") || vendor_name.contains("vega 64") {
+                    (
+                        (max_workgroups / 14).max(1536),
+                        "AMD Vega (Discrete)",
+                        false,
+                    )
+                } else {
+                    // Vega APUs (integrated graphics) - more conservative
+                    (
+                        (max_workgroups / 28).max(384),
+                        "AMD Vega (APU)",
+                        false,
+                    )
+                }
             } else if vendor_name.contains("radeon pro")
                 || vendor_name.contains("instinct")
                 || vendor_name.contains("mi")
