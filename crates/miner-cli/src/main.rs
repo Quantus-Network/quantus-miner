@@ -166,10 +166,11 @@ async fn main() {
 
 fn init_logger(verbose: bool) {
     if std::env::var("RUST_LOG").is_err() {
+        // Filter out noisy wgpu/naga shader compilation logs
         let log_level = if verbose {
-            "debug,miner=debug,gpu_engine=debug,engine_cpu=debug"
+            "debug,miner=debug,gpu_engine=debug,engine_cpu=debug,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn"
         } else {
-            "info,miner=info,gpu_engine=info"
+            "info,miner=info,gpu_engine=info,wgpu=error,wgpu_core=error,wgpu_hal=error,naga=error"
         };
         std::env::set_var("RUST_LOG", log_level);
     }
