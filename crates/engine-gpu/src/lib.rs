@@ -172,14 +172,14 @@ impl GpuEngine {
 
         let mut contexts = Vec::new();
         let mut adapter_infos = Vec::new();
-        
+
         // Timeout for initializing each adapter (30 seconds should be plenty)
         let init_timeout = std::time::Duration::from_secs(30);
-        
+
         for (i, adapter) in adapters.into_iter().enumerate() {
             let info = adapter.get_info();
             log::info!(target: "gpu_engine", "Initializing adapter {}: {} ...", i, info.name);
-            
+
             // Skip software renderers - they're too slow for mining
             if info.name.to_lowercase().contains("microsoft basic")
                 || info.name.to_lowercase().contains("software")
@@ -193,12 +193,12 @@ impl GpuEngine {
                 );
                 continue;
             }
-            
+
             adapter_infos.push(info.clone());
 
             // Try to initialize this adapter with a timeout
             let init_start = std::time::Instant::now();
-            
+
             let device_result = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Mining Device"),
@@ -208,7 +208,7 @@ impl GpuEngine {
                     ..Default::default()
                 })
                 .await;
-            
+
             // Check if request_device took too long (it completed but was slow)
             if init_start.elapsed() > init_timeout {
                 log::warn!(
@@ -218,7 +218,7 @@ impl GpuEngine {
                 );
                 continue;
             }
-                
+
             let (device, queue) = match device_result {
                 Ok(dq) => dq,
                 Err(e) => {
@@ -256,7 +256,7 @@ impl GpuEngine {
                 compilation_options: Default::default(),
                 cache: None,
             });
-            
+
             // Check total init time for this adapter
             let init_elapsed = init_start.elapsed();
             if init_elapsed > init_timeout {
@@ -284,7 +284,7 @@ impl GpuEngine {
                 optimal_workgroups,
             }));
         }
-        
+
         if contexts.is_empty() {
             log::error!(target: "gpu_engine", "No GPU adapters could be initialized successfully.");
             return Err("No GPU adapters could be initialized".into());
@@ -636,10 +636,7 @@ fn run_single_batch(
     let map_status = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     let map_status_clone = map_status.clone();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        map_status_clone.store(
-            if result.is_ok() { 1 } else { 2 },
-            Ordering::Release,
-        );
+        map_status_clone.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
     });
 
     // Poll until complete, error, or timeout (30 seconds max to prevent infinite hang)
@@ -825,7 +822,11 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     false,
                 )
             } else if vendor_name.contains("gtx") {
-                ((max_workgroups / 20).max(512), "NVIDIA GTX (Unknown)", false)
+                (
+                    (max_workgroups / 20).max(512),
+                    "NVIDIA GTX (Unknown)",
+                    false,
+                )
             } else if vendor_name.contains("mx5")
                 || vendor_name.contains("mx4")
                 || vendor_name.contains("mx3")
@@ -833,11 +834,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 || vendor_name.contains("mx1")
             {
                 // NVIDIA MX series (laptop, entry-level)
-                (
-                    (max_workgroups / 24).max(384),
-                    "NVIDIA MX (Mobile)",
-                    false,
-                )
+                ((max_workgroups / 24).max(384), "NVIDIA MX (Mobile)", false)
             } else if vendor_name.contains("geforce gt")
                 || (vendor_name.contains("gt ") && vendor_name.contains("nvidia"))
             {
@@ -868,7 +865,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
         {
             // AMD GPUs (vendor ID 0x1002 = 4098)
             // Note: Order matters - check more specific patterns before general ones
-            
+
             // === RDNA 4 (RX 9000 series) ===
             if vendor_name.contains("rx 9")
                 || vendor_name.contains("9070")
@@ -899,9 +896,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 )
             }
             // === RDNA 3 APUs (Ryzen 7000/8000 mobile) ===
-            else if vendor_name.contains("780m")
-                || vendor_name.contains("radeon 780m")
-            {
+            else if vendor_name.contains("780m") || vendor_name.contains("radeon 780m") {
                 (
                     (max_workgroups / 12).max(2048),
                     "AMD Radeon 780M (RDNA 3 APU)",
@@ -919,9 +914,9 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 )
             }
             // === RDNA 2 Discrete ===
-            else if vendor_name.contains("6950") 
-                || vendor_name.contains("6900") 
-                || vendor_name.contains("6800") 
+            else if vendor_name.contains("6950")
+                || vendor_name.contains("6900")
+                || vendor_name.contains("6800")
             {
                 (
                     (max_workgroups / 12).max(2560),
@@ -1027,11 +1022,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 )
             } else if vendor_name.contains("vega") {
                 // Vega APUs (integrated graphics) - Vega 8, Vega 11, etc.
-                (
-                    (max_workgroups / 28).max(384),
-                    "AMD Vega (APU)",
-                    false,
-                )
+                ((max_workgroups / 28).max(384), "AMD Vega (APU)", false)
             }
             // === GCN 4 (R9 Fury, Nano) ===
             else if vendor_name.contains("fury") || vendor_name.contains("nano") {
@@ -1049,11 +1040,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 || vendor_name.contains("290")
                 || vendor_name.contains("280")
             {
-                (
-                    (max_workgroups / 20).max(768),
-                    "AMD R9 (GCN)",
-                    false,
-                )
+                ((max_workgroups / 20).max(768), "AMD R9 (GCN)", false)
             } else if vendor_name.contains("r7 3")
                 || vendor_name.contains("r7 2")
                 || vendor_name.contains("370")
@@ -1061,11 +1048,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 || vendor_name.contains("270")
                 || vendor_name.contains("260")
             {
-                (
-                    (max_workgroups / 22).max(512),
-                    "AMD R7 (GCN)",
-                    false,
-                )
+                ((max_workgroups / 22).max(512), "AMD R7 (GCN)", false)
             }
             // === Professional/Datacenter ===
             // Use specific patterns to avoid false matches (e.g., "mi" in other words)
@@ -1115,7 +1098,7 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
             }
         } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
             // Intel GPUs (vendor ID 0x8086 = 32902)
-            
+
             // === Battlemage (Arc B-Series) ===
             if vendor_name.contains("arc b")
                 || vendor_name.contains("b580")
@@ -1222,7 +1205,11 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "Intel UHD Graphics (Integrated)",
                     false,
                 )
-            } else if vendor_name.contains("hd graphics") || vendor_name.contains("hd 6") || vendor_name.contains("hd 5") || vendor_name.contains("hd 4") {
+            } else if vendor_name.contains("hd graphics")
+                || vendor_name.contains("hd 6")
+                || vendor_name.contains("hd 5")
+                || vendor_name.contains("hd 4")
+            {
                 (
                     (max_workgroups / 30).max(192),
                     "Intel HD Graphics (Integrated)",
@@ -1231,9 +1218,10 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
             } else {
                 ((max_workgroups / 24).max(256), "Intel Unknown", true)
             }
-        } else if vendor_name.contains("qualcomm") 
+        } else if vendor_name.contains("qualcomm")
             || vendor_name.contains("adreno")
-            || adapter_info.vendor == 0x5143  // Qualcomm vendor ID
+            || adapter_info.vendor == 0x5143
+        // Qualcomm vendor ID
         {
             // Qualcomm Adreno GPUs (Windows on ARM, Android)
             // Adreno 700 series (Snapdragon 8 Gen 1/2/3)
@@ -1299,7 +1287,11 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     false,
                 )
             } else {
-                ((max_workgroups / 24).max(384), "Qualcomm Adreno (Unknown)", true)
+                (
+                    (max_workgroups / 24).max(384),
+                    "Qualcomm Adreno (Unknown)",
+                    true,
+                )
             }
         } else if adapter_info.backend == wgpu::Backend::Metal {
             // Apple GPUs (detected by Metal backend)
