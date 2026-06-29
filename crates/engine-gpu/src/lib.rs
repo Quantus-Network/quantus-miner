@@ -678,6 +678,8 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 || vendor_name.contains("3090")
                 || vendor_name.contains("3080")
                 || vendor_name.contains("3070")
+                || vendor_name.contains("3060")
+                || vendor_name.contains("3050")
                 || vendor_name.contains("2080")
                 || vendor_name.contains("2070")
                 || vendor_name.contains("2060")
@@ -694,17 +696,74 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                 || vendor_name.contains("1080")
                 || vendor_name.contains("1070")
                 || vendor_name.contains("1060")
+                || vendor_name.contains("1050")
+                || vendor_name.contains("1030")
             {
                 (
                     (max_workgroups / 16).max(1024),
                     "NVIDIA GTX 16/10 (Turing/Pascal)",
                     false,
                 )
+            } else if vendor_name.contains("gtx 9")
+                || vendor_name.contains("980")
+                || vendor_name.contains("970")
+                || vendor_name.contains("960")
+                || vendor_name.contains("950")
+            {
+                (
+                    (max_workgroups / 18).max(768),
+                    "NVIDIA GTX 900 (Maxwell)",
+                    false,
+                )
+            } else if vendor_name.contains("gtx 7")
+                || vendor_name.contains("780")
+                || vendor_name.contains("770")
+                || vendor_name.contains("760")
+                || vendor_name.contains("750")
+            {
+                (
+                    (max_workgroups / 20).max(512),
+                    "NVIDIA GTX 700 (Kepler/Maxwell)",
+                    false,
+                )
+            } else if vendor_name.contains("gtx 6")
+                || vendor_name.contains("gtx 5")
+                || vendor_name.contains("gtx 4")
+            {
+                (
+                    (max_workgroups / 24).max(384),
+                    "NVIDIA GTX Legacy (Fermi/Kepler)",
+                    false,
+                )
             } else if vendor_name.contains("gtx") {
-                ((max_workgroups / 18).max(768), "NVIDIA GTX (Legacy)", false)
+                ((max_workgroups / 20).max(512), "NVIDIA GTX (Unknown)", false)
+            } else if vendor_name.contains("mx5")
+                || vendor_name.contains("mx4")
+                || vendor_name.contains("mx3")
+                || vendor_name.contains("mx2")
+                || vendor_name.contains("mx1")
+            {
+                // NVIDIA MX series (laptop, entry-level)
+                (
+                    (max_workgroups / 24).max(384),
+                    "NVIDIA MX (Mobile)",
+                    false,
+                )
+            } else if vendor_name.contains("geforce gt")
+                || (vendor_name.contains("gt ") && vendor_name.contains("nvidia"))
+            {
+                // NVIDIA GT series (entry-level desktop/laptop)
+                (
+                    (max_workgroups / 28).max(256),
+                    "NVIDIA GT (Entry-Level)",
+                    false,
+                )
             } else if vendor_name.contains("quadro")
                 || vendor_name.contains("rtx a")
                 || vendor_name.contains("tesla")
+                || vendor_name.contains("nvidia a100")
+                || vendor_name.contains("nvidia h100")
+                || vendor_name.contains("nvidia l4")
             {
                 (
                     (max_workgroups / 10).max(2560),
@@ -719,6 +778,9 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
             || adapter_info.vendor == 4098
         {
             // AMD GPUs (vendor ID 0x1002 = 4098)
+            // Note: Order matters - check more specific patterns before general ones
+            
+            // === RDNA 4 (RX 9000 series) ===
             if vendor_name.contains("rx 9")
                 || vendor_name.contains("9070")
                 || vendor_name.contains("9080")
@@ -728,7 +790,9 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "AMD RX 9000 (RDNA 4)",
                     false,
                 )
-            } else if vendor_name.contains("7900") {
+            }
+            // === RDNA 3 Discrete ===
+            else if vendor_name.contains("7900") {
                 (
                     (max_workgroups / 9).max(3584),
                     "AMD RX 7900 (RDNA 3 Flagship)",
@@ -744,36 +808,99 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "AMD RX 7000 (RDNA 3)",
                     false,
                 )
-            } else if vendor_name.contains("6900") || vendor_name.contains("6800") {
+            }
+            // === RDNA 3 APUs (Ryzen 7000/8000 mobile) ===
+            else if vendor_name.contains("780m")
+                || vendor_name.contains("radeon 780m")
+            {
+                (
+                    (max_workgroups / 12).max(2048),
+                    "AMD Radeon 780M (RDNA 3 APU)",
+                    false,
+                )
+            } else if vendor_name.contains("760m")
+                || vendor_name.contains("740m")
+                || vendor_name.contains("radeon 760m")
+                || vendor_name.contains("radeon 740m")
+            {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "AMD Radeon 7x0M (RDNA 3 APU)",
+                    false,
+                )
+            }
+            // === RDNA 2 Discrete ===
+            else if vendor_name.contains("6950") 
+                || vendor_name.contains("6900") 
+                || vendor_name.contains("6800") 
+            {
                 (
                     (max_workgroups / 12).max(2560),
                     "AMD RX 6900/6800 (RDNA 2 Flagship)",
                     false,
                 )
-            } else if vendor_name.contains("rx 6")
+            } else if vendor_name.contains("6750")
                 || vendor_name.contains("6700")
+                || vendor_name.contains("6650")
                 || vendor_name.contains("6600")
             {
+                (
+                    (max_workgroups / 14).max(2048),
+                    "AMD RX 6700/6600 (RDNA 2)",
+                    false,
+                )
+            } else if vendor_name.contains("6500") || vendor_name.contains("6400") {
+                // Navi 24 - cut-down RDNA 2 with only 4 PCIe lanes, limited bandwidth
+                (
+                    (max_workgroups / 22).max(512),
+                    "AMD RX 6500/6400 (RDNA 2 Entry)",
+                    false,
+                )
+            } else if vendor_name.contains("rx 6") {
                 (
                     (max_workgroups / 14).max(2048),
                     "AMD RX 6000 (RDNA 2)",
                     false,
                 )
-            } else if vendor_name.contains("rx 4")
+            }
+            // === RDNA 2 APUs (Ryzen 6000 mobile) ===
+            else if vendor_name.contains("680m") || vendor_name.contains("radeon 680m") {
+                (
+                    (max_workgroups / 16).max(1536),
+                    "AMD Radeon 680M (RDNA 2 APU)",
+                    false,
+                )
+            } else if vendor_name.contains("660m")
+                || vendor_name.contains("radeon 660m")
+                || vendor_name.contains("610m")
+            {
+                (
+                    (max_workgroups / 22).max(768),
+                    "AMD Radeon 6x0M (RDNA 2 APU)",
+                    false,
+                )
+            }
+            // === Polaris (RX 400/500 series) ===
+            // Check BEFORE RDNA 1 to avoid "560X" matching "5600" pattern
+            else if vendor_name.contains("rx 4")
+                || vendor_name.contains("590")
                 || vendor_name.contains("580")
                 || vendor_name.contains("570")
                 || vendor_name.contains("560")
                 || vendor_name.contains("550")
                 || vendor_name.contains("rx 5x")
+                || vendor_name.contains("480")
+                || vendor_name.contains("470")
+                || vendor_name.contains("460")
             {
-                // Polaris (RX 400/500 series) - check BEFORE RDNA 1 to avoid
-                // "560X" matching "5600" pattern
                 (
                     (max_workgroups / 20).max(768),
                     "AMD RX 500/400 (Polaris)",
                     false,
                 )
-            } else if vendor_name.contains("5700") {
+            }
+            // === RDNA 1 (RX 5000 series) ===
+            else if vendor_name.contains("5700") {
                 (
                     (max_workgroups / 16).max(1536),
                     "AMD RX 5700 (RDNA 1)",
@@ -788,29 +915,110 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "AMD RX 5000 (RDNA 1)",
                     false,
                 )
+            }
+            // === Vega ===
+            else if vendor_name.contains("radeon vii") {
+                // Radeon VII - Vega 20 (7nm), high-end
+                (
+                    (max_workgroups / 12).max(2048),
+                    "AMD Radeon VII (Vega 20)",
+                    false,
+                )
+            } else if vendor_name.contains("vega 64") || vendor_name.contains("vega64") {
+                (
+                    (max_workgroups / 14).max(1536),
+                    "AMD Vega 64 (Discrete)",
+                    false,
+                )
+            } else if vendor_name.contains("vega 56") || vendor_name.contains("vega56") {
+                (
+                    (max_workgroups / 16).max(1280),
+                    "AMD Vega 56 (Discrete)",
+                    false,
+                )
             } else if vendor_name.contains("vega") {
-                // AMD Vega APUs (Vega 8, Vega 11) and discrete Vega (56, 64)
-                if vendor_name.contains("vega 56") || vendor_name.contains("vega 64") {
-                    (
-                        (max_workgroups / 14).max(1536),
-                        "AMD Vega (Discrete)",
-                        false,
-                    )
-                } else {
-                    // Vega APUs (integrated graphics) - more conservative
-                    (
-                        (max_workgroups / 28).max(384),
-                        "AMD Vega (APU)",
-                        false,
-                    )
-                }
-            } else if vendor_name.contains("radeon pro")
-                || vendor_name.contains("instinct")
-                || vendor_name.contains("mi")
+                // Vega APUs (integrated graphics) - Vega 8, Vega 11, etc.
+                (
+                    (max_workgroups / 28).max(384),
+                    "AMD Vega (APU)",
+                    false,
+                )
+            }
+            // === GCN 4 (R9 Fury, Nano) ===
+            else if vendor_name.contains("fury") || vendor_name.contains("nano") {
+                (
+                    (max_workgroups / 16).max(1280),
+                    "AMD R9 Fury/Nano (Fiji)",
+                    false,
+                )
+            }
+            // === GCN 3/4 (R9 300/200 series) ===
+            else if vendor_name.contains("r9 3")
+                || vendor_name.contains("r9 2")
+                || vendor_name.contains("390")
+                || vendor_name.contains("380")
+                || vendor_name.contains("290")
+                || vendor_name.contains("280")
+            {
+                (
+                    (max_workgroups / 20).max(768),
+                    "AMD R9 (GCN)",
+                    false,
+                )
+            } else if vendor_name.contains("r7 3")
+                || vendor_name.contains("r7 2")
+                || vendor_name.contains("370")
+                || vendor_name.contains("360")
+                || vendor_name.contains("270")
+                || vendor_name.contains("260")
+            {
+                (
+                    (max_workgroups / 22).max(512),
+                    "AMD R7 (GCN)",
+                    false,
+                )
+            }
+            // === Professional/Datacenter ===
+            // Use specific patterns to avoid false matches (e.g., "mi" in other words)
+            else if vendor_name.contains("radeon pro")
+                || vendor_name.contains("instinct mi")
+                || vendor_name.contains("mi100")
+                || vendor_name.contains("mi200")
+                || vendor_name.contains("mi250")
+                || vendor_name.contains("mi300")
+                || vendor_name.contains("firepro")
+                || vendor_name.contains("wx ")
+                || vendor_name.contains("w5")
+                || vendor_name.contains("w6")
+                || vendor_name.contains("w7")
             {
                 (
                     (max_workgroups / 10).max(2560),
                     "AMD Radeon Pro/Instinct",
+                    false,
+                )
+            }
+            // === Rebadged OEM GPUs (Radeon 600/700 series, usually Polaris-based) ===
+            else if vendor_name.contains("radeon 6")
+                || vendor_name.contains("radeon 7")
+                || vendor_name.contains("radeon(tm) 6")
+                || vendor_name.contains("radeon(tm) 7")
+            {
+                // These are typically rebadged Polaris for OEMs
+                (
+                    (max_workgroups / 24).max(512),
+                    "AMD Radeon OEM (Polaris Rebrand)",
+                    false,
+                )
+            }
+            // === Generic Radeon Graphics (APU fallback) ===
+            else if vendor_name.contains("radeon graphics")
+                || vendor_name.contains("radeon(tm) graphics")
+            {
+                // Generic APU - could be Vega or RDNA, use conservative settings
+                (
+                    (max_workgroups / 26).max(384),
+                    "AMD Radeon Graphics (APU)",
                     false,
                 )
             } else {
@@ -818,6 +1026,8 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
             }
         } else if vendor_name.contains("intel") || adapter_info.vendor == 32902 {
             // Intel GPUs (vendor ID 0x8086 = 32902)
+            
+            // === Battlemage (Arc B-Series) ===
             if vendor_name.contains("arc b")
                 || vendor_name.contains("b580")
                 || vendor_name.contains("b570")
@@ -827,38 +1037,180 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
                     "Intel Arc B-Series (Battlemage)",
                     false,
                 )
-            } else if vendor_name.contains("a770") || vendor_name.contains("a750") {
+            }
+            // === Alchemist Desktop (Arc A-Series) ===
+            else if vendor_name.contains("a770") || vendor_name.contains("a750") {
                 (
                     (max_workgroups / 12).max(2048),
                     "Intel Arc A7 (Alchemist)",
                     false,
                 )
-            } else if vendor_name.contains("a580")
-                || vendor_name.contains("a380")
-                || vendor_name.contains("arc a5")
-                || vendor_name.contains("arc a3")
-            {
+            } else if vendor_name.contains("a580") {
+                (
+                    (max_workgroups / 14).max(1536),
+                    "Intel Arc A5 (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a380") || vendor_name.contains("a310") {
+                (
+                    (max_workgroups / 18).max(768),
+                    "Intel Arc A3 (Alchemist)",
+                    false,
+                )
+            }
+            // === Alchemist Mobile (Arc A-Series laptops) ===
+            else if vendor_name.contains("a770m") || vendor_name.contains("a730m") {
+                (
+                    (max_workgroups / 14).max(1536),
+                    "Intel Arc A7 Mobile (Alchemist)",
+                    false,
+                )
+            } else if vendor_name.contains("a550m") || vendor_name.contains("a570m") {
                 (
                     (max_workgroups / 16).max(1024),
-                    "Intel Arc A5/A3 (Alchemist)",
+                    "Intel Arc A5 Mobile (Alchemist)",
                     false,
                 )
-            } else if vendor_name.contains("a310") {
-                ((max_workgroups / 20).max(512), "Intel Arc A3 Entry", false)
-            } else if vendor_name.contains("iris xe") || vendor_name.contains("iris plus") {
+            } else if vendor_name.contains("a370m") || vendor_name.contains("a350m") {
+                (
+                    (max_workgroups / 20).max(512),
+                    "Intel Arc A3 Mobile (Alchemist)",
+                    false,
+                )
+            }
+            // Generic Arc detection
+            else if vendor_name.contains("arc a") || vendor_name.contains("arc ") {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "Intel Arc (Unknown)",
+                    false,
+                )
+            }
+            // === Integrated Graphics ===
+            else if vendor_name.contains("iris xe max") {
+                // Iris Xe Max is a discrete GPU (DG1-based)
+                (
+                    (max_workgroups / 20).max(512),
+                    "Intel Iris Xe Max (Discrete)",
+                    false,
+                )
+            } else if vendor_name.contains("iris xe") {
                 (
                     (max_workgroups / 24).max(384),
-                    "Intel Iris Xe/Plus (Integrated)",
+                    "Intel Iris Xe (Integrated)",
                     false,
                 )
-            } else if vendor_name.contains("uhd") || vendor_name.contains("hd graphics") {
+            } else if vendor_name.contains("iris pro") {
+                // Older high-end integrated (Haswell/Broadwell)
+                (
+                    (max_workgroups / 26).max(256),
+                    "Intel Iris Pro (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("iris plus") || vendor_name.contains("iris ") {
+                (
+                    (max_workgroups / 26).max(320),
+                    "Intel Iris Plus (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("uhd 7") || vendor_name.contains("uhd graphics 7") {
+                // UHD 700 series (Alder Lake+)
+                (
+                    (max_workgroups / 26).max(320),
+                    "Intel UHD 700 (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("uhd 6") || vendor_name.contains("uhd graphics 6") {
+                // UHD 600 series (Coffee Lake, Comet Lake)
                 (
                     (max_workgroups / 28).max(256),
-                    "Intel UHD/HD Graphics (Integrated)",
+                    "Intel UHD 600 (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("uhd") {
+                (
+                    (max_workgroups / 28).max(256),
+                    "Intel UHD Graphics (Integrated)",
+                    false,
+                )
+            } else if vendor_name.contains("hd graphics") || vendor_name.contains("hd 6") || vendor_name.contains("hd 5") || vendor_name.contains("hd 4") {
+                (
+                    (max_workgroups / 30).max(192),
+                    "Intel HD Graphics (Integrated)",
                     false,
                 )
             } else {
                 ((max_workgroups / 24).max(256), "Intel Unknown", true)
+            }
+        } else if vendor_name.contains("qualcomm") 
+            || vendor_name.contains("adreno")
+            || adapter_info.vendor == 0x5143  // Qualcomm vendor ID
+        {
+            // Qualcomm Adreno GPUs (Windows on ARM, Android)
+            // Adreno 700 series (Snapdragon 8 Gen 1/2/3)
+            if vendor_name.contains("adreno 7")
+                || vendor_name.contains("adreno (tm) 7")
+                || vendor_name.contains("740")
+                || vendor_name.contains("730")
+                || vendor_name.contains("720")
+            {
+                (
+                    (max_workgroups / 16).max(1024),
+                    "Qualcomm Adreno 700 Series",
+                    false,
+                )
+            }
+            // Adreno 600 series (Snapdragon 800 series)
+            else if vendor_name.contains("adreno 6")
+                || vendor_name.contains("adreno (tm) 6")
+                || vendor_name.contains("690")
+                || vendor_name.contains("680")
+                || vendor_name.contains("660")
+                || vendor_name.contains("650")
+                || vendor_name.contains("640")
+                || vendor_name.contains("630")
+                || vendor_name.contains("620")
+                || vendor_name.contains("619")
+                || vendor_name.contains("618")
+                || vendor_name.contains("616")
+                || vendor_name.contains("615")
+                || vendor_name.contains("612")
+                || vendor_name.contains("610")
+            {
+                (
+                    (max_workgroups / 20).max(512),
+                    "Qualcomm Adreno 600 Series",
+                    false,
+                )
+            }
+            // Adreno 500 series (older Snapdragon)
+            else if vendor_name.contains("adreno 5")
+                || vendor_name.contains("adreno (tm) 5")
+                || vendor_name.contains("540")
+                || vendor_name.contains("530")
+                || vendor_name.contains("512")
+                || vendor_name.contains("510")
+            {
+                (
+                    (max_workgroups / 24).max(384),
+                    "Qualcomm Adreno 500 Series",
+                    false,
+                )
+            }
+            // Snapdragon X Elite/Plus (Adreno X1)
+            else if vendor_name.contains("x elite")
+                || vendor_name.contains("x plus")
+                || vendor_name.contains("adreno x")
+                || vendor_name.contains("x1-85")
+                || vendor_name.contains("x1-80")
+            {
+                (
+                    (max_workgroups / 14).max(1536),
+                    "Qualcomm Adreno X1 (Snapdragon X)",
+                    false,
+                )
+            } else {
+                ((max_workgroups / 24).max(384), "Qualcomm Adreno (Unknown)", true)
             }
         } else if adapter_info.backend == wgpu::Backend::Metal {
             // Apple GPUs (detected by Metal backend)
