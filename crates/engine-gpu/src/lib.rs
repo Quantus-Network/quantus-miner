@@ -201,7 +201,10 @@ impl GpuEngine {
 
             adapter_infos.push(info.clone());
 
-            // Try to initialize this adapter with a timeout
+            // Try to initialize this adapter with a post-hoc timeout check.
+            // Note: This only catches slow-but-completed init. If the driver truly hangs
+            // inside request_device().await, this won't help - that would require racing
+            // the future against a timer or doing init on a separate thread.
             let init_start = std::time::Instant::now();
 
             let device_result = adapter
@@ -499,6 +502,19 @@ impl MinerEngine for GpuEngine {
                 BatchResult::NotFound { hash_count } => {
                     total_hashes += hash_count;
                 }
+                BatchResult::DeviceLost => {
+                    // GPU device is lost/unresponsive - log loudly and return cancelled
+                    // This prevents spinning at 0 H/s indefinitely on a dead device
+                    log::error!(
+                        target: "gpu_engine",
+                        "GPU {} device lost or unresponsive - stopping worker. \
+                         This GPU will not process further batches.",
+                        device_index
+                    );
+                    return EngineStatus::Cancelled {
+                        hash_count: total_hashes,
+                    };
+                }
             }
 
             // Move to next batch
@@ -567,6 +583,8 @@ enum BatchResult {
     NotFound {
         hash_count: u64,
     },
+    /// GPU device is lost or unresponsive - caller should stop using this device
+    DeviceLost,
 }
 
 /// Run a single batch of GPU computation
@@ -647,22 +665,21 @@ fn run_single_batch(
     // Poll until complete, error, or timeout (30 seconds max to prevent infinite hang)
     let poll_start = std::time::Instant::now();
     let max_poll_duration = std::time::Duration::from_secs(30);
-    loop {
+    let final_status = loop {
         let _ = gpu_ctx.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: Some(std::time::Duration::from_millis(10)),
         });
 
         match map_status.load(Ordering::Acquire) {
-            1 => break, // Success
+            1 => break 1, // Success - buffer is mapped
             2 => {
-                // Mapping failed - return empty result to avoid infinite loop
+                // Mapping failed - buffer was never successfully mapped, don't unmap
                 log::error!(
                     target: "gpu_engine",
                     "GPU buffer mapping failed - possible device lost or resource error"
                 );
-                resources.staging_buffer.unmap();
-                return BatchResult::NotFound { hash_count: 0 };
+                return BatchResult::DeviceLost;
             }
             _ => {
                 // Still pending - check timeout
@@ -672,12 +689,15 @@ fn run_single_batch(
                         "GPU buffer mapping timed out after {}s - GPU may be unresponsive",
                         max_poll_duration.as_secs()
                     );
-                    resources.staging_buffer.unmap();
-                    return BatchResult::NotFound { hash_count: 0 };
+                    // Timeout: map_async callback never fired, buffer not mapped, don't unmap
+                    return BatchResult::DeviceLost;
                 }
             }
         }
-    }
+    };
+
+    // Only reach here if final_status == 1 (success), buffer is mapped
+    debug_assert_eq!(final_status, 1);
 
     // Read results
     let data = buffer_slice.get_mapped_range();
