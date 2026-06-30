@@ -167,7 +167,10 @@ fn backend_rank(backend: wgpu::Backend) -> u8 {
 /// When discrete GPUs are present, integrated GPUs (APUs) are skipped by default
 /// to avoid resource contention and driver instability from mining on both
 /// simultaneously. Set `allow_integrated` to true to override this behavior.
-fn select_adapters(infos: &[wgpu::AdapterInfo], allow_integrated: bool) -> Vec<usize> {
+///
+/// Note: This function no longer filters integrated GPUs - that decision is made
+/// after initialization, so we can fall back to integrated if discrete fails.
+fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     let usable: Vec<usize> = (0..infos.len())
         .filter(|&i| {
             if infos[i].device_type == wgpu::DeviceType::Cpu {
@@ -203,27 +206,8 @@ fn select_adapters(infos: &[wgpu::AdapterInfo], allow_integrated: bool) -> Vec<u
         })
         .collect();
 
-    // Check if we have any discrete GPUs
-    let has_discrete = selected
-        .iter()
-        .any(|&i| infos[i].device_type == wgpu::DeviceType::DiscreteGpu);
-
-    // If discrete GPUs exist and allow_integrated is false, filter out integrated GPUs
-    if has_discrete && !allow_integrated {
-        selected.retain(|&i| {
-            if infos[i].device_type == wgpu::DeviceType::IntegratedGpu {
-                log::info!(
-                    target: "gpu_engine",
-                    "Skipping integrated GPU (discrete GPU available, use --allow-integrated to override): {} ({:?})",
-                    infos[i].name,
-                    infos[i].backend
-                );
-                return false;
-            }
-            true
-        });
-    }
-
+    // Sort discrete GPUs first, but keep all adapters for now
+    // (integrated filtering happens after init, based on what actually succeeded)
     selected.sort_by_key(|&i| match infos[i].device_type {
         wgpu::DeviceType::DiscreteGpu => 0,
         wgpu::DeviceType::IntegratedGpu => 1,
@@ -284,7 +268,7 @@ impl GpuEngine {
         let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY);
         let infos: Vec<wgpu::AdapterInfo> = adapters.iter().map(|a| a.get_info()).collect();
 
-        let selected = select_adapters(&infos, allow_integrated);
+        let selected = select_adapters(&infos);
         if selected.is_empty() {
             log::error!(
                 target: "gpu_engine",
@@ -295,7 +279,14 @@ impl GpuEngine {
         }
 
         let mut adapters: Vec<Option<wgpu::Adapter>> = adapters.into_iter().map(Some).collect();
-        let mut contexts = Vec::new();
+
+        // Track successfully initialized contexts with their device type
+        struct InitializedGpu {
+            context: Arc<GpuContext>,
+            device_type: wgpu::DeviceType,
+            name: String,
+        }
+        let mut initialized: Vec<InitializedGpu> = Vec::new();
 
         // Timeout for initializing each adapter (30 seconds should be plenty)
         let init_timeout = std::time::Duration::from_secs(30);
@@ -384,18 +375,48 @@ impl GpuEngine {
             // Calculate vendor-specific configuration once during initialization
             let optimal_workgroups = get_vendor_specific_dispatch(info, &device);
 
-            contexts.push(Arc::new(GpuContext {
-                device,
-                queue,
-                pipeline,
-                optimal_workgroups,
-            }));
+            initialized.push(InitializedGpu {
+                context: Arc::new(GpuContext {
+                    device,
+                    queue,
+                    pipeline,
+                    optimal_workgroups,
+                }),
+                device_type: info.device_type,
+                name: info.name.clone(),
+            });
         }
 
-        if contexts.is_empty() {
+        if initialized.is_empty() {
             log::error!(target: "gpu_engine", "No GPU adapters could be initialized successfully.");
             return Err("No GPU adapters could be initialized".into());
         }
+
+        // Now filter integrated GPUs if discrete GPUs successfully initialized
+        // (unless allow_integrated is set)
+        let has_discrete = initialized
+            .iter()
+            .any(|g| g.device_type == wgpu::DeviceType::DiscreteGpu);
+
+        let contexts: Vec<Arc<GpuContext>> = if has_discrete && !allow_integrated {
+            initialized
+                .into_iter()
+                .filter(|g| {
+                    if g.device_type == wgpu::DeviceType::IntegratedGpu {
+                        log::info!(
+                            target: "gpu_engine",
+                            "Dropping integrated GPU (discrete GPU initialized successfully, use --allow-integrated to override): {}",
+                            g.name
+                        );
+                        return false;
+                    }
+                    true
+                })
+                .map(|g| g.context)
+                .collect()
+        } else {
+            initialized.into_iter().map(|g| g.context).collect()
+        };
 
         log::info!(
             target: "gpu_engine",
@@ -933,8 +954,9 @@ mod adapter_selection_tests {
                 wgpu::Backend::Dx12,
             ),
         ];
-        // Default: only discrete GPU on best backend (Vulkan)
-        assert_eq!(select_adapters(&infos, false), vec![1]);
+        // select_adapters returns all non-CPU adapters on best backend, discrete first
+        // Integrated filtering now happens after init in the init() function
+        assert_eq!(select_adapters(&infos), vec![1, 0]);
     }
 
     #[test]
@@ -956,17 +978,17 @@ mod adapter_selection_tests {
                 wgpu::Backend::Vulkan,
             ),
         ];
-        assert_eq!(select_adapters(&infos, false), vec![0, 1, 2]);
+        assert_eq!(select_adapters(&infos), vec![0, 1, 2]);
     }
 
     #[test]
-    fn dx12_only_machine_discrete_preferred_over_integrated() {
+    fn dx12_only_machine_returns_all_adapters_sorted() {
         let infos = [
             info("iGPU", wgpu::DeviceType::IntegratedGpu, wgpu::Backend::Dx12),
             info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12),
         ];
-        // Only discrete GPU kept when both discrete and integrated present
-        assert_eq!(select_adapters(&infos, false), vec![1]);
+        // select_adapters returns both, discrete first (integrated filtering is post-init)
+        assert_eq!(select_adapters(&infos), vec![1, 0]);
     }
 
     #[test]
@@ -984,7 +1006,7 @@ mod adapter_selection_tests {
                 wgpu::Backend::Vulkan,
             ),
         ];
-        assert_eq!(select_adapters(&infos, false), vec![0, 1]);
+        assert_eq!(select_adapters(&infos), vec![0, 1]);
     }
 
     #[test]
@@ -994,19 +1016,20 @@ mod adapter_selection_tests {
             wgpu::DeviceType::Cpu,
             wgpu::Backend::Vulkan,
         )];
-        assert!(select_adapters(&infos, false).is_empty());
+        assert!(select_adapters(&infos).is_empty());
     }
 
     #[test]
     fn empty_enumeration_selects_nothing() {
-        assert!(select_adapters(&[], false).is_empty());
+        assert!(select_adapters(&[]).is_empty());
     }
 
     /// Exact scenario from Windows ASUS laptop with RX 560X + Vega 8 APU.
     /// Both GPUs appear on both Vulkan and Dx12 backends.
-    /// Expected: Only the discrete RX 560X on Vulkan should be selected.
+    /// select_adapters returns both Vulkan adapters (discrete first).
+    /// The init() function will later drop the integrated one if discrete succeeds.
     #[test]
-    fn windows_amd_discrete_plus_apu_uses_only_discrete() {
+    fn windows_amd_discrete_plus_apu_selects_both_on_best_backend() {
         let infos = [
             info(
                 "Microsoft Basic Render Driver",
@@ -1034,26 +1057,11 @@ mod adapter_selection_tests {
                 wgpu::Backend::Vulkan,
             ),
         ];
-        // Should select only the discrete GPU on Vulkan (index 4)
+        // select_adapters returns both Vulkan adapters, discrete first
         // - Index 0: Skipped (CPU emulated)
         // - Index 1, 2: Skipped (Dx12 lower priority than Vulkan)
-        // - Index 3: Skipped (integrated, discrete available)
-        // - Index 4: Selected (discrete, Vulkan)
-        assert_eq!(select_adapters(&infos, false), vec![4]);
-    }
-
-    /// Test --allow-integrated flag: when set, both discrete and integrated GPUs are used
-    #[test]
-    fn allow_integrated_flag_keeps_both_gpu_types() {
-        let infos = [
-            info(
-                "iGPU",
-                wgpu::DeviceType::IntegratedGpu,
-                wgpu::Backend::Vulkan,
-            ),
-            info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Vulkan),
-        ];
-        // With allow_integrated=true, both GPUs should be selected (discrete first)
-        assert_eq!(select_adapters(&infos, true), vec![1, 0]);
+        // - Index 4: Selected first (discrete, Vulkan)
+        // - Index 3: Selected second (integrated, Vulkan)
+        assert_eq!(select_adapters(&infos), vec![4, 3]);
     }
 }
