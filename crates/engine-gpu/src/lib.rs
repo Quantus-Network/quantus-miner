@@ -7,7 +7,6 @@ pub mod end_to_end_tests;
 pub mod tests;
 
 use engine_cpu::{CancelCheck, Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
-use futures::executor::block_on;
 use pow_core::{format_hashrate, format_u512, JobContext};
 use primitive_types::U512;
 use std::cell::RefCell;
@@ -155,7 +154,8 @@ impl GpuEngine {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
         }
-        block_on(Self::init(batch_size, throttle_ms))
+        // Use tokio runtime for async init with proper timeout support
+        tokio::runtime::Handle::current().block_on(Self::init(batch_size, throttle_ms))
     }
 
     async fn init(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
@@ -201,31 +201,27 @@ impl GpuEngine {
 
             adapter_infos.push(info.clone());
 
-            // Try to initialize this adapter with a post-hoc timeout check.
-            // Note: This only catches slow-but-completed init. If the driver truly hangs
-            // inside request_device().await, this won't help - that would require racing
-            // the future against a timer or doing init on a separate thread.
-            let init_start = std::time::Instant::now();
+            // Try to initialize this adapter with a proper timeout.
+            // If the driver hangs, we'll skip this adapter after the timeout.
+            let device_future = adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("Mining Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+                ..Default::default()
+            });
 
-            let device_result = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("Mining Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: Default::default(),
-                    ..Default::default()
-                })
-                .await;
-
-            // Check if request_device took too long (it completed but was slow)
-            if init_start.elapsed() > init_timeout {
-                log::warn!(
-                    target: "gpu_engine",
-                    "Adapter {} ({}) took too long to initialize ({:.1}s), skipping",
-                    i, info.name, init_start.elapsed().as_secs_f64()
-                );
-                continue;
-            }
+            let device_result = match tokio::time::timeout(init_timeout, device_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    log::warn!(
+                        target: "gpu_engine",
+                        "Adapter {} ({}) timed out after {}s during initialization, skipping",
+                        i, info.name, init_timeout.as_secs()
+                    );
+                    continue;
+                }
+            };
 
             let (device, queue) = match device_result {
                 Ok(dq) => dq,
@@ -250,6 +246,9 @@ impl GpuEngine {
                 limits.max_buffer_size
             );
 
+            // Shader and pipeline creation are synchronous - can't timeout, but usually fast
+            let pipeline_start = std::time::Instant::now();
+
             let shader_source = include_str!("mining.wgsl");
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Mining Shader"),
@@ -265,21 +264,11 @@ impl GpuEngine {
                 cache: None,
             });
 
-            // Check total init time for this adapter
-            let init_elapsed = init_start.elapsed();
-            if init_elapsed > init_timeout {
-                log::warn!(
-                    target: "gpu_engine",
-                    "Adapter {} ({}) pipeline creation took too long ({:.1}s), skipping",
-                    i, info.name, init_elapsed.as_secs_f64()
-                );
-                continue;
-            }
-
+            let pipeline_elapsed = pipeline_start.elapsed();
             log::info!(
                 target: "gpu_engine",
-                "Adapter {} ({}) initialized successfully in {:.1}s",
-                i, info.name, init_elapsed.as_secs_f64()
+                "Adapter {} ({}) initialized successfully (pipeline compiled in {:.1}s)",
+                i, info.name, pipeline_elapsed.as_secs_f64()
             );
 
             // Calculate vendor-specific configuration once during initialization
