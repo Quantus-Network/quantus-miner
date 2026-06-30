@@ -47,6 +47,9 @@ pub struct GpuEngine {
 thread_local! {
     static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = const { RefCell::new(None) };
     static WORKER_RESOURCES: RefCell<Option<GpuResources>> = const { RefCell::new(None) };
+    /// Set to true when this worker's GPU device is lost/unresponsive.
+    /// Once set, the worker will immediately return Cancelled on any search attempt.
+    static DEVICE_LOST: RefCell<bool> = const { RefCell::new(false) };
 }
 
 impl GpuContext {
@@ -160,6 +163,13 @@ fn backend_rank(backend: wgpu::Backend) -> u8 {
 /// adapters are dropped and only the best-ranked backend present is kept.
 /// Within a single backend each physical GPU appears exactly once, so rigs with
 /// multiple identical cards keep every card.
+///
+/// When discrete GPUs are present, integrated GPUs (APUs) are skipped by default
+/// to avoid resource contention and driver instability from mining on both
+/// simultaneously. Set `allow_integrated` to true to override this behavior.
+///
+/// Note: This function no longer filters integrated GPUs - that decision is made
+/// after initialization, so we can fall back to integrated if discrete fails.
 fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     let usable: Vec<usize> = (0..infos.len())
         .filter(|&i| {
@@ -196,6 +206,8 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
         })
         .collect();
 
+    // Sort discrete GPUs first, but keep all adapters for now
+    // (integrated filtering happens after init, based on what actually succeeded)
     selected.sort_by_key(|&i| match infos[i].device_type {
         wgpu::DeviceType::DiscreteGpu => 0,
         wgpu::DeviceType::IntegratedGpu => 1,
@@ -204,15 +216,53 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     selected
 }
 
+/// Filter initialized GPUs based on device types.
+/// Returns indices of GPUs to keep.
+///
+/// Rules:
+/// - If any discrete GPU initialized successfully and `allow_integrated` is false,
+///   drop all integrated GPUs
+/// - Otherwise keep all GPUs
+///
+/// This is extracted as a pure function for testability.
+fn filter_initialized_gpus(
+    device_types: &[wgpu::DeviceType],
+    allow_integrated: bool,
+) -> Vec<usize> {
+    let has_discrete = device_types.contains(&wgpu::DeviceType::DiscreteGpu);
+
+    if has_discrete && !allow_integrated {
+        // Keep only discrete GPUs
+        device_types
+            .iter()
+            .enumerate()
+            .filter(|(_, &dt)| dt != wgpu::DeviceType::IntegratedGpu)
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        // Keep all
+        (0..device_types.len()).collect()
+    }
+}
+
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of nonces per batch
+    /// * `throttle_ms` - Delay between batches in milliseconds (0 = no throttle)
+    /// * `allow_integrated` - If true, use integrated GPUs even when discrete GPUs are available
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - `batch_size` is zero (no work would be performed)
     /// - No usable GPU adapters are found
-    pub fn try_new(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn try_new(
+        batch_size: u32,
+        throttle_ms: u64,
+        allow_integrated: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
         }
@@ -221,17 +271,23 @@ impl GpuEngine {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 // We're inside a tokio runtime - use block_in_place to allow blocking
-                tokio::task::block_in_place(|| handle.block_on(Self::init(batch_size, throttle_ms)))
+                tokio::task::block_in_place(|| {
+                    handle.block_on(Self::init(batch_size, throttle_ms, allow_integrated))
+                })
             }
             Err(_) => {
                 // No runtime exists - create a temporary one
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(Self::init(batch_size, throttle_ms))
+                rt.block_on(Self::init(batch_size, throttle_ms, allow_integrated))
             }
         }
     }
 
-    async fn init(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn init(
+        batch_size: u32,
+        throttle_ms: u64,
+        allow_integrated: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!(target: "gpu_engine", "Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -252,7 +308,14 @@ impl GpuEngine {
         }
 
         let mut adapters: Vec<Option<wgpu::Adapter>> = adapters.into_iter().map(Some).collect();
-        let mut contexts = Vec::new();
+
+        // Track successfully initialized contexts with their device type
+        struct InitializedGpu {
+            context: Arc<GpuContext>,
+            device_type: wgpu::DeviceType,
+            name: String,
+        }
+        let mut initialized: Vec<InitializedGpu> = Vec::new();
 
         // Timeout for initializing each adapter (30 seconds should be plenty)
         let init_timeout = std::time::Duration::from_secs(30);
@@ -341,18 +404,43 @@ impl GpuEngine {
             // Calculate vendor-specific configuration once during initialization
             let optimal_workgroups = get_vendor_specific_dispatch(info, &device);
 
-            contexts.push(Arc::new(GpuContext {
-                device,
-                queue,
-                pipeline,
-                optimal_workgroups,
-            }));
+            initialized.push(InitializedGpu {
+                context: Arc::new(GpuContext {
+                    device,
+                    queue,
+                    pipeline,
+                    optimal_workgroups,
+                }),
+                device_type: info.device_type,
+                name: info.name.clone(),
+            });
         }
 
-        if contexts.is_empty() {
+        if initialized.is_empty() {
             log::error!(target: "gpu_engine", "No GPU adapters could be initialized successfully.");
             return Err("No GPU adapters could be initialized".into());
         }
+
+        // Filter integrated GPUs if discrete GPUs successfully initialized
+        let device_types: Vec<_> = initialized.iter().map(|g| g.device_type).collect();
+        let keep_indices = filter_initialized_gpus(&device_types, allow_integrated);
+
+        let contexts: Vec<Arc<GpuContext>> = initialized
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, g)| {
+                if keep_indices.contains(&i) {
+                    Some(g.context)
+                } else {
+                    log::info!(
+                        target: "gpu_engine",
+                        "Dropping integrated GPU (discrete GPU initialized successfully, use --allow-integrated to override): {}",
+                        g.name
+                    );
+                    None
+                }
+            })
+            .collect();
 
         log::info!(
             target: "gpu_engine",
@@ -406,6 +494,13 @@ impl MinerEngine for GpuEngine {
         if self.contexts.is_empty() {
             log::warn!(target: "gpu_engine", "No GPUs available for search.");
             return EngineStatus::Exhausted { hash_count: 0 };
+        }
+
+        // Check if this worker's GPU device was previously lost
+        let device_is_lost = DEVICE_LOST.with(|lost| *lost.borrow());
+        if device_is_lost {
+            // Device was lost in a previous call - signal worker should exit
+            return EngineStatus::DeviceLost { hash_count: 0 };
         }
 
         // Empty or inverted range: nothing to do.
@@ -559,15 +654,18 @@ impl MinerEngine for GpuEngine {
                     total_hashes += hash_count;
                 }
                 BatchResult::DeviceLost => {
-                    // GPU device is lost/unresponsive - log loudly and return cancelled
-                    // This prevents spinning at 0 H/s indefinitely on a dead device
+                    // GPU device is lost/unresponsive - mark as permanently dead
+                    // and clear resources to prevent "buffer already mapped" panics
+                    DEVICE_LOST.with(|lost| *lost.borrow_mut() = true);
+                    WORKER_RESOURCES.with(|res| *res.borrow_mut() = None);
+
                     log::error!(
                         target: "gpu_engine",
                         "GPU {} device lost or unresponsive - stopping worker. \
                          This GPU will not process further batches.",
                         device_index
                     );
-                    return EngineStatus::Cancelled {
+                    return EngineStatus::DeviceLost {
                         hash_count: total_hashes,
                     };
                 }
@@ -880,6 +978,8 @@ mod adapter_selection_tests {
                 wgpu::Backend::Dx12,
             ),
         ];
+        // select_adapters returns all non-CPU adapters on best backend, discrete first
+        // Integrated filtering now happens after init in the init() function
         assert_eq!(select_adapters(&infos), vec![1, 0]);
     }
 
@@ -906,12 +1006,31 @@ mod adapter_selection_tests {
     }
 
     #[test]
-    fn dx12_only_machine_keeps_all_dx12_adapters() {
+    fn dx12_only_machine_returns_all_adapters_sorted() {
         let infos = [
             info("iGPU", wgpu::DeviceType::IntegratedGpu, wgpu::Backend::Dx12),
             info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12),
         ];
+        // select_adapters returns both, discrete first (integrated filtering is post-init)
         assert_eq!(select_adapters(&infos), vec![1, 0]);
+    }
+
+    #[test]
+    fn integrated_only_machine_keeps_integrated() {
+        // When no discrete GPU exists, integrated GPUs should be used
+        let infos = [
+            info(
+                "Intel UHD",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "AMD Vega 8",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+        ];
+        assert_eq!(select_adapters(&infos), vec![0, 1]);
     }
 
     #[test]
@@ -927,5 +1046,95 @@ mod adapter_selection_tests {
     #[test]
     fn empty_enumeration_selects_nothing() {
         assert!(select_adapters(&[]).is_empty());
+    }
+
+    /// Exact scenario from Windows ASUS laptop with RX 560X + Vega 8 APU.
+    /// Both GPUs appear on both Vulkan and Dx12 backends.
+    /// select_adapters returns both Vulkan adapters (discrete first).
+    /// The init() function will later drop the integrated one if discrete succeeds.
+    #[test]
+    fn windows_amd_discrete_plus_apu_selects_both_on_best_backend() {
+        let infos = [
+            info(
+                "Microsoft Basic Render Driver",
+                wgpu::DeviceType::Cpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "AMD Radeon(TM) Vega 8 Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "Radeon RX 560X",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "AMD Radeon(TM) Vega 8 Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "Radeon RX 560X",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+        ];
+        // select_adapters returns both Vulkan adapters, discrete first
+        // - Index 0: Skipped (CPU emulated)
+        // - Index 1, 2: Skipped (Dx12 lower priority than Vulkan)
+        // - Index 4: Selected first (discrete, Vulkan)
+        // - Index 3: Selected second (integrated, Vulkan)
+        assert_eq!(select_adapters(&infos), vec![4, 3]);
+    }
+
+    // Tests for filter_initialized_gpus (post-init filtering)
+
+    #[test]
+    fn filter_discrete_present_drops_integrated() {
+        use wgpu::DeviceType::*;
+        // Discrete at index 0, integrated at index 1
+        let types = vec![DiscreteGpu, IntegratedGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0]);
+    }
+
+    #[test]
+    fn filter_discrete_failed_keeps_integrated() {
+        use wgpu::DeviceType::*;
+        // Only integrated initialized (discrete failed/timed out)
+        let types = vec![IntegratedGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0]);
+    }
+
+    #[test]
+    fn filter_allow_integrated_keeps_both() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, IntegratedGpu];
+        // With allow_integrated=true, keep both
+        assert_eq!(filter_initialized_gpus(&types, true), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_multiple_discrete_keeps_all_discrete() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, DiscreteGpu, IntegratedGpu];
+        // Drops integrated, keeps both discrete
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_only_discrete_keeps_all() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, DiscreteGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_multiple_integrated_no_discrete_keeps_all() {
+        use wgpu::DeviceType::*;
+        let types = vec![IntegratedGpu, IntegratedGpu];
+        // No discrete, so keep all integrated
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
     }
 }

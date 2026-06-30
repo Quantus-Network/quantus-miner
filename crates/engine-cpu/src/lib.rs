@@ -51,6 +51,10 @@ pub enum EngineStatus {
     Cancelled {
         hash_count: u64,
     },
+    /// GPU device lost or unresponsive. Worker should exit permanently.
+    DeviceLost {
+        hash_count: u64,
+    },
 }
 
 /// Cancellation checker passed to search_range.

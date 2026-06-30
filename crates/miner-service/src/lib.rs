@@ -33,6 +33,8 @@ pub struct ServiceConfig {
     pub cpu_batch_size: u64,
     /// GPU throttle delay in milliseconds between batches (0 = no throttle)
     pub gpu_throttle_ms: u64,
+    /// Allow integrated GPUs even when discrete GPUs are available
+    pub allow_integrated: bool,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -206,12 +208,34 @@ impl WorkerPool {
 
         // Dispatch job to all workers using bounded channels (capacity 16).
         // Workers drain to get the latest job, so we just need room to queue.
+        let mut disconnected_count = 0;
         for (i, tx) in self.job_senders.iter().enumerate() {
             if let Err(e) = tx.try_send(job.clone()) {
+                match e {
+                    crossbeam_channel::TrySendError::Disconnected(_) => {
+                        // Worker thread has exited (e.g., device lost)
+                        disconnected_count += 1;
+                        log::debug!("Worker {i} channel disconnected (worker exited)");
+                    }
+                    crossbeam_channel::TrySendError::Full(_) => {
+                        log::warn!(
+                            "Failed to send job {new_job_id} to worker {i}: channel full - \
+                             worker may be stuck or jobs arriving too fast"
+                        );
+                    }
+                }
+            }
+        }
+
+        if disconnected_count > 0 {
+            let active = self.job_senders.len() - disconnected_count;
+            if active == 0 {
                 log::error!(
-                    "Failed to send job {new_job_id} to worker {i}: {e}. \
-                     Channel full - worker may be stuck or jobs arriving too fast."
+                    "All workers have exited! No workers available to process jobs. \
+                     Consider restarting the miner."
                 );
+            } else {
+                log::warn!("{disconnected_count} worker(s) have exited, {active} still active");
             }
         }
 
@@ -336,6 +360,7 @@ fn worker_loop(
             engine_cpu::EngineStatus::Found { .. } => "FOUND",
             engine_cpu::EngineStatus::Exhausted { .. } => "EXHAUSTED",
             engine_cpu::EngineStatus::Cancelled { .. } => "CANCELLED",
+            engine_cpu::EngineStatus::DeviceLost { .. } => "DEVICE_LOST",
             engine_cpu::EngineStatus::Running { .. } => "RUNNING",
         };
         log::debug!(
@@ -352,6 +377,7 @@ fn worker_loop(
                 engine_cpu::EngineStatus::Found { hash_count, .. } => hash_count,
                 engine_cpu::EngineStatus::Exhausted { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Cancelled { hash_count } => hash_count,
+                engine_cpu::EngineStatus::DeviceLost { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Running { .. } => 0,
             };
             log_worker_completion(
@@ -400,6 +426,21 @@ fn worker_loop(
                 log_worker_completion(type_str, thread_id, "new block", hash_count, search_elapsed);
                 (None, hash_count)
             }
+            engine_cpu::EngineStatus::DeviceLost { hash_count } => {
+                log::error!(
+                    "{type_str} worker {thread_id} GPU device lost - worker exiting permanently"
+                );
+                // Send final result before exiting
+                let _ = result_tx.try_send(WorkerResult {
+                    thread_id,
+                    engine_type,
+                    job_id,
+                    candidate: None,
+                    hash_count,
+                    completed: true,
+                });
+                break; // Exit the worker loop
+            }
             engine_cpu::EngineStatus::Running { .. } => {
                 // Should not happen for synchronous search
                 (None, 0)
@@ -430,6 +471,7 @@ pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
     batch_size: u32,
     throttle_ms: u64,
+    allow_integrated: bool,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -437,7 +479,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = engine_gpu::GpuEngine::try_new(batch_size, throttle_ms);
+    let engine = engine_gpu::GpuEngine::try_new(batch_size, throttle_ms, allow_integrated);
     let engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -482,6 +524,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         config.gpu_devices,
         config.gpu_batch_size,
         config.gpu_throttle_ms,
+        config.allow_integrated,
     )?;
 
     // Resolve CPU workers
