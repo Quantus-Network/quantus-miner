@@ -163,6 +163,9 @@ fn backend_rank(backend: wgpu::Backend) -> u8 {
 /// adapters are dropped and only the best-ranked backend present is kept.
 /// Within a single backend each physical GPU appears exactly once, so rigs with
 /// multiple identical cards keep every card.
+///
+/// When discrete GPUs are present, integrated GPUs (APUs) are skipped to avoid
+/// resource contention and driver instability from mining on both simultaneously.
 fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     let usable: Vec<usize> = (0..infos.len())
         .filter(|&i| {
@@ -198,6 +201,27 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
             true
         })
         .collect();
+
+    // Check if we have any discrete GPUs
+    let has_discrete = selected
+        .iter()
+        .any(|&i| infos[i].device_type == wgpu::DeviceType::DiscreteGpu);
+
+    // If discrete GPUs exist, filter out integrated GPUs to avoid contention
+    if has_discrete {
+        selected.retain(|&i| {
+            if infos[i].device_type == wgpu::DeviceType::IntegratedGpu {
+                log::info!(
+                    target: "gpu_engine",
+                    "Skipping integrated GPU (discrete GPU available): {} ({:?})",
+                    infos[i].name,
+                    infos[i].backend
+                );
+                return false;
+            }
+            true
+        });
+    }
 
     selected.sort_by_key(|&i| match infos[i].device_type {
         wgpu::DeviceType::DiscreteGpu => 0,
@@ -893,7 +917,7 @@ mod adapter_selection_tests {
                 wgpu::Backend::Dx12,
             ),
         ];
-        assert_eq!(select_adapters(&infos), vec![1, 0]);
+        assert_eq!(select_adapters(&infos), vec![1]);
     }
 
     #[test]
@@ -919,12 +943,31 @@ mod adapter_selection_tests {
     }
 
     #[test]
-    fn dx12_only_machine_keeps_all_dx12_adapters() {
+    fn dx12_only_machine_discrete_preferred_over_integrated() {
         let infos = [
             info("iGPU", wgpu::DeviceType::IntegratedGpu, wgpu::Backend::Dx12),
             info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12),
         ];
-        assert_eq!(select_adapters(&infos), vec![1, 0]);
+        // Only discrete GPU kept when both discrete and integrated present
+        assert_eq!(select_adapters(&infos), vec![1]);
+    }
+
+    #[test]
+    fn integrated_only_machine_keeps_integrated() {
+        // When no discrete GPU exists, integrated GPUs should be used
+        let infos = [
+            info(
+                "Intel UHD",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "AMD Vega 8",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+        ];
+        assert_eq!(select_adapters(&infos), vec![0, 1]);
     }
 
     #[test]
@@ -940,5 +983,45 @@ mod adapter_selection_tests {
     #[test]
     fn empty_enumeration_selects_nothing() {
         assert!(select_adapters(&[]).is_empty());
+    }
+
+    /// Exact scenario from Windows ASUS laptop with RX 560X + Vega 8 APU.
+    /// Both GPUs appear on both Vulkan and Dx12 backends.
+    /// Expected: Only the discrete RX 560X on Vulkan should be selected.
+    #[test]
+    fn windows_amd_discrete_plus_apu_uses_only_discrete() {
+        let infos = [
+            info(
+                "Microsoft Basic Render Driver",
+                wgpu::DeviceType::Cpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "AMD Radeon(TM) Vega 8 Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "Radeon RX 560X",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "AMD Radeon(TM) Vega 8 Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "Radeon RX 560X",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+        ];
+        // Should select only the discrete GPU on Vulkan (index 4)
+        // - Index 0: Skipped (CPU emulated)
+        // - Index 1, 2: Skipped (Dx12 lower priority than Vulkan)
+        // - Index 3: Skipped (integrated, discrete available)
+        // - Index 4: Selected (discrete, Vulkan)
+        assert_eq!(select_adapters(&infos), vec![4]);
     }
 }
