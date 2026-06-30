@@ -154,7 +154,7 @@ impl GpuEngine {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
         }
-        
+
         // Handle both cases: called from within a tokio runtime or from outside
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
