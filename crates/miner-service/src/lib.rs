@@ -208,12 +208,34 @@ impl WorkerPool {
 
         // Dispatch job to all workers using bounded channels (capacity 16).
         // Workers drain to get the latest job, so we just need room to queue.
+        let mut disconnected_count = 0;
         for (i, tx) in self.job_senders.iter().enumerate() {
             if let Err(e) = tx.try_send(job.clone()) {
+                match e {
+                    crossbeam_channel::TrySendError::Disconnected(_) => {
+                        // Worker thread has exited (e.g., device lost)
+                        disconnected_count += 1;
+                        log::debug!("Worker {i} channel disconnected (worker exited)");
+                    }
+                    crossbeam_channel::TrySendError::Full(_) => {
+                        log::warn!(
+                            "Failed to send job {new_job_id} to worker {i}: channel full - \
+                             worker may be stuck or jobs arriving too fast"
+                        );
+                    }
+                }
+            }
+        }
+
+        if disconnected_count > 0 {
+            let active = self.job_senders.len() - disconnected_count;
+            if active == 0 {
                 log::error!(
-                    "Failed to send job {new_job_id} to worker {i}: {e}. \
-                     Channel full - worker may be stuck or jobs arriving too fast."
+                    "All workers have exited! No workers available to process jobs. \
+                     Consider restarting the miner."
                 );
+            } else {
+                log::warn!("{disconnected_count} worker(s) have exited, {active} still active");
             }
         }
 

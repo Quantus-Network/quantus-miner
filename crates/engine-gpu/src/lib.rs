@@ -216,6 +216,35 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     selected
 }
 
+/// Filter initialized GPUs based on device types.
+/// Returns indices of GPUs to keep.
+///
+/// Rules:
+/// - If any discrete GPU initialized successfully and `allow_integrated` is false,
+///   drop all integrated GPUs
+/// - Otherwise keep all GPUs
+///
+/// This is extracted as a pure function for testability.
+fn filter_initialized_gpus(
+    device_types: &[wgpu::DeviceType],
+    allow_integrated: bool,
+) -> Vec<usize> {
+    let has_discrete = device_types.contains(&wgpu::DeviceType::DiscreteGpu);
+
+    if has_discrete && !allow_integrated {
+        // Keep only discrete GPUs
+        device_types
+            .iter()
+            .enumerate()
+            .filter(|(_, &dt)| dt != wgpu::DeviceType::IntegratedGpu)
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        // Keep all
+        (0..device_types.len()).collect()
+    }
+}
+
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
     ///
@@ -392,31 +421,26 @@ impl GpuEngine {
             return Err("No GPU adapters could be initialized".into());
         }
 
-        // Now filter integrated GPUs if discrete GPUs successfully initialized
-        // (unless allow_integrated is set)
-        let has_discrete = initialized
-            .iter()
-            .any(|g| g.device_type == wgpu::DeviceType::DiscreteGpu);
+        // Filter integrated GPUs if discrete GPUs successfully initialized
+        let device_types: Vec<_> = initialized.iter().map(|g| g.device_type).collect();
+        let keep_indices = filter_initialized_gpus(&device_types, allow_integrated);
 
-        let contexts: Vec<Arc<GpuContext>> = if has_discrete && !allow_integrated {
-            initialized
-                .into_iter()
-                .filter(|g| {
-                    if g.device_type == wgpu::DeviceType::IntegratedGpu {
-                        log::info!(
-                            target: "gpu_engine",
-                            "Dropping integrated GPU (discrete GPU initialized successfully, use --allow-integrated to override): {}",
-                            g.name
-                        );
-                        return false;
-                    }
-                    true
-                })
-                .map(|g| g.context)
-                .collect()
-        } else {
-            initialized.into_iter().map(|g| g.context).collect()
-        };
+        let contexts: Vec<Arc<GpuContext>> = initialized
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, g)| {
+                if keep_indices.contains(&i) {
+                    Some(g.context)
+                } else {
+                    log::info!(
+                        target: "gpu_engine",
+                        "Dropping integrated GPU (discrete GPU initialized successfully, use --allow-integrated to override): {}",
+                        g.name
+                    );
+                    None
+                }
+            })
+            .collect();
 
         log::info!(
             target: "gpu_engine",
@@ -1063,5 +1087,54 @@ mod adapter_selection_tests {
         // - Index 4: Selected first (discrete, Vulkan)
         // - Index 3: Selected second (integrated, Vulkan)
         assert_eq!(select_adapters(&infos), vec![4, 3]);
+    }
+
+    // Tests for filter_initialized_gpus (post-init filtering)
+
+    #[test]
+    fn filter_discrete_present_drops_integrated() {
+        use wgpu::DeviceType::*;
+        // Discrete at index 0, integrated at index 1
+        let types = vec![DiscreteGpu, IntegratedGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0]);
+    }
+
+    #[test]
+    fn filter_discrete_failed_keeps_integrated() {
+        use wgpu::DeviceType::*;
+        // Only integrated initialized (discrete failed/timed out)
+        let types = vec![IntegratedGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0]);
+    }
+
+    #[test]
+    fn filter_allow_integrated_keeps_both() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, IntegratedGpu];
+        // With allow_integrated=true, keep both
+        assert_eq!(filter_initialized_gpus(&types, true), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_multiple_discrete_keeps_all_discrete() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, DiscreteGpu, IntegratedGpu];
+        // Drops integrated, keeps both discrete
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_only_discrete_keeps_all() {
+        use wgpu::DeviceType::*;
+        let types = vec![DiscreteGpu, DiscreteGpu];
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_multiple_integrated_no_discrete_keeps_all() {
+        use wgpu::DeviceType::*;
+        let types = vec![IntegratedGpu, IntegratedGpu];
+        // No discrete, so keep all integrated
+        assert_eq!(filter_initialized_gpus(&types, false), vec![0, 1]);
     }
 }
