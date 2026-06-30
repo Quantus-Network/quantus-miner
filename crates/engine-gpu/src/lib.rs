@@ -47,6 +47,9 @@ pub struct GpuEngine {
 thread_local! {
     static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = const { RefCell::new(None) };
     static WORKER_RESOURCES: RefCell<Option<GpuResources>> = const { RefCell::new(None) };
+    /// Set to true when this worker's GPU device is lost/unresponsive.
+    /// Once set, the worker will immediately return Cancelled on any search attempt.
+    static DEVICE_LOST: RefCell<bool> = const { RefCell::new(false) };
 }
 
 impl GpuContext {
@@ -408,6 +411,13 @@ impl MinerEngine for GpuEngine {
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
+        // Check if this worker's GPU device was previously lost
+        let device_is_lost = DEVICE_LOST.with(|lost| *lost.borrow());
+        if device_is_lost {
+            // Device was lost in a previous call - don't attempt any GPU operations
+            return EngineStatus::Cancelled { hash_count: 0 };
+        }
+
         // Empty or inverted range: nothing to do.
         if range.start > range.end {
             return EngineStatus::Exhausted { hash_count: 0 };
@@ -559,8 +569,11 @@ impl MinerEngine for GpuEngine {
                     total_hashes += hash_count;
                 }
                 BatchResult::DeviceLost => {
-                    // GPU device is lost/unresponsive - log loudly and return cancelled
-                    // This prevents spinning at 0 H/s indefinitely on a dead device
+                    // GPU device is lost/unresponsive - mark as permanently dead
+                    // and clear resources to prevent "buffer already mapped" panics
+                    DEVICE_LOST.with(|lost| *lost.borrow_mut() = true);
+                    WORKER_RESOURCES.with(|res| *res.borrow_mut() = None);
+
                     log::error!(
                         target: "gpu_engine",
                         "GPU {} device lost or unresponsive - stopping worker. \
