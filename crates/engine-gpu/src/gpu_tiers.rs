@@ -3,8 +3,8 @@
 //! This module provides a table-driven approach to GPU detection,
 //! using regex patterns with word boundaries to avoid substring matching issues.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// GPU tier configuration
 struct GpuTier {
@@ -210,13 +210,7 @@ const AMD_TIERS: &[GpuTier] = &[
         min_workgroups: 1536,
     },
     GpuTier {
-        pattern: r"\b5[56]00\b",
-        name: "AMD RX 5000 (RDNA 1)",
-        workgroup_divisor: 18,
-        min_workgroups: 1024,
-    },
-    GpuTier {
-        pattern: r"rx 5\d{3}",
+        pattern: r"\b5[56]00\b|rx 5\d{3}",
         name: "AMD RX 5000 (RDNA 1)",
         workgroup_divisor: 18,
         min_workgroups: 1024,
@@ -405,23 +399,23 @@ const QUALCOMM_TIERS: &[GpuTier] = &[
         workgroup_divisor: 14,
         min_workgroups: 1536,
     },
-    // Adreno 700 series
+    // Adreno 700 series (730, 740, 750, etc.)
     GpuTier {
-        pattern: r"adreno.*7|\b7[234]0\b",
+        pattern: r"adreno\s*7[0-9]{2}\b|\b7[345]0\b",
         name: "Qualcomm Adreno 700 Series",
         workgroup_divisor: 16,
         min_workgroups: 1024,
     },
-    // Adreno 600 series
+    // Adreno 600 series (610, 612, 615, 618, 619, 620, 630, 640, 650, 660, etc.)
     GpuTier {
-        pattern: r"adreno.*6|\b6[1-9]\d\b",
+        pattern: r"adreno\s*6[0-9]{2}\b|\b6[1-6][0-9]\b",
         name: "Qualcomm Adreno 600 Series",
         workgroup_divisor: 20,
         min_workgroups: 512,
     },
-    // Adreno 500 series
+    // Adreno 500 series (505, 506, 508, 509, 510, 512, 530, 540)
     GpuTier {
-        pattern: r"adreno.*5|\b5[1-4]\d\b",
+        pattern: r"adreno\s*5[0-4][0-9]\b|\b5[0-4][0-9]\b",
         name: "Qualcomm Adreno 500 Series",
         workgroup_divisor: 24,
         min_workgroups: 384,
@@ -540,7 +534,7 @@ struct GpuTierTables {
     apple: Vec<CompiledGpuTier>,
 }
 
-static GPU_TIERS: Lazy<GpuTierTables> = Lazy::new(|| GpuTierTables {
+static GPU_TIERS: LazyLock<GpuTierTables> = LazyLock::new(|| GpuTierTables {
     nvidia: NVIDIA_TIERS
         .iter()
         .map(CompiledGpuTier::from_tier)
@@ -706,6 +700,24 @@ mod tests {
 
         let tier = detect_gpu_tier("Apple M3 Max", 0, true);
         assert_eq!(tier.name, "Apple M3 Max");
+        assert!(!tier.is_fallback);
+    }
+
+    #[test]
+    fn test_qualcomm_adreno_series() {
+        // Adreno 627 should match 600 series, NOT 700 series
+        let tier = detect_gpu_tier("Qualcomm Adreno 627", 0x5143, false);
+        assert_eq!(tier.name, "Qualcomm Adreno 600 Series");
+        assert!(!tier.is_fallback);
+
+        // Adreno 730 should match 700 series
+        let tier = detect_gpu_tier("Qualcomm Adreno 730", 0x5143, false);
+        assert_eq!(tier.name, "Qualcomm Adreno 700 Series");
+        assert!(!tier.is_fallback);
+
+        // Adreno 540 should match 500 series
+        let tier = detect_gpu_tier("Qualcomm Adreno 540", 0x5143, false);
+        assert_eq!(tier.name, "Qualcomm Adreno 500 Series");
         assert!(!tier.is_fallback);
     }
 }

@@ -591,7 +591,6 @@ dependencies = [
  "futures",
  "hex",
  "log",
- "once_cell",
  "pow-core",
  "primitive-types 0.13.1",
  "qp-plonky2",
