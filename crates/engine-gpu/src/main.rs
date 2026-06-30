@@ -1,10 +1,9 @@
-use futures::executor::block_on;
-
 mod end_to_end_tests;
 mod tests;
 
-fn main() {
-    block_on(run()).unwrap();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run().await
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
