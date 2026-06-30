@@ -454,8 +454,8 @@ impl MinerEngine for GpuEngine {
         // Check if this worker's GPU device was previously lost
         let device_is_lost = DEVICE_LOST.with(|lost| *lost.borrow());
         if device_is_lost {
-            // Device was lost in a previous call - don't attempt any GPU operations
-            return EngineStatus::Cancelled { hash_count: 0 };
+            // Device was lost in a previous call - signal worker should exit
+            return EngineStatus::DeviceLost { hash_count: 0 };
         }
 
         // Empty or inverted range: nothing to do.
@@ -620,7 +620,7 @@ impl MinerEngine for GpuEngine {
                          This GPU will not process further batches.",
                         device_index
                     );
-                    return EngineStatus::Cancelled {
+                    return EngineStatus::DeviceLost {
                         hash_count: total_hashes,
                     };
                 }

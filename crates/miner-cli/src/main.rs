@@ -293,10 +293,16 @@ async fn run_benchmark(
                 match result {
                     engine_cpu::EngineStatus::Found { hash_count, .. }
                     | engine_cpu::EngineStatus::Exhausted { hash_count }
-                    | engine_cpu::EngineStatus::Cancelled { hash_count } => {
+                    | engine_cpu::EngineStatus::Cancelled { hash_count }
+                    | engine_cpu::EngineStatus::DeviceLost { hash_count } => {
                         *hashes.lock().unwrap() += hash_count;
                     }
                     engine_cpu::EngineStatus::Running { .. } => {}
+                }
+
+                // Exit if device is lost
+                if matches!(result, engine_cpu::EngineStatus::DeviceLost { .. }) {
+                    break;
                 }
 
                 if start.elapsed() >= Duration::from_secs(duration) {

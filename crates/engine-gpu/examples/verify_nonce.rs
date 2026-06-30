@@ -56,6 +56,9 @@ fn main() {
         EngineStatus::Cancelled { .. } => {
             log::error!("FAILURE: GPU search cancelled!");
         }
+        EngineStatus::DeviceLost { .. } => {
+            log::error!("FAILURE: GPU device lost!");
+        }
         EngineStatus::Running { .. } => {
             log::error!("FAILURE: GPU returned Running status!");
         }

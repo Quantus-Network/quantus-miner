@@ -338,6 +338,7 @@ fn worker_loop(
             engine_cpu::EngineStatus::Found { .. } => "FOUND",
             engine_cpu::EngineStatus::Exhausted { .. } => "EXHAUSTED",
             engine_cpu::EngineStatus::Cancelled { .. } => "CANCELLED",
+            engine_cpu::EngineStatus::DeviceLost { .. } => "DEVICE_LOST",
             engine_cpu::EngineStatus::Running { .. } => "RUNNING",
         };
         log::debug!(
@@ -354,6 +355,7 @@ fn worker_loop(
                 engine_cpu::EngineStatus::Found { hash_count, .. } => hash_count,
                 engine_cpu::EngineStatus::Exhausted { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Cancelled { hash_count } => hash_count,
+                engine_cpu::EngineStatus::DeviceLost { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Running { .. } => 0,
             };
             log_worker_completion(
@@ -401,6 +403,21 @@ fn worker_loop(
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
                 log_worker_completion(type_str, thread_id, "new block", hash_count, search_elapsed);
                 (None, hash_count)
+            }
+            engine_cpu::EngineStatus::DeviceLost { hash_count } => {
+                log::error!(
+                    "{type_str} worker {thread_id} GPU device lost - worker exiting permanently"
+                );
+                // Send final result before exiting
+                let _ = result_tx.try_send(WorkerResult {
+                    thread_id,
+                    engine_type,
+                    job_id,
+                    candidate: None,
+                    hash_count,
+                    completed: true,
+                });
+                break; // Exit the worker loop
             }
             engine_cpu::EngineStatus::Running { .. } => {
                 // Should not happen for synchronous search
