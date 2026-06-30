@@ -380,7 +380,7 @@ fn worker_loop(
                 ..
             } => {
                 log::info!(
-                    "{type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
+                    "🎯 {type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
                     format_u512(nonce),
                     format_u512(hash),
                 );

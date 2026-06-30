@@ -142,6 +142,68 @@ impl GpuContext {
     }
 }
 
+/// Rank backends for mining: native compute APIs first.
+fn backend_rank(backend: wgpu::Backend) -> u8 {
+    match backend {
+        wgpu::Backend::Vulkan | wgpu::Backend::Metal => 0,
+        wgpu::Backend::Dx12 => 1,
+        _ => 2,
+    }
+}
+
+/// Select which adapters to mine on, returning indices into `infos` ordered
+/// discrete-first.
+///
+/// wgpu can enumerate the same physical GPU once per backend (Vulkan + DX12 on
+/// Windows) plus CPU-emulated fallbacks such as "Microsoft Basic Render Driver".
+/// Mining on every entry causes VRAM contention and OOM (issue #61), so CPU
+/// adapters are dropped and only the best-ranked backend present is kept.
+/// Within a single backend each physical GPU appears exactly once, so rigs with
+/// multiple identical cards keep every card.
+fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
+    let usable: Vec<usize> = (0..infos.len())
+        .filter(|&i| {
+            if infos[i].device_type == wgpu::DeviceType::Cpu {
+                log::info!(
+                    target: "gpu_engine",
+                    "Skipping CPU-emulated adapter: {} ({:?})",
+                    infos[i].name,
+                    infos[i].backend
+                );
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    let Some(best) = usable.iter().map(|&i| backend_rank(infos[i].backend)).min() else {
+        return Vec::new();
+    };
+
+    let mut selected: Vec<usize> = usable
+        .into_iter()
+        .filter(|&i| {
+            if backend_rank(infos[i].backend) != best {
+                log::info!(
+                    target: "gpu_engine",
+                    "Skipping adapter on lower-priority backend: {} ({:?})",
+                    infos[i].name,
+                    infos[i].backend
+                );
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    selected.sort_by_key(|&i| match infos[i].device_type {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        _ => 2,
+    });
+    selected
+}
+
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
     ///
@@ -149,7 +211,7 @@ impl GpuEngine {
     ///
     /// Returns an error if:
     /// - `batch_size` is zero (no work would be performed)
-    /// - No suitable GPU adapters are found
+    /// - No usable GPU adapters are found
     pub fn try_new(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
@@ -177,40 +239,35 @@ impl GpuEngine {
         });
 
         let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY);
+        let infos: Vec<wgpu::AdapterInfo> = adapters.iter().map(|a| a.get_info()).collect();
 
-        // Collect adapters to a vector to check count and iterate with index
-        let adapters: Vec<_> = adapters.into_iter().collect();
-
-        if adapters.is_empty() {
-            log::error!(target: "gpu_engine", "No suitable GPU adapters found.");
-            return Err("No suitable GPU adapters found".into());
+        let selected = select_adapters(&infos);
+        if selected.is_empty() {
+            log::error!(
+                target: "gpu_engine",
+                "No usable GPU adapters found ({} enumerated). Use --gpu-devices 0 to disable GPU mining.",
+                infos.len()
+            );
+            return Err("No usable GPU adapters found".into());
         }
 
+        let mut adapters: Vec<Option<wgpu::Adapter>> = adapters.into_iter().map(Some).collect();
         let mut contexts = Vec::new();
-        let mut adapter_infos = Vec::new();
 
         // Timeout for initializing each adapter (30 seconds should be plenty)
         let init_timeout = std::time::Duration::from_secs(30);
 
-        for (i, adapter) in adapters.into_iter().enumerate() {
-            let info = adapter.get_info();
-            log::info!(target: "gpu_engine", "Initializing adapter {}: {} ...", i, info.name);
-
-            // Skip software renderers - they're too slow for mining
-            if info.name.to_lowercase().contains("microsoft basic")
-                || info.name.to_lowercase().contains("software")
-                || info.name.to_lowercase().contains("llvmpipe")
-                || info.device_type == wgpu::DeviceType::Cpu
-            {
-                log::warn!(
-                    target: "gpu_engine",
-                    "Skipping software renderer adapter {}: {}",
-                    i, info.name
-                );
-                continue;
-            }
-
-            adapter_infos.push(info.clone());
+        for (i, idx) in selected.into_iter().enumerate() {
+            let adapter = adapters[idx].take().expect("adapter selected exactly once");
+            let info = &infos[idx];
+            log::info!(
+                target: "gpu_engine",
+                "Initializing GPU device {i}: {} ({:?}, {:?})",
+                info.name,
+                info.device_type,
+                info.backend
+            );
+            log::debug!(target: "gpu_engine", "Adapter {i} raw info: {info:?}");
 
             // Try to initialize this adapter with a proper timeout.
             // If the driver hangs, we'll skip this adapter after the timeout.
@@ -227,8 +284,8 @@ impl GpuEngine {
                 Err(_) => {
                     log::warn!(
                         target: "gpu_engine",
-                        "Adapter {} ({}) timed out after {}s during initialization, skipping",
-                        i, info.name, init_timeout.as_secs()
+                        "GPU device {i} ({}) timed out after {}s during initialization, skipping",
+                        info.name, init_timeout.as_secs()
                     );
                     continue;
                 }
@@ -239,8 +296,8 @@ impl GpuEngine {
                 Err(e) => {
                     log::warn!(
                         target: "gpu_engine",
-                        "Failed to initialize adapter {} ({}): {}. Skipping.",
-                        i, info.name, e
+                        "Failed to initialize GPU device {i} ({}): {}. Skipping.",
+                        info.name, e
                     );
                     continue;
                 }
@@ -248,8 +305,7 @@ impl GpuEngine {
 
             // Log device limits at debug level
             let limits = device.limits();
-            log::debug!(target: "gpu_engine", "Adapter {} limits: max_workgroups={}, max_workgroup_size={}x{}x{}, max_buffer={}",
-                i,
+            log::debug!(target: "gpu_engine", "GPU device {i} limits: max_workgroups={}, max_workgroup_size={}x{}x{}, max_buffer={}",
                 limits.max_compute_workgroups_per_dimension,
                 limits.max_compute_workgroup_size_x,
                 limits.max_compute_workgroup_size_y,
@@ -278,12 +334,12 @@ impl GpuEngine {
             let pipeline_elapsed = pipeline_start.elapsed();
             log::info!(
                 target: "gpu_engine",
-                "Adapter {} ({}) initialized successfully (pipeline compiled in {:.1}s)",
-                i, info.name, pipeline_elapsed.as_secs_f64()
+                "GPU device {i} ({}) initialized successfully (pipeline compiled in {:.1}s)",
+                info.name, pipeline_elapsed.as_secs_f64()
             );
 
             // Calculate vendor-specific configuration once during initialization
-            let optimal_workgroups = get_vendor_specific_dispatch(&info, &device);
+            let optimal_workgroups = get_vendor_specific_dispatch(info, &device);
 
             contexts.push(Arc::new(GpuContext {
                 device,
@@ -772,4 +828,104 @@ fn get_vendor_specific_dispatch(adapter_info: &wgpu::AdapterInfo, device: &wgpu:
     }
 
     optimal_workgroups
+}
+
+#[cfg(test)]
+mod adapter_selection_tests {
+    use super::*;
+
+    fn info(
+        name: &str,
+        device_type: wgpu::DeviceType,
+        backend: wgpu::Backend,
+    ) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: name.into(),
+            vendor: 0,
+            device: 0,
+            device_type,
+            driver: String::new(),
+            driver_info: String::new(),
+            backend,
+        }
+    }
+
+    #[test]
+    fn windows_multi_backend_keeps_one_context_per_physical_gpu() {
+        // The exact enumeration from issue #61
+        let infos = [
+            info(
+                "AMD Radeon(TM) Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "NVIDIA GeForce RTX 3070",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "AMD Radeon(TM) Graphics",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "NVIDIA GeForce RTX 3070",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Dx12,
+            ),
+            info(
+                "Microsoft Basic Render Driver",
+                wgpu::DeviceType::Cpu,
+                wgpu::Backend::Dx12,
+            ),
+        ];
+        assert_eq!(select_adapters(&infos), vec![1, 0]);
+    }
+
+    #[test]
+    fn identical_multi_gpu_rig_keeps_every_card() {
+        let infos = [
+            info(
+                "RTX 3090",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "RTX 3090",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info(
+                "RTX 3090",
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::Backend::Vulkan,
+            ),
+        ];
+        assert_eq!(select_adapters(&infos), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn dx12_only_machine_keeps_all_dx12_adapters() {
+        let infos = [
+            info("iGPU", wgpu::DeviceType::IntegratedGpu, wgpu::Backend::Dx12),
+            info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12),
+        ];
+        assert_eq!(select_adapters(&infos), vec![1, 0]);
+    }
+
+    #[test]
+    fn software_only_environment_selects_nothing() {
+        let infos = [info(
+            "llvmpipe",
+            wgpu::DeviceType::Cpu,
+            wgpu::Backend::Vulkan,
+        )];
+        assert!(select_adapters(&infos).is_empty());
+    }
+
+    #[test]
+    fn empty_enumeration_selects_nothing() {
+        assert!(select_adapters(&[]).is_empty());
+    }
 }
