@@ -154,8 +154,19 @@ impl GpuEngine {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
         }
-        // Use tokio runtime for async init with proper timeout support
-        tokio::runtime::Handle::current().block_on(Self::init(batch_size, throttle_ms))
+        
+        // Handle both cases: called from within a tokio runtime or from outside
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // We're inside a tokio runtime - use block_in_place to allow blocking
+                tokio::task::block_in_place(|| handle.block_on(Self::init(batch_size, throttle_ms)))
+            }
+            Err(_) => {
+                // No runtime exists - create a temporary one
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(Self::init(batch_size, throttle_ms))
+            }
+        }
     }
 
     async fn init(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
