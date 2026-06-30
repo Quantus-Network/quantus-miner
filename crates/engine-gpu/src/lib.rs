@@ -164,9 +164,10 @@ fn backend_rank(backend: wgpu::Backend) -> u8 {
 /// Within a single backend each physical GPU appears exactly once, so rigs with
 /// multiple identical cards keep every card.
 ///
-/// When discrete GPUs are present, integrated GPUs (APUs) are skipped to avoid
-/// resource contention and driver instability from mining on both simultaneously.
-fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
+/// When discrete GPUs are present, integrated GPUs (APUs) are skipped by default
+/// to avoid resource contention and driver instability from mining on both
+/// simultaneously. Set `allow_integrated` to true to override this behavior.
+fn select_adapters(infos: &[wgpu::AdapterInfo], allow_integrated: bool) -> Vec<usize> {
     let usable: Vec<usize> = (0..infos.len())
         .filter(|&i| {
             if infos[i].device_type == wgpu::DeviceType::Cpu {
@@ -207,13 +208,13 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
         .iter()
         .any(|&i| infos[i].device_type == wgpu::DeviceType::DiscreteGpu);
 
-    // If discrete GPUs exist, filter out integrated GPUs to avoid contention
-    if has_discrete {
+    // If discrete GPUs exist and allow_integrated is false, filter out integrated GPUs
+    if has_discrete && !allow_integrated {
         selected.retain(|&i| {
             if infos[i].device_type == wgpu::DeviceType::IntegratedGpu {
                 log::info!(
                     target: "gpu_engine",
-                    "Skipping integrated GPU (discrete GPU available): {} ({:?})",
+                    "Skipping integrated GPU (discrete GPU available, use --allow-integrated to override): {} ({:?})",
                     infos[i].name,
                     infos[i].backend
                 );
@@ -234,12 +235,21 @@ fn select_adapters(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
 impl GpuEngine {
     /// Try to initialize the GPU engine with the given batch size and throttle (ms between batches).
     ///
+    /// # Arguments
+    /// * `batch_size` - Number of nonces per batch
+    /// * `throttle_ms` - Delay between batches in milliseconds (0 = no throttle)
+    /// * `allow_integrated` - If true, use integrated GPUs even when discrete GPUs are available
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - `batch_size` is zero (no work would be performed)
     /// - No usable GPU adapters are found
-    pub fn try_new(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn try_new(
+        batch_size: u32,
+        throttle_ms: u64,
+        allow_integrated: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if batch_size == 0 {
             return Err("batch_size must be non-zero".into());
         }
@@ -248,17 +258,23 @@ impl GpuEngine {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 // We're inside a tokio runtime - use block_in_place to allow blocking
-                tokio::task::block_in_place(|| handle.block_on(Self::init(batch_size, throttle_ms)))
+                tokio::task::block_in_place(|| {
+                    handle.block_on(Self::init(batch_size, throttle_ms, allow_integrated))
+                })
             }
             Err(_) => {
                 // No runtime exists - create a temporary one
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(Self::init(batch_size, throttle_ms))
+                rt.block_on(Self::init(batch_size, throttle_ms, allow_integrated))
             }
         }
     }
 
-    async fn init(batch_size: u32, throttle_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn init(
+        batch_size: u32,
+        throttle_ms: u64,
+        allow_integrated: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!(target: "gpu_engine", "Initializing WGPU...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -268,7 +284,7 @@ impl GpuEngine {
         let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY);
         let infos: Vec<wgpu::AdapterInfo> = adapters.iter().map(|a| a.get_info()).collect();
 
-        let selected = select_adapters(&infos);
+        let selected = select_adapters(&infos, allow_integrated);
         if selected.is_empty() {
             log::error!(
                 target: "gpu_engine",
@@ -917,7 +933,8 @@ mod adapter_selection_tests {
                 wgpu::Backend::Dx12,
             ),
         ];
-        assert_eq!(select_adapters(&infos), vec![1]);
+        // Default: only discrete GPU on best backend (Vulkan)
+        assert_eq!(select_adapters(&infos, false), vec![1]);
     }
 
     #[test]
@@ -939,7 +956,7 @@ mod adapter_selection_tests {
                 wgpu::Backend::Vulkan,
             ),
         ];
-        assert_eq!(select_adapters(&infos), vec![0, 1, 2]);
+        assert_eq!(select_adapters(&infos, false), vec![0, 1, 2]);
     }
 
     #[test]
@@ -949,7 +966,7 @@ mod adapter_selection_tests {
             info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12),
         ];
         // Only discrete GPU kept when both discrete and integrated present
-        assert_eq!(select_adapters(&infos), vec![1]);
+        assert_eq!(select_adapters(&infos, false), vec![1]);
     }
 
     #[test]
@@ -967,7 +984,7 @@ mod adapter_selection_tests {
                 wgpu::Backend::Vulkan,
             ),
         ];
-        assert_eq!(select_adapters(&infos), vec![0, 1]);
+        assert_eq!(select_adapters(&infos, false), vec![0, 1]);
     }
 
     #[test]
@@ -977,12 +994,12 @@ mod adapter_selection_tests {
             wgpu::DeviceType::Cpu,
             wgpu::Backend::Vulkan,
         )];
-        assert!(select_adapters(&infos).is_empty());
+        assert!(select_adapters(&infos, false).is_empty());
     }
 
     #[test]
     fn empty_enumeration_selects_nothing() {
-        assert!(select_adapters(&[]).is_empty());
+        assert!(select_adapters(&[], false).is_empty());
     }
 
     /// Exact scenario from Windows ASUS laptop with RX 560X + Vega 8 APU.
@@ -1022,6 +1039,21 @@ mod adapter_selection_tests {
         // - Index 1, 2: Skipped (Dx12 lower priority than Vulkan)
         // - Index 3: Skipped (integrated, discrete available)
         // - Index 4: Selected (discrete, Vulkan)
-        assert_eq!(select_adapters(&infos), vec![4]);
+        assert_eq!(select_adapters(&infos, false), vec![4]);
+    }
+
+    /// Test --allow-integrated flag: when set, both discrete and integrated GPUs are used
+    #[test]
+    fn allow_integrated_flag_keeps_both_gpu_types() {
+        let infos = [
+            info(
+                "iGPU",
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::Backend::Vulkan,
+            ),
+            info("dGPU", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Vulkan),
+        ];
+        // With allow_integrated=true, both GPUs should be selected (discrete first)
+        assert_eq!(select_adapters(&infos, true), vec![1, 0]);
     }
 }

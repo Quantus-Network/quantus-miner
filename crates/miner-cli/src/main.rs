@@ -52,6 +52,12 @@ enum Command {
         )]
         gpu_throttle_ms: u64,
 
+        /// Allow integrated GPUs (APUs) even when discrete GPUs are available.
+        /// By default, integrated GPUs are skipped when a discrete GPU is present
+        /// to avoid resource contention and driver instability.
+        #[arg(long = "allow-integrated", env = "MINER_ALLOW_INTEGRATED")]
+        allow_integrated: bool,
+
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
         verbose: bool,
@@ -78,6 +84,10 @@ enum Command {
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
         duration: u64,
+
+        /// Allow integrated GPUs (APUs) even when discrete GPUs are available
+        #[arg(long = "allow-integrated", env = "MINER_ALLOW_INTEGRATED")]
+        allow_integrated: bool,
 
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
@@ -112,6 +122,7 @@ async fn main() {
             cpu_batch_size,
             gpu_throttle_ms,
             metrics_port,
+            allow_integrated,
             verbose,
         } => {
             init_logger(verbose);
@@ -135,6 +146,7 @@ async fn main() {
                 gpu_batch_size,
                 cpu_batch_size,
                 gpu_throttle_ms,
+                allow_integrated,
             };
 
             if let Err(e) = run(config).await {
@@ -149,6 +161,7 @@ async fn main() {
             gpu_batch_size,
             cpu_batch_size,
             duration,
+            allow_integrated,
             verbose,
         } => {
             init_logger(verbose);
@@ -158,6 +171,7 @@ async fn main() {
                 gpu_batch_size,
                 cpu_batch_size,
                 duration,
+                allow_integrated,
             )
             .await;
         }
@@ -183,18 +197,23 @@ async fn run_benchmark(
     gpu_batch_size: u32,
     cpu_batch_size: u64,
     duration: u64,
+    allow_integrated: bool,
 ) {
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
 
     // Initialize GPU engine (no throttle for benchmark)
-    let (gpu_engine, effective_gpu_devices) =
-        match miner_service::resolve_gpu_configuration(gpu_devices, gpu_batch_size, 0) {
-            Ok((engine, count)) => (engine, count),
-            Err(e) => {
-                eprintln!("❌ ERROR: {}", e);
-                std::process::exit(1);
-            }
-        };
+    let (gpu_engine, effective_gpu_devices) = match miner_service::resolve_gpu_configuration(
+        gpu_devices,
+        gpu_batch_size,
+        0,
+        allow_integrated,
+    ) {
+        Ok((engine, count)) => (engine, count),
+        Err(e) => {
+            eprintln!("❌ ERROR: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let total_workers = effective_cpu_workers + effective_gpu_devices;
 

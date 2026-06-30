@@ -33,6 +33,8 @@ pub struct ServiceConfig {
     pub cpu_batch_size: u64,
     /// GPU throttle delay in milliseconds between batches (0 = no throttle)
     pub gpu_throttle_ms: u64,
+    /// Allow integrated GPUs even when discrete GPUs are available
+    pub allow_integrated: bool,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -430,6 +432,7 @@ pub fn resolve_gpu_configuration(
     requested_devices: Option<usize>,
     batch_size: u32,
     throttle_ms: u64,
+    allow_integrated: bool,
 ) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
     // Explicit 0 means no GPU
     if requested_devices == Some(0) {
@@ -437,7 +440,7 @@ pub fn resolve_gpu_configuration(
     }
 
     // Try to initialize GPU engine
-    let engine = engine_gpu::GpuEngine::try_new(batch_size, throttle_ms);
+    let engine = engine_gpu::GpuEngine::try_new(batch_size, throttle_ms, allow_integrated);
     let engine = match engine {
         Ok(e) => e,
         Err(e) => {
@@ -482,6 +485,7 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
         config.gpu_devices,
         config.gpu_batch_size,
         config.gpu_throttle_ms,
+        config.allow_integrated,
     )?;
 
     // Resolve CPU workers
