@@ -43,7 +43,10 @@ pub async fn run_node_client(
                     if let Some(block) = pending.take() {
                         match submit_block(&mut send, &block).await {
                             Ok(()) => {
-                                log::info!("Submitted block solution to node (job {})", block.job_id);
+                                log::info!(
+                                    "Submitted block solution to node (job {})",
+                                    block.job_id
+                                );
                             }
                             Err(e) => {
                                 log::error!("Failed to submit block solution, will retry: {}", e);
