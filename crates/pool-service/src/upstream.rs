@@ -25,6 +25,12 @@ pub async fn run_node_client(
     let mut reconnect_delay = Duration::from_secs(1);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
+    // A block taken off the channel but not yet acknowledged by a successful
+    // upstream write. Kept across reconnects so a failed write doesn't drop
+    // the block (the node may still accept it after reconnection if the job
+    // hasn't moved on).
+    let mut pending: Option<FoundBlock> = None;
+
     loop {
         log::info!("Connecting to node at {}...", node_addr);
         match establish_connection(node_addr).await {
@@ -33,6 +39,20 @@ pub async fn run_node_client(
                 reconnect_delay = Duration::from_secs(1);
 
                 loop {
+                    // Retry any unsubmitted block before doing anything else.
+                    if let Some(block) = pending.take() {
+                        match submit_block(&mut send, &block).await {
+                            Ok(()) => {
+                                log::info!("Submitted block solution to node (job {})", block.job_id);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to submit block solution, will retry: {}", e);
+                                pending = Some(block);
+                                break; // reconnect and retry
+                            }
+                        }
+                    }
+
                     tokio::select! {
                         biased;
 
@@ -44,20 +64,9 @@ pub async fn run_node_client(
                         // A captcha share met network difficulty: submit it.
                         block = solutions.recv() => {
                             if let Some(block) = block {
-                                let result = MiningResult {
-                                    status: ApiResponseStatus::Completed,
-                                    job_id: block.job_id,
-                                    nonce: Some(format!("{:x}", block.nonce)),
-                                    work: Some(hex::encode(block.nonce.to_big_endian())),
-                                    hash_count: 0,
-                                    elapsed_time: 0.0,
-                                    miner_id: None,
-                                };
-                                if let Err(e) = write_message(&mut send, &MinerMessage::JobResult(result)).await {
-                                    log::error!("Failed to submit block solution: {}", e);
-                                    break;
-                                }
-                                log::info!("Submitted block solution to node");
+                                // Park it in `pending`; the top of the loop
+                                // submits it and keeps it on write failure.
+                                pending = Some(block);
                             }
                         }
 
@@ -90,6 +99,19 @@ pub async fn run_node_client(
         tokio::time::sleep(reconnect_delay).await;
         reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
     }
+}
+
+async fn submit_block(send: &mut quinn::SendStream, block: &FoundBlock) -> std::io::Result<()> {
+    let result = MiningResult {
+        status: ApiResponseStatus::Completed,
+        job_id: block.job_id.clone(),
+        nonce: Some(format!("{:x}", block.nonce)),
+        work: Some(hex::encode(block.nonce.to_big_endian())),
+        hash_count: 0,
+        elapsed_time: 0.0,
+        miner_id: None,
+    };
+    write_message(send, &MinerMessage::JobResult(result)).await
 }
 
 fn parse_job(job_id: &str, mining_hash: &str, difficulty: &str) -> anyhow::Result<Job> {
