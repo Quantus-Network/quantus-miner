@@ -86,7 +86,10 @@ pub struct FoundBlock {
 
 pub enum ShareOutcome {
     /// Share accepted; token the client can hand to the protected site.
-    Accepted { token: String, block_found: bool },
+    Accepted {
+        token: String,
+        block_found: bool,
+    },
     Rejected(&'static str),
 }
 
@@ -109,7 +112,10 @@ impl PoolState {
         site_secret: String,
         solution_tx: tokio::sync::mpsc::Sender<FoundBlock>,
     ) -> Arc<Self> {
-        assert!(!share_difficulty.is_zero(), "share difficulty must be non-zero");
+        assert!(
+            !share_difficulty.is_zero(),
+            "share difficulty must be non-zero"
+        );
         Arc::new(PoolState {
             current_job: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
@@ -291,7 +297,9 @@ impl PoolState {
 mod tests {
     use super::*;
 
-    fn test_state(share_difficulty: u64) -> (Arc<PoolState>, tokio::sync::mpsc::Receiver<FoundBlock>) {
+    fn test_state(
+        share_difficulty: u64,
+    ) -> (Arc<PoolState>, tokio::sync::mpsc::Receiver<FoundBlock>) {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let state = PoolState::new(U512::from(share_difficulty), "secret".into(), tx);
         state.set_job(Job {
@@ -306,8 +314,11 @@ mod tests {
     fn solve(session: &Session) -> U512 {
         let mut nonce = session.nonce_start;
         loop {
-            let (ok, _) =
-                pow_core::is_valid_nonce(session.job.header, nonce.to_big_endian(), session.share_difficulty);
+            let (ok, _) = pow_core::is_valid_nonce(
+                session.job.header,
+                nonce.to_big_endian(),
+                session.share_difficulty,
+            );
             if ok {
                 return nonce;
             }
@@ -330,7 +341,10 @@ mod tests {
         };
 
         assert!(state.verify_token("secret", &token).is_ok());
-        assert_eq!(state.verify_token("secret", &token), Err("token_already_consumed"));
+        assert_eq!(
+            state.verify_token("secret", &token),
+            Err("token_already_consumed")
+        );
         assert_eq!(state.verify_token("wrong", &token), Err("invalid_secret"));
     }
 
@@ -343,7 +357,10 @@ mod tests {
         let outside = session.nonce_end;
         match state.submit_share(&session.id, outside) {
             ShareOutcome::Rejected("nonce_out_of_range") => {}
-            other => panic!("expected out-of-range rejection, got {:?}", matches_str(&other)),
+            other => panic!(
+                "expected out-of-range rejection, got {:?}",
+                matches_str(&other)
+            ),
         }
     }
 
@@ -352,7 +369,10 @@ mod tests {
         let (state, _rx) = test_state(1);
         let session = state.issue_session().unwrap();
         let nonce = session.nonce_start;
-        assert!(matches!(state.submit_share(&session.id, nonce), ShareOutcome::Accepted { .. }));
+        assert!(matches!(
+            state.submit_share(&session.id, nonce),
+            ShareOutcome::Accepted { .. }
+        ));
         match state.submit_share(&session.id, nonce) {
             ShareOutcome::Rejected("session_already_solved") => {}
             other => panic!("expected burned session, got {:?}", matches_str(&other)),
@@ -383,7 +403,9 @@ mod tests {
             ShareOutcome::Accepted { block_found, .. } => assert!(block_found),
             ShareOutcome::Rejected(r) => panic!("rejected: {r}"),
         }
-        let block = rx.try_recv().expect("block solution should be queued upstream");
+        let block = rx
+            .try_recv()
+            .expect("block solution should be queued upstream");
         assert_eq!(block.job_id, "1");
         assert_eq!(block.nonce, nonce);
     }

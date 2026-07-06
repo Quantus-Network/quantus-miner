@@ -97,8 +97,8 @@ fn parse_job(job_id: &str, mining_hash: &str, difficulty: &str) -> anyhow::Resul
     let header: [u8; 32] = bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("mining_hash must be 32 bytes"))?;
-    let network_difficulty = U512::from_dec_str(difficulty)
-        .map_err(|e| anyhow::anyhow!("bad difficulty: {:?}", e))?;
+    let network_difficulty =
+        U512::from_dec_str(difficulty).map_err(|e| anyhow::anyhow!("bad difficulty: {:?}", e))?;
     if network_difficulty.is_zero() {
         anyhow::bail!("zero difficulty");
     }

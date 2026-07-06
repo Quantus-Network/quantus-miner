@@ -71,7 +71,10 @@ pub async fn serve(state: Arc<PoolState>, addr: SocketAddr, serve_dir: Option<Pa
         .and(warp::post())
         .and(with_state.clone())
         .map(|state: Arc<PoolState>| match state.issue_session() {
-            None => reply_error(warp::http::StatusCode::SERVICE_UNAVAILABLE, "no_job_available"),
+            None => reply_error(
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                "no_job_available",
+            ),
             Some(s) => {
                 let target = U512::MAX / s.share_difficulty;
                 let expected = s.share_difficulty.min(U512::from(u64::MAX)).as_u64();

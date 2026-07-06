@@ -91,7 +91,10 @@ mod tests {
 
         let nonce = U512::from_big_endian(&io[NONCE_OFF..NONCE_OFF + 64]);
         let (valid, hash) = qpow_math::is_valid_nonce(header, nonce.to_big_endian(), difficulty);
-        assert!(valid, "pool-side verification must accept the solver's nonce");
+        assert!(
+            valid,
+            "pool-side verification must accept the solver's nonce"
+        );
         let reported = U512::from_big_endian(&io[HASH_OFF..HASH_OFF + 64]);
         assert_eq!(hash, reported);
     }
