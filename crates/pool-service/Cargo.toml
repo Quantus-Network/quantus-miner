@@ -1,0 +1,29 @@
+[package]
+name = "pool-service"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Captcha share pool: turns browser proof-of-work captcha solves into Quantus mining shares"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+primitive-types = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true }
+warp = { workspace = true }
+
+# QUIC transport (same versions as miner-service)
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+
+# Protocol types from the node repo
+quantus-miner-api = { workspace = true }
+
+# Local crates
+pow-core = { path = "../pow-core" }

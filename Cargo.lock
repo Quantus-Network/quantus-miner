@@ -1995,6 +1995,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pool-service"
+version = "3.3.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "hex",
+ "log",
+ "pow-core",
+ "primitive-types 0.13.1",
+ "quantus-miner-api",
+ "quinn",
+ "rand 0.9.2",
+ "rustls 0.21.12",
+ "serde",
+ "serde_json",
+ "tokio",
+ "warp",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2806,6 +2827,14 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "solver-wasm"
+version = "3.3.1"
+dependencies = [
+ "primitive-types 0.13.1",
+ "qpow-math",
 ]
 
 [[package]]
