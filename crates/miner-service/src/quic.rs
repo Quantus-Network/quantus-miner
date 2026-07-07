@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 use engine_cpu::MinerEngine;
 use primitive_types::U512;
-use quinn::{ClientConfig, Endpoint};
-use rustls::client::ServerCertVerified;
 
 use quantus_miner_api::{
     read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult,
@@ -64,38 +62,16 @@ pub async fn connect_and_mine(
     }
 }
 
-/// Establish a QUIC connection to the node.
+/// Establish a QUIC connection to the node (shared transport crate).
 async fn establish_connection(
     addr: SocketAddr,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
-        .with_no_client_auth();
-
-    crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
-
-    let mut client_config = ClientConfig::new(Arc::new(crypto));
-
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-    transport_config.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
-    client_config.transport_config(Arc::new(transport_config));
-
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-    endpoint.set_default_client_config(client_config);
-
-    let connection = endpoint.connect(addr, "localhost")?.await?;
-    log::info!("⛏️ QUIC connection established to {}", addr);
-
-    log::info!("⛏️ Opening bidirectional stream to node...");
-    let (mut send, recv) = connection.open_bi().await?;
-
-    // Send Ready message to establish the stream
-    write_message(&mut send, &MinerMessage::Ready).await?;
-    log::info!("⛏️ Bidirectional stream established");
-
-    Ok((connection, send, recv))
+    let result = quic_transport::connect(addr).await?;
+    log::info!(
+        "⛏️ QUIC connection and bidirectional stream established to {}",
+        addr
+    );
+    Ok(result)
 }
 
 /// Helper to send a message while monitoring connection health.
@@ -320,22 +296,5 @@ async fn handle_connection(
             // Short sleep to yield when no messages
             _ = tokio::time::sleep(Duration::from_millis(1)) => {}
         }
-    }
-}
-
-/// Certificate verifier that accepts any certificate (for self-signed certs).
-struct InsecureCertVerifier;
-
-impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
     }
 }

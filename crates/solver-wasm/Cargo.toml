@@ -1,0 +1,13 @@
+[package]
+name = "solver-wasm"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Browser WASM solver for Quantus captcha shares (raw C ABI, no wasm-bindgen)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+primitive-types = { workspace = true }
+qpow-math = { workspace = true }

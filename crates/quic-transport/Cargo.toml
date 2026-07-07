@@ -1,0 +1,12 @@
+[package]
+name = "quic-transport"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Shared QUIC client transport for connecting to a quantus-node's external-miner endpoint"
+
+[dependencies]
+anyhow = { workspace = true }
+quantus-miner-api = { workspace = true }
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
