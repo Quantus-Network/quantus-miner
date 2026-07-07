@@ -17,6 +17,25 @@ pub const TOKEN_TTL: Duration = Duration::from_secs(300);
 /// 2^64 nonces is unreachable within a session TTL at browser hash rates.
 pub const SESSION_RANGE_BITS: u32 = 64;
 
+/// Caps on live entries in the in-memory maps. `/api/session` is free and
+/// unauthenticated, so without a ceiling a request flood becomes a memory-DoS
+/// on the anti-abuse service itself. At the ~300 bytes/entry ballpark the
+/// defaults bound each map to tens of MB.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_sessions: usize,
+    pub max_tokens: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_sessions: 100_000,
+            max_tokens: 100_000,
+        }
+    }
+}
+
 /// The job the pool is currently handing out to captcha sessions.
 #[derive(Debug, Clone)]
 pub struct Job {
@@ -72,7 +91,12 @@ pub struct PoolState {
     /// Difficulty for captcha shares (expected hashes per solve).
     pub share_difficulty: U512,
     /// Site secret checked by /siteverify.
+    ///
+    /// NOTE: single-tenant by design for now. All tokens are interchangeable
+    /// across any backend holding this secret; per-sitekey secrets land with
+    /// the host-registration follow-up.
     pub site_secret: String,
+    limits: Limits,
     /// Sender used to push network-difficulty solutions upstream.
     pub solution_tx: tokio::sync::mpsc::Sender<FoundBlock>,
 }
@@ -111,6 +135,7 @@ impl PoolState {
         share_difficulty: U512,
         site_secret: String,
         solution_tx: tokio::sync::mpsc::Sender<FoundBlock>,
+        limits: Limits,
     ) -> Arc<Self> {
         assert!(
             !share_difficulty.is_zero(),
@@ -124,6 +149,7 @@ impl PoolState {
             range_counter: AtomicU64::new(0),
             share_difficulty,
             site_secret,
+            limits,
             solution_tx,
         })
     }
@@ -145,8 +171,12 @@ impl PoolState {
     }
 
     /// Issue a new captcha session with a disjoint nonce range.
-    pub fn issue_session(&self) -> Option<Session> {
-        let job = self.current_job()?;
+    pub fn issue_session(&self) -> Result<Session, &'static str> {
+        let job = self.current_job().ok_or("no_job_available")?;
+
+        if self.sessions.lock().unwrap().len() >= self.limits.max_sessions {
+            return Err("at_capacity");
+        }
 
         // Carve the next disjoint 2^64-nonce slice. The counter is 64 bits and
         // slices are 2^64 wide, so slices live in the bottom 2^128 of the U512
@@ -170,7 +200,7 @@ impl PoolState {
             .unwrap()
             .insert(session.id.clone(), session.clone());
         self.stats.lock().unwrap().sessions_issued += 1;
-        Some(session)
+        Ok(session)
     }
 
     /// Verify a submitted share and, if valid, mint a single-use token.
@@ -211,7 +241,9 @@ impl PoolState {
 
         // Jackpot check: does this share meet full network difficulty for the
         // job it was issued against? Only submit if that job is still current.
-        let network_target = U512::MAX / session.job.network_difficulty;
+        // Target derivation delegates to pow-core's canonical JobContext.
+        let network_target =
+            pow_core::JobContext::new(session.job.header, session.job.network_difficulty).target;
         let mut block_found = false;
         if hash < network_target {
             let still_current = self
@@ -219,31 +251,50 @@ impl PoolState {
                 .map(|j| j.job_id == session.job.job_id)
                 .unwrap_or(false);
             if still_current {
-                block_found = true;
-                self.stats.lock().unwrap().blocks_found += 1;
                 log::info!(
                     "BLOCK FOUND by captcha share! job={} nonce={:x}",
                     session.job.job_id,
                     nonce
                 );
-                // Best-effort: if the channel is full the block is lost, which
-                // is acceptable for dust-revenue semantics.
-                let _ = self.solution_tx.try_send(FoundBlock {
+                // This is the revenue event: count it and be loud if the
+                // upstream queue can't take it.
+                match self.solution_tx.try_send(FoundBlock {
                     job_id: session.job.job_id.clone(),
                     nonce,
-                });
+                }) {
+                    Ok(()) => {
+                        block_found = true;
+                        self.stats.lock().unwrap().blocks_found += 1;
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "DROPPED block solution for job {}: upstream queue unavailable ({})",
+                            session.job.job_id,
+                            e
+                        );
+                    }
+                }
             }
         }
 
         let token = random_id();
-        self.tokens.lock().unwrap().insert(
-            token.clone(),
-            ShareToken {
-                created_at: Instant::now(),
-                created_unix: unix_now(),
-                consumed: false,
-            },
-        );
+        {
+            let mut tokens = self.tokens.lock().unwrap();
+            // A full token map means someone is farming shares faster than
+            // TTL expiry; refuse rather than grow without bound. The client
+            // paid hashes for this, so make the refusal explicit.
+            if tokens.len() >= self.limits.max_tokens {
+                return self.reject("at_capacity");
+            }
+            tokens.insert(
+                token.clone(),
+                ShareToken {
+                    created_at: Instant::now(),
+                    created_unix: unix_now(),
+                    consumed: false,
+                },
+            );
+        }
         self.stats.lock().unwrap().shares_accepted += 1;
         ShareOutcome::Accepted { token, block_found }
     }
@@ -251,7 +302,7 @@ impl PoolState {
     /// Redeem a share token (the reCAPTCHA/Turnstile "siteverify" semantics):
     /// valid exactly once, only with the correct site secret.
     pub fn verify_token(&self, secret: &str, token: &str) -> Result<u64, &'static str> {
-        if secret != self.site_secret {
+        if !constant_time_eq::constant_time_eq(secret.as_bytes(), self.site_secret.as_bytes()) {
             return Err("invalid_secret");
         }
         let mut tokens = self.tokens.lock().unwrap();
@@ -301,7 +352,12 @@ mod tests {
         share_difficulty: u64,
     ) -> (Arc<PoolState>, tokio::sync::mpsc::Receiver<FoundBlock>) {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let state = PoolState::new(U512::from(share_difficulty), "secret".into(), tx);
+        let state = PoolState::new(
+            U512::from(share_difficulty),
+            "secret".into(),
+            tx,
+            Limits::default(),
+        );
         state.set_job(Job {
             job_id: "1".into(),
             header: [7u8; 32],
@@ -391,7 +447,7 @@ mod tests {
     fn block_found_signalled_when_share_meets_network_difficulty() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         // Network difficulty == share difficulty == 2: any valid share is a block.
-        let state = PoolState::new(U512::from(2u64), "secret".into(), tx);
+        let state = PoolState::new(U512::from(2u64), "secret".into(), tx, Limits::default());
         state.set_job(Job {
             job_id: "1".into(),
             header: [9u8; 32],
@@ -408,6 +464,50 @@ mod tests {
             .expect("block solution should be queued upstream");
         assert_eq!(block.job_id, "1");
         assert_eq!(block.nonce, nonce);
+    }
+
+    #[test]
+    fn session_cap_rejects_flood() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let state = PoolState::new(
+            U512::from(1u64),
+            "secret".into(),
+            tx,
+            Limits {
+                max_sessions: 2,
+                max_tokens: 2,
+            },
+        );
+        state.set_job(Job {
+            job_id: "1".into(),
+            header: [7u8; 32],
+            network_difficulty: U512::MAX,
+        });
+        assert!(state.issue_session().is_ok());
+        assert!(state.issue_session().is_ok());
+        assert!(matches!(state.issue_session(), Err("at_capacity")));
+    }
+
+    #[test]
+    fn dropped_block_does_not_count_or_flag() {
+        // Zero-capacity channel: try_send always fails, simulating a stalled
+        // upstream. The share must still be accepted (the user did the work),
+        // but block_found must be false and blocks_found must stay 0.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx); // closed channel -> try_send errors
+        let state = PoolState::new(U512::from(2u64), "secret".into(), tx, Limits::default());
+        state.set_job(Job {
+            job_id: "1".into(),
+            header: [9u8; 32],
+            network_difficulty: U512::from(2u64),
+        });
+        let session = state.issue_session().unwrap();
+        let nonce = solve(&session);
+        match state.submit_share(&session.id, nonce) {
+            ShareOutcome::Accepted { block_found, .. } => assert!(!block_found),
+            ShareOutcome::Rejected(r) => panic!("rejected: {r}"),
+        }
+        assert_eq!(state.stats().blocks_found, 0);
     }
 
     fn matches_str(o: &ShareOutcome) -> &'static str {

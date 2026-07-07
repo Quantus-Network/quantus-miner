@@ -8,6 +8,7 @@ members = [
 	"crates/miner-telemetry",
 	"crates/pool-service",
 	"crates/pow-core",
+	"crates/quic-transport",
 	"crates/solver-wasm",
 ]
 default-members = ["crates/miner-cli"]

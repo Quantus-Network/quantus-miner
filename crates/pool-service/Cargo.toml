@@ -18,9 +18,12 @@ serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true }
 warp = { workspace = true }
 
-# QUIC transport (same versions as miner-service)
+# QUIC transport (shared with miner-service)
 quinn = "0.10"
-rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+quic-transport = { path = "../quic-transport" }
+
+# Constant-time comparison for the site secret
+constant_time_eq = "0.3"
 
 # Protocol types from the node repo
 quantus-miner-api = { workspace = true }

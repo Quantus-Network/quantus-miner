@@ -9,8 +9,6 @@ use primitive_types::U512;
 use quantus_miner_api::{
     read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult,
 };
-use quinn::{ClientConfig, Endpoint};
-use rustls::client::ServerCertVerified;
 use tokio::sync::mpsc::Receiver;
 
 use crate::state::{FoundBlock, Job, PoolState};
@@ -33,7 +31,7 @@ pub async fn run_node_client(
 
     loop {
         log::info!("Connecting to node at {}...", node_addr);
-        match establish_connection(node_addr).await {
+        match quic_transport::connect(node_addr).await {
             Ok((connection, mut send, mut recv)) => {
                 log::info!("Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);
@@ -163,46 +161,5 @@ pub async fn run_standalone(
                 }
             }
         }
-    }
-}
-
-async fn establish_connection(
-    addr: SocketAddr,
-) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
-        .with_no_client_auth();
-    crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
-
-    let mut client_config = ClientConfig::new(Arc::new(crypto));
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-    transport_config.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
-    client_config.transport_config(Arc::new(transport_config));
-
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-    endpoint.set_default_client_config(client_config);
-
-    let connection = endpoint.connect(addr, "localhost")?.await?;
-    let (mut send, recv) = connection.open_bi().await?;
-    write_message(&mut send, &MinerMessage::Ready).await?;
-    Ok((connection, send, recv))
-}
-
-/// Accepts any certificate (nodes use self-signed certs, same as miner-service).
-struct InsecureCertVerifier;
-
-impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
     }
 }

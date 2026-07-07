@@ -45,6 +45,14 @@ struct Args {
     /// Job rotation interval in standalone mode, seconds.
     #[arg(long, default_value = "20")]
     standalone_job_secs: u64,
+
+    /// Maximum live captcha sessions; /api/session returns 503 when full.
+    #[arg(long, default_value = "100000", env = "POOL_MAX_SESSIONS")]
+    max_sessions: usize,
+
+    /// Maximum live (unredeemed) share tokens; shares are refused when full.
+    #[arg(long, default_value = "100000", env = "POOL_MAX_TOKENS")]
+    max_tokens: usize,
 }
 
 #[tokio::main]
@@ -62,6 +70,10 @@ async fn main() -> anyhow::Result<()> {
         U512::from(args.share_difficulty),
         args.site_secret.clone(),
         solution_tx,
+        state::Limits {
+            max_sessions: args.max_sessions,
+            max_tokens: args.max_tokens,
+        },
     );
 
     // Periodic cleanup of expired sessions/tokens.
