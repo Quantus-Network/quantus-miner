@@ -67,14 +67,11 @@ impl SessionIssuerLimiter {
     pub fn gc(&self) {
         let cutoff = self.cfg.window * 2;
         let now = Instant::now();
-        self.by_ip
-            .lock()
-            .unwrap()
-            .retain(|_, w| {
-                w.window_start
-                    .map(|t| now.duration_since(t) < cutoff)
-                    .unwrap_or(true)
-            });
+        self.by_ip.lock().unwrap().retain(|_, w| {
+            w.window_start
+                .map(|t| now.duration_since(t) < cutoff)
+                .unwrap_or(true)
+        });
     }
 }
 

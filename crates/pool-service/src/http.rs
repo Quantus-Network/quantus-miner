@@ -83,7 +83,9 @@ pub async fn serve(
         .and(with_limiter.clone())
         .and(with_state.clone())
         .map(
-            |remote: Option<SocketAddr>, limiter: Arc<SessionIssuerLimiter>, state: Arc<PoolState>| {
+            |remote: Option<SocketAddr>,
+             limiter: Arc<SessionIssuerLimiter>,
+             state: Arc<PoolState>| {
                 let ip = remote
                     .map(|a| a.ip())
                     .unwrap_or(IpAddr::from([127, 0, 0, 1]));
