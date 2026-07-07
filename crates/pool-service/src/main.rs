@@ -6,15 +6,19 @@
 //! submits any share that happens to meet full network difficulty as a block.
 
 mod http;
+mod rate_limit;
 mod state;
 mod upstream;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use primitive_types::U512;
+
+use crate::rate_limit::SessionRateLimit;
 
 #[derive(Parser, Debug)]
 #[command(name = "pool-service", about = "Quantus captcha share pool")]
@@ -53,6 +57,10 @@ struct Args {
     /// Maximum live (unredeemed) share tokens; shares are refused when full.
     #[arg(long, default_value = "100000", env = "POOL_MAX_TOKENS")]
     max_tokens: usize,
+
+    /// Max /api/session issuances per client IP per minute.
+    #[arg(long, default_value = "60", env = "POOL_SESSIONS_PER_IP_PER_MIN")]
+    sessions_per_ip_per_min: u32,
 }
 
 #[tokio::main]
@@ -76,13 +84,20 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
-    // Periodic cleanup of expired sessions/tokens.
+    let limiter = Arc::new(rate_limit::SessionIssuerLimiter::new(SessionRateLimit {
+        max_per_ip: args.sessions_per_ip_per_min,
+        window: Duration::from_secs(60),
+    }));
+
+    // Periodic cleanup of expired sessions/tokens and stale rate-limit windows.
     {
         let state = state.clone();
+        let limiter = limiter.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 state.gc();
+                limiter.gc();
             }
         });
     }
@@ -106,6 +121,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    http::serve(state, args.http_addr, args.serve_dir).await;
+    http::serve(state, limiter, args.http_addr, args.serve_dir).await;
     Ok(())
 }

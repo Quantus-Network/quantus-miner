@@ -1,7 +1,7 @@
 //! HTTP API for the captcha widget (session/share) and for protected sites
 //! (siteverify), plus optional static file serving for the demo page.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,6 +9,7 @@ use primitive_types::U512;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
+use crate::rate_limit::SessionIssuerLimiter;
 use crate::state::{PoolState, ShareOutcome};
 
 #[derive(Serialize)]
@@ -60,35 +61,56 @@ struct SiteVerifyResponse {
     error_codes: Vec<&'static str>,
 }
 
-pub async fn serve(state: Arc<PoolState>, addr: SocketAddr, serve_dir: Option<PathBuf>) {
+pub async fn serve(
+    state: Arc<PoolState>,
+    limiter: Arc<SessionIssuerLimiter>,
+    addr: SocketAddr,
+    serve_dir: Option<PathBuf>,
+) {
     let with_state = {
         let state = state.clone();
         warp::any().map(move || state.clone())
+    };
+    let with_limiter = {
+        let limiter = limiter.clone();
+        warp::any().map(move || limiter.clone())
     };
 
     // POST /api/session -> new captcha challenge
     let session = warp::path!("api" / "session")
         .and(warp::post())
+        .and(warp::addr::remote())
+        .and(with_limiter.clone())
         .and(with_state.clone())
-        .map(|state: Arc<PoolState>| match state.issue_session() {
-            Err(reason) => reply_error(warp::http::StatusCode::SERVICE_UNAVAILABLE, reason),
-            Ok(s) => {
-                let target = U512::MAX / s.share_difficulty;
-                let expected = s.share_difficulty.min(U512::from(u64::MAX)).as_u64();
-                warp::reply::with_status(
-                    warp::reply::json(&SessionResponse {
-                        session_id: s.id,
-                        header_hash: hex::encode(s.job.header),
-                        nonce_start: format!("{:x}", s.nonce_start),
-                        nonce_end: format!("{:x}", s.nonce_end),
-                        share_target: format!("{:x}", target),
-                        expected_hashes: expected,
-                        expires_in_secs: crate::state::SESSION_TTL.as_secs(),
-                    }),
-                    warp::http::StatusCode::OK,
-                )
-            }
-        });
+        .map(
+            |remote: Option<SocketAddr>, limiter: Arc<SessionIssuerLimiter>, state: Arc<PoolState>| {
+                let ip = remote
+                    .map(|a| a.ip())
+                    .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+                if let Err(reason) = limiter.check(ip) {
+                    return reply_error(warp::http::StatusCode::TOO_MANY_REQUESTS, reason);
+                }
+                match state.issue_session() {
+                    Err(reason) => reply_error(warp::http::StatusCode::SERVICE_UNAVAILABLE, reason),
+                    Ok(s) => {
+                        let target = U512::MAX / s.share_difficulty;
+                        let expected = s.share_difficulty.min(U512::from(u64::MAX)).as_u64();
+                        warp::reply::with_status(
+                            warp::reply::json(&SessionResponse {
+                                session_id: s.id,
+                                header_hash: hex::encode(s.job.header),
+                                nonce_start: format!("{:x}", s.nonce_start),
+                                nonce_end: format!("{:x}", s.nonce_end),
+                                share_target: format!("{:x}", target),
+                                expected_hashes: expected,
+                                expires_in_secs: crate::state::SESSION_TTL.as_secs(),
+                            }),
+                            warp::http::StatusCode::OK,
+                        )
+                    }
+                }
+            },
+        );
 
     // POST /api/share -> verify a solved nonce, mint a token
     let share = warp::path!("api" / "share")
