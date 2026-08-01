@@ -325,7 +325,9 @@ ensure_rust() {
     return 0
   fi
   echo "Installing Rust toolchain (rustup) ..." >&2
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  # rustup writes the welcome banner to stdout — must not leak into $(download_miner).
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable >&2
   # shellcheck disable=SC1091
   source "${HOME}/.cargo/env"
   if ! command -v cargo >/dev/null 2>&1; then
@@ -350,13 +352,13 @@ download_miner_release() {
   local dest="${BIN_DIR}/quantus-miner"
   if [[ -x "${dest}" && "${FORCE_MINER_BUILD}" != "1" ]]; then
     echo "Using existing ${dest}" >&2
-    echo "${dest}"
+    printf '%s\n' "${dest}"
     return
   fi
   echo "Downloading miner release: ${MINER_URL}" >&2
   curl -fL "${MINER_URL}" -o "${dest}"
   chmod +x "${dest}"
-  echo "${dest}"
+  printf '%s\n' "${dest}"
 }
 
 # Clone MINER_BRANCH from MINER_REPO and cargo build -p miner-cli --release.
@@ -375,11 +377,11 @@ build_miner_from_git() {
   echo "Miner source: ${MINER_REPO} @ ${MINER_BRANCH}" >&2
   if [[ -d "${src}/.git" ]]; then
     git -C "${src}" remote set-url origin "${MINER_REPO}"
-    git -C "${src}" fetch --depth 1 origin "${MINER_BRANCH}"
-    git -C "${src}" checkout -f FETCH_HEAD
+    git -C "${src}" fetch --depth 1 origin "${MINER_BRANCH}" >&2
+    git -C "${src}" checkout -f FETCH_HEAD >&2
   else
     rm -rf "${src}"
-    if ! git clone --depth 1 --branch "${MINER_BRANCH}" "${MINER_REPO}" "${src}"; then
+    if ! git clone --depth 1 --branch "${MINER_BRANCH}" "${MINER_REPO}" "${src}" >&2; then
       echo "error: git clone failed for ${MINER_REPO} branch ${MINER_BRANCH}" >&2
       echo "Push the branch to origin, or set MINER_BRANCH / MINER_REPO." >&2
       exit 1
@@ -390,7 +392,7 @@ build_miner_from_git() {
   if [[ -x "${dest}" && "${FORCE_MINER_BUILD}" != "1" && -f "${rev_file}" ]]; then
     if [[ "$(cat "${rev_file}")" == "${built_rev}" ]]; then
       echo "Using existing ${dest} (rev ${built_rev})" >&2
-      echo "${dest}"
+      printf '%s\n' "${dest}"
       return
     fi
   fi
@@ -398,7 +400,7 @@ build_miner_from_git() {
   echo "Building quantus-miner (release, rev ${built_rev}) ..." >&2
   (
     cd "${src}"
-    cargo build -p miner-cli --release
+    cargo build -p miner-cli --release >&2
   )
   if [[ ! -x "${src}/target/release/quantus-miner" ]]; then
     echo "error: cargo build did not produce target/release/quantus-miner" >&2
@@ -409,7 +411,8 @@ build_miner_from_git() {
   chmod +x "${dest}"
   echo "${built_rev}" >"${rev_file}"
   echo "Built ${dest}" >&2
-  echo "${dest}"
+  # Sole stdout line — consumed by MINER_BIN="$(download_miner)"
+  printf '%s\n' "${dest}"
 }
 
 download_miner() {
@@ -431,7 +434,7 @@ download_node() {
   local dest="${BIN_DIR}/quantus-node"
   if [[ -x "${dest}" ]]; then
     echo "Using existing ${dest}" >&2
-    echo "${dest}"
+    printf '%s\n' "${dest}"
     return
   fi
 
@@ -456,7 +459,7 @@ download_node() {
   mv "${tmp}/quantus-node" "${dest}"
   chmod +x "${dest}"
   rm -rf "${tmp}"
-  echo "${dest}"
+  printf '%s\n' "${dest}"
 }
 
 stop_pidfile() {
@@ -482,7 +485,11 @@ trap cleanup EXIT
 
 ensure_nvidia_vulkan
 NODE_BIN="$(download_node)"
-MINER_BIN="$(download_miner)"
+MINER_BIN="$(download_miner | tail -n 1)"
+if [[ ! -x "${MINER_BIN}" ]]; then
+  echo "error: miner binary missing or not executable: '${MINER_BIN}'" >&2
+  exit 1
+fi
 
 # Fail fast with a clear hint if the host glibc is too old for the release binary.
 if ! "${NODE_BIN}" --version >/tmp/qnode-ver.txt 2>/tmp/qnode-ver.err; then
