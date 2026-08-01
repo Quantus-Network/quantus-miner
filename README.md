@@ -75,8 +75,9 @@ hashrate / utilization / VRAM / efficiency rows to a CSV:
 
 ```bash
 cd gpu-bench
-cp .env.example .env   # set REWARDS_INNER_HASH for full stack
-./setup.sh
+cp .env.example .env
+./setup.sh wormhole    # save inner_hash into .env
+./setup.sh             # native node + GPU miner (same host)
 ./record.sh --provider vast.ai --cost-per-hour 0.35
 ```
 
