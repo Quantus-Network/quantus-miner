@@ -113,13 +113,15 @@ fi
 EXIT_COMPUTE_ONLY=42
 
 find_libglx_nvidia() {
+  # Prefer exact .run extract over apt (apt major-version packages often
+  # fail vkCreateInstance against the host kernel module).
   local candidate
   for candidate in \
+    "${WORK_DIR}/nvidia-gl/libGLX_nvidia.so.0" \
     /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0 \
     /usr/lib64/libGLX_nvidia.so.0 \
     /usr/lib/libGLX_nvidia.so.0 \
-    /usr/local/nvidia/lib64/libGLX_nvidia.so.0 \
-    "${WORK_DIR}/nvidia-gl/libGLX_nvidia.so.0"; do
+    /usr/local/nvidia/lib64/libGLX_nvidia.so.0; do
     if [[ -e "${candidate}" ]]; then
       echo "${candidate}"
       return 0
@@ -128,41 +130,62 @@ find_libglx_nvidia() {
   ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ { print $NF; exit }' || true
 }
 
-# Many Community hosts only mount compute libs. Install matching graphics
-# userspace via apt, then (if needed) extract from the NVIDIA .run installer.
-install_nvidia_gl_userspace() {
-  local ver major dest
-  ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
-    | head -n 1 | tr -d '[:space:]')"
-  if [[ -z "${ver}" ]]; then
-    return 1
-  fi
-  major="${ver%%.*}"
-  dest="${WORK_DIR}/nvidia-gl"
+host_driver_version() {
+  nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+    | head -n 1 | tr -d '[:space:]'
+}
+
+vulkan_has_nvidia() {
+  command -v vulkaninfo >/dev/null 2>&1 || return 1
+  vulkaninfo --summary 2>/dev/null | grep -qiE 'NVIDIA|GeForce|Tesla|Quadro|RTX|A100|L4|L40'
+}
+
+write_nvidia_icd() {
+  local lib="$1"
+  local icd_dir="/usr/share/vulkan/icd.d"
+  local icd="${icd_dir}/nvidia_icd.json"
+  mkdir -p "${icd_dir}" /etc/vulkan/icd.d
+  cat >"${icd}" <<EOF
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "${lib}",
+        "api_version": "1.3"
+    }
+}
+EOF
+  cp -f "${icd}" /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null || true
+  export VK_ICD_FILENAMES="${icd}"
+  export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-all}"
+  export __GLX_VENDOR_LIBRARY_NAME=nvidia
+  local libdir
+  libdir="$(dirname "${lib}")"
+  export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  echo "NVIDIA Vulkan ICD: ${icd} -> ${lib}" >&2
+}
+
+# Download + extract the exact host driver userspace (matches nvidia-smi version).
+extract_nvidia_run_userspace() {
+  local ver="$1"
+  local dest="${WORK_DIR}/nvidia-gl"
   mkdir -p "${dest}"
 
-  if command -v apt-get >/dev/null 2>&1; then
-    echo "Trying apt libnvidia-gl-${major} (host driver ${ver}) ..." >&2
-    apt-get install -y -qq "libnvidia-gl-${major}" >/dev/null 2>&1 || true
-    if [[ -n "$(find_libglx_nvidia)" ]]; then
-      return 0
-    fi
-  fi
-
-  if [[ -e "${dest}/libGLX_nvidia.so.0" ]]; then
+  if [[ -e "${dest}/libGLX_nvidia.so.0" && -f "${dest}/.driver_version" ]] \
+    && [[ "$(cat "${dest}/.driver_version")" == "${ver}" ]]; then
+    echo "Using cached NVIDIA ${ver} userspace in ${dest}" >&2
     export LD_LIBRARY_PATH="${dest}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     return 0
   fi
 
-  echo "Extracting NVIDIA ${ver} userspace libs (compute-only host) ..." >&2
+  echo "Extracting NVIDIA ${ver} userspace libs (exact match for host driver) ..." >&2
   local tmp runfile url
   tmp="$(mktemp -d)"
   runfile="${tmp}/NVIDIA.run"
-  # GeForce/pro first; Tesla URL as fallback for datacenter hosts.
   for url in \
     "https://download.nvidia.com/XFree86/Linux-x86_64/${ver}/NVIDIA-Linux-x86_64-${ver}.run" \
     "https://us.download.nvidia.com/XFree86/Linux-x86_64/${ver}/NVIDIA-Linux-x86_64-${ver}.run" \
     "https://us.download.nvidia.com/tesla/${ver}/NVIDIA-Linux-x86_64-${ver}.run"; do
+    echo "  trying ${url}" >&2
     if curl -fL --connect-timeout 20 --max-time 600 "${url}" -o "${runfile}"; then
       break
     fi
@@ -175,7 +198,6 @@ install_nvidia_gl_userspace() {
   fi
 
   chmod +x "${runfile}"
-  # Extract only — do not install kernel modules into the container.
   if ! sh "${runfile}" --extract-only --target "${tmp}/extract" >/tmp/nvidia-extract.log 2>&1; then
     echo "error: NVIDIA .run extract failed; log:" >&2
     tail -n 40 /tmp/nvidia-extract.log >&2 || true
@@ -183,6 +205,8 @@ install_nvidia_gl_userspace() {
     return 1
   fi
 
+  rm -rf "${dest}"
+  mkdir -p "${dest}"
   local f
   for f in \
     libGLX_nvidia.so.* \
@@ -195,9 +219,8 @@ install_nvidia_gl_userspace() {
     libnvidia-rtcore.so.* \
     libnvoptix.so.*; do
     # shellcheck disable=SC2086
-    cp -n ${tmp}/extract/${f} "${dest}/" 2>/dev/null || true
+    cp -f ${tmp}/extract/${f} "${dest}/" 2>/dev/null || true
   done
-  # Stable SONAME links expected by the ICD.
   local so
   for so in libGLX_nvidia.so libEGL_nvidia.so; do
     if [[ ! -e "${dest}/${so}.0" ]]; then
@@ -209,19 +232,13 @@ install_nvidia_gl_userspace() {
     fi
   done
 
-  if [[ -f "${tmp}/extract/nvidia_icd.json" ]]; then
-    mkdir -p /usr/share/vulkan/icd.d
-    # Rewrite library_path to our extracted lib if needed later.
-    cp -f "${tmp}/extract/nvidia_icd.json" /usr/share/vulkan/icd.d/nvidia_icd.json || true
-  fi
-
-  echo "${dest}" >"${dest}/.ld_path"
+  echo "${ver}" >"${dest}/.driver_version"
   export LD_LIBRARY_PATH="${dest}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   echo "${dest}" >>/etc/ld.so.conf.d/nvidia-gl-bench.conf 2>/dev/null || true
   ldconfig 2>/dev/null || true
-
   rm -rf "${tmp}"
-  if [[ -e "${dest}/libGLX_nvidia.so.0" ]] || [[ -n "$(find_libglx_nvidia)" ]]; then
+
+  if [[ -e "${dest}/libGLX_nvidia.so.0" ]]; then
     echo "NVIDIA GL userspace ready in ${dest}" >&2
     return 0
   fi
@@ -248,59 +265,59 @@ ensure_nvidia_vulkan() {
   chmod 700 /tmp/runtime-root 2>/dev/null || true
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
 
-  local lib
+  local ver major lib
+  ver="$(host_driver_version)"
+  major="${ver%%.*}"
+
+  # 1) Host-mounted lib (best case).
   lib="$(find_libglx_nvidia)"
-  if [[ -z "${lib}" || ! -e "${lib}" ]]; then
-    echo "libGLX_nvidia.so.0 not mounted (compute-only host); installing userspace ..." >&2
-    if ! install_nvidia_gl_userspace; then
-      echo "error: NVIDIA Vulkan/GL library missing (libGLX_nvidia.so.0)." >&2
-      echo "exit ${EXIT_COMPUTE_ONLY}: sweep should retry on another host" >&2
-      exit "${EXIT_COMPUTE_ONLY}"
+  if [[ -n "${lib}" && -e "${lib}" ]]; then
+    write_nvidia_icd "${lib}"
+    if vulkan_has_nvidia; then
+      echo "Vulkan NVIDIA adapter OK (host mount)" >&2
+      return 0
     fi
-    lib="$(find_libglx_nvidia)"
+    echo "Host/apt libGLX present but vulkaninfo failed; trying exact .run extract ..." >&2
+    vulkaninfo --summary 2>&1 | tail -n 20 >&2 || true
+  else
+    echo "libGLX_nvidia.so.0 not mounted (compute-only host)" >&2
   fi
 
-  if [[ -z "${lib}" || ! -e "${lib}" ]]; then
-    echo "error: still no libGLX_nvidia.so.0 after userspace install" >&2
+  # 2) apt major package — often wrong patch level vs host (e.g. 580.95.05).
+  if [[ -n "${major}" ]] && command -v apt-get >/dev/null 2>&1; then
+    echo "Trying apt libnvidia-gl-${major} (host driver ${ver}) ..." >&2
+    apt-get install -y -qq "libnvidia-gl-${major}" >/dev/null 2>&1 || true
+    lib="$(find_libglx_nvidia)"
+    if [[ -n "${lib}" && -e "${lib}" ]]; then
+      write_nvidia_icd "${lib}"
+      if vulkan_has_nvidia; then
+        echo "Vulkan NVIDIA adapter OK (apt)" >&2
+        return 0
+      fi
+      echo "apt libnvidia-gl-${major} installed but vulkaninfo still fails (version skew?)" >&2
+    fi
+  fi
+
+  # 3) Exact driver .run extract — required on many Community compute-only hosts.
+  if [[ -z "${ver}" ]]; then
+    echo "error: cannot determine NVIDIA driver version" >&2
     exit "${EXIT_COMPUTE_ONLY}"
   fi
-
-  # Prefer extracted dir on LD_LIBRARY_PATH when we installed locally.
-  if [[ -d "${WORK_DIR}/nvidia-gl" ]]; then
-    export LD_LIBRARY_PATH="${WORK_DIR}/nvidia-gl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  if ! extract_nvidia_run_userspace "${ver}"; then
+    echo "error: failed to install matching NVIDIA GL userspace for ${ver}" >&2
+    exit "${EXIT_COMPUTE_ONLY}"
+  fi
+  lib="${WORK_DIR}/nvidia-gl/libGLX_nvidia.so.0"
+  write_nvidia_icd "${lib}"
+  if vulkan_has_nvidia; then
+    echo "Vulkan NVIDIA adapter OK (.run extract ${ver})" >&2
+    return 0
   fi
 
-  local icd_dir="/usr/share/vulkan/icd.d"
-  local icd="${icd_dir}/nvidia_icd.json"
-  mkdir -p "${icd_dir}" /etc/vulkan/icd.d
-  cat >"${icd}" <<EOF
-{
-    "file_format_version": "1.0.0",
-    "ICD": {
-        "library_path": "${lib}",
-        "api_version": "1.3"
-    }
-}
-EOF
-  cp -f "${icd}" /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null || true
-  echo "NVIDIA Vulkan ICD: ${icd} -> ${lib}" >&2
-
-  # Prefer NVIDIA ICD only (ignore any Mesa CPU ICDs that may already exist).
-  export VK_ICD_FILENAMES="${icd}"
-  export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-all}"
-  export __GLX_VENDOR_LIBRARY_NAME=nvidia
-
-  if command -v vulkaninfo >/dev/null 2>&1; then
-    if ! vulkaninfo --summary 2>/dev/null | grep -qiE 'NVIDIA|GeForce|Tesla|Quadro|RTX|A100|L4|L40'; then
-      echo "error: vulkaninfo sees no NVIDIA GPU (only software/CPU adapters?)." >&2
-      vulkaninfo --summary 2>&1 | tail -n 40 >&2 || true
-      echo "exit ${EXIT_COMPUTE_ONLY}: bad Vulkan host — sweep should retry" >&2
-      exit "${EXIT_COMPUTE_ONLY}"
-    fi
-    echo "Vulkan NVIDIA adapter OK" >&2
-  else
-    echo "warning: vulkan-tools not installed; skipping vulkaninfo check" >&2
-  fi
+  echo "error: vulkaninfo still sees no NVIDIA GPU after .run extract." >&2
+  vulkaninfo --summary 2>&1 | tail -n 40 >&2 || true
+  echo "exit ${EXIT_COMPUTE_ONLY}: bad Vulkan host — sweep should retry" >&2
+  exit "${EXIT_COMPUTE_ONLY}"
 }
 
 ensure_rust() {
