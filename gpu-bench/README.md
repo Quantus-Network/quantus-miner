@@ -1,7 +1,7 @@
 # GPU miner bench (provider-agnostic)
 
-Spin up a Quantus node + native GPU miner on any rented NVIDIA GPU host (Vast.ai,
-RunPod, etc.), sample hashrate / utilization / GPU specs, and append a row to
+Spin up a Quantus node + native GPU miner on any rented NVIDIA GPU host (Clore,
+RunPod, Vast.ai, etc.), sample hashrate / utilization / GPU specs, and append a row to
 [`results.csv`](results.csv) so we can answer “what hardware should we recommend?”
 
 No cloud APIs. You supply `cloud_provider` and `cost_per_hour`.
@@ -28,10 +28,14 @@ cp .env.example .env
 # paste inner_hash into .env as REWARDS_INNER_HASH
 
 ./setup.sh                   # native node + GPU miner on this host
-./record.sh --provider runpod --cost-per-hour 0.35
+./record.sh --provider clore --cost-per-hour 0.35    # or --provider runpod, vast, ...
 
 ./setup.sh stop
 ```
+
+Pass whatever marketplace you rented from as `--provider` (e.g. `clore`,
+`runpod`, `vast`) plus the machine's total `--cost-per-hour` in USD — the
+scripts have no provider-specific logic.
 
 `setup.sh` will:
 
