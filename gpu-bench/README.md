@@ -3,15 +3,21 @@
 Spin up a Quantus `--dev` node + GPU miner on a rented NVIDIA host, scrape
 Prometheus hashrate into [`results.csv`](results.csv), and compare hardware.
 
-## Release binaries
+## Miner binary (git build by default)
 
-The Linux miner release includes WGPU (same as a normal `cargo build -p miner-cli --release`):
+`remote-run.sh` / the RunPod sweep **clone + `cargo build -p miner-cli --release`**
+from a git branch (default `illuzen/gpu-bench`) so you can iterate without
+cutting a GitHub release. Push the branch before sweeping.
 
-`https://github.com/Quantus-Network/quantus-miner/releases/download/v3.3.1/quantus-miner-linux-x86_64`
+```bash
+export MINER_BRANCH=illuzen/gpu-bench   # default
+# escape hatch:
+# export MINER_SOURCE=release
+```
 
-`remote-run.sh` / the RunPod sweep download that plus the latest
-`quantus-node` linux x86_64 tarball from
-[chain releases](https://github.com/Quantus-Network/chain/releases/latest).
+`quantus-node` still comes from the latest
+[chain release](https://github.com/Quantus-Network/chain/releases/latest)
+linux x86_64 tarball. Container disk defaults to **50GB** for cargo `target/`.
 
 ## Same-host (manual)
 
@@ -51,7 +57,7 @@ drivers are on the host; the image just needs CUDA userspace + RunPod’s
 1. [Templates → New Template](https://www.console.runpod.io/user/templates)
 2. Image: e.g. `runpod/base:1.1.0-cuda1281-ubuntu2404` (use **24.04** — node needs GLIBC ≥ 2.38)
 3. Env: `NVIDIA_DRIVER_CAPABILITIES=all` (required for Vulkan/WGPU; compute-only → llvmpipe only)
-4. Container disk ~20GB (keep small on Community — large disks often 500), volume 0 unless you need persistence
+4. Container disk ~50GB if building miner from git (cargo `target/`); volume 0 unless you need persistence
 5. Expose **TCP 22** (SSH). `runpod/base` / `runpod/pytorch` already start `sshd`.
 6. Save → copy the template id → `export TEMPLATE_ID=...`
 
@@ -65,7 +71,7 @@ curl -sS -X POST https://rest.runpod.io/v1/templates \
     "name": "quantus-gpu-bench",
     "imageName": "runpod/base:1.1.0-cuda1281-ubuntu2404",
     "category": "NVIDIA",
-    "containerDiskInGb": 20,
+    "containerDiskInGb": 50,
     "volumeInGb": 0,
     "volumeMountPath": "/workspace",
     "ports": ["22/tcp", "9900/http"],
@@ -143,7 +149,8 @@ sweep or `record.sh` run, commit any new rows you want others to see.
 | `hashrate` | avg `miner_gpu_hash_rate` from `:9900/metrics` |
 | `gpu_utilization_pct` | avg `utilization.gpu` |
 | `cost_per_hour` | Pod `costPerHr` from API (sweep) or your flag |
-| `efficiency` | `hashrate / cost_per_hour` |
+| `cost_per_sec` | `cost_per_hour / 3600` |
+| `hash_per_dollar` | `hashrate / cost_per_sec` (hashes per $) |
 
 ## Scripts
 

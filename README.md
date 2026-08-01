@@ -71,7 +71,7 @@ cargo build -p miner-cli --release
 ### Cloud GPU bench + hardware spreadsheet
 
 Provider-agnostic tooling to run the miner on a rented NVIDIA GPU and append
-hashrate / utilization / VRAM / efficiency rows to a CSV:
+hashrate / utilization / VRAM / hash_per_dollar rows to a CSV:
 
 ```bash
 cd gpu-bench

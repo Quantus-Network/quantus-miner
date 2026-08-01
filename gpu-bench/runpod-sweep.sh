@@ -19,12 +19,16 @@ IMAGE_NAME="${IMAGE_NAME:-runpod/base:1.1.0-cuda1281-ubuntu2404}"
 TEMPLATE_ID="${TEMPLATE_ID:-}"
 # Community hosts often reject large disks ("machine does not have the resources").
 # Binaries + --dev chain fit in a small container disk; volume defaults to 0.
-CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-20}"
+# Cargo build of miner needs more disk than a release binary download.
+CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-50}"
 VOLUME_GB="${VOLUME_GB:-0}"
 DURATION="${DURATION:-60}"
 WARMUP_SECONDS="${WARMUP_SECONDS:-45}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
 REMOTE_DIR="${REMOTE_DIR:-/workspace/quantus-gpu-bench}"
+MINER_SOURCE="${MINER_SOURCE:-git}"
+MINER_REPO="${MINER_REPO:-https://github.com/Quantus-Network/quantus-miner.git}"
+MINER_BRANCH="${MINER_BRANCH:-illuzen/gpu-bench}"
 KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
 CREATE_RETRIES="${CREATE_RETRIES:-5}"
 CREATE_RETRY_SLEEP="${CREATE_RETRY_SLEEP:-15}"
@@ -55,6 +59,10 @@ Environment:
   OUT_DIR            Per-pod temp rows (default ./sweep-out, gitignored)
   KEEP_ON_FAILURE=1  Do not delete Pod if remote-run fails
   HOST_RETRIES       New Pods to try if host lacks Vulkan libs (default 3)
+  MINER_SOURCE       git (default, clone+build) or release
+  MINER_BRANCH       git ref to build (default: illuzen/gpu-bench)
+  MINER_REPO         git URL (default: Quantus-Network/quantus-miner)
+  CONTAINER_DISK_GB  default 50 (cargo build needs room)
 
 GPU type ids are RunPod strings, e.g.:
   "NVIDIA GeForce RTX 4090"
@@ -128,6 +136,12 @@ api() {
 is_no_capacity_error() {
   echo "${API_LAST_ERROR_BODY}" | grep -qiE \
     'no instances currently available|no .*available|out of capacity|insufficient.*capacity'
+}
+
+# True if gpuTypeIds value is not in the current REST API enum.
+is_invalid_gpu_type_error() {
+  echo "${API_LAST_ERROR_BODY}" | grep -qiE \
+    'gpuTypeIds/items/enum|value must be one of'
 }
 
 # Extract a field from a Pod JSON object. Fails clearly if body is an error list/object.
@@ -304,6 +318,13 @@ create_pod_with_cloud() {
     # No stock — shrinking disk will not help; stop this cloud tier.
     if is_no_capacity_error; then
       echo "no capacity for ${gpu_type} on ${cloud_type}" >&2
+      rm -f "${body_file}"
+      return 2
+    fi
+    # Stale gpuTypeId vs current RunPod schema — skip (update gpus.all.txt).
+    if is_invalid_gpu_type_error; then
+      echo "skip: invalid gpuTypeId for API schema: ${gpu_type}" >&2
+      echo "tip: refresh gpu-bench/gpus.all.txt from the RunPod /pods enum" >&2
       rm -f "${body_file}"
       return 2
     fi
@@ -534,13 +555,21 @@ run_one_attempt() {
   set +e
   ssh_cmd "${mode}" "${host}" "${port}" \
     "chmod +x '${REMOTE_DIR}/remote-run.sh' '${REMOTE_DIR}/record.sh' && \
-     WORK_DIR='${REMOTE_DIR}' '${REMOTE_DIR}/remote-run.sh' \
+     WORK_DIR='${REMOTE_DIR}' \
+     MINER_SOURCE='${MINER_SOURCE}' \
+     MINER_REPO='${MINER_REPO}' \
+     MINER_BRANCH='${MINER_BRANCH}' \
+     FORCE_MINER_BUILD='${FORCE_MINER_BUILD:-0}' \
+     '${REMOTE_DIR}/remote-run.sh' \
        --provider runpod \
        --cost-per-hour '${cost}' \
        --duration '${DURATION}' \
        --warmup '${WARMUP_SECONDS}' \
        --gpu-devices '${GPU_DEVICES}' \
-       --notes 'gpuTypeId=${gpu_type};pod=${pod_id};ssh=${mode}'"
+       --miner-source '${MINER_SOURCE}' \
+       --miner-repo '${MINER_REPO}' \
+       --miner-branch '${MINER_BRANCH}' \
+       --notes 'gpuTypeId=${gpu_type};pod=${pod_id};ssh=${mode};miner=${MINER_SOURCE}@${MINER_BRANCH}'"
   remote_rc=$?
   set -e
 
@@ -636,7 +665,7 @@ runpod_sweep_main() {
   mkdir -p "${OUT_DIR}"
   if [[ ! -f "${RESULTS_CSV}" ]]; then
     printf '%s\n' \
-      "timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,efficiency,sample_seconds,notes" \
+      "timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,sample_seconds,notes" \
       >"${RESULTS_CSV}"
   fi
 

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="${SCRIPT_DIR}/.run"
 ENV_FILE="${SCRIPT_DIR}/.env"
 RESULTS_CSV="${SCRIPT_DIR}/results.csv"
-CSV_HEADER="timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,efficiency,sample_seconds,notes"
+CSV_HEADER="timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,sample_seconds,notes"
 DEFAULT_MINER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 MODE="live"
@@ -127,12 +127,13 @@ query_sm_count() {
     *"RTX 4000 Ada"*|*"RTX 4000 SFF Ada"*) echo 48 ;;
     *"RTX 5000 Ada"*) echo 100 ;;
     *"RTX 6000 Ada"*) echo 142 ;;
+    *"RTX PRO 4000"*) echo 48 ;;
     *"RTX PRO 4500"*) echo 80 ;;
+    *"RTX PRO 5000"*) echo 140 ;;
     *"RTX PRO 6000"*) echo 188 ;;
     *"NVIDIA L4"|*" L4") echo 60 ;;
     *"L40S"*) echo 142 ;;
     *"L40"*) echo 142 ;;
-    *"NVIDIA A30"|*" A30") echo 56 ;;
     *"NVIDIA A40"|*" A40") echo 84 ;;
     *"A100"*) echo 108 ;;
     *"H100 NVL"*) echo 132 ;;
@@ -275,14 +276,29 @@ prompt_if_empty() {
   printf -v "${var_name}" '%s' "${value}"
 }
 
+# From cost_per_hour ($/hr) and hashrate (H/s):
+#   cost_per_sec     = cost_per_hour / 3600
+#   hash_per_dollar  = hashrate / cost_per_sec    (hashes per $)
+compute_cost_metrics() {
+  local hashrate="$1"
+  local cost_per_hour="$2"
+  awk -v h="${hashrate}" -v c="${cost_per_hour}" 'BEGIN {
+    if (c+0 <= 0) { print ""; print ""; exit }
+    cps = c / 3600
+    hpd = h / cps
+    printf "%.10f\n%.6f\n", cps, hpd
+  }'
+}
+
 emit_row() {
   local timestamp="$1"
   local hashrate="$2"
   local util_avg="$3"
-  local efficiency="$4"
+  local cost_per_sec="$4"
+  local hash_per_dollar="$5"
 
   local row
-  row="$(csv_escape "${timestamp}"),$(csv_escape "${PROVIDER}"),$(csv_escape "${GPU_MODEL}"),$(csv_escape "${VRAM_MB}"),$(csv_escape "${SM_COUNT}"),$(csv_escape "${DRIVER_VERSION}"),$(csv_escape "${hashrate}"),$(csv_escape "${util_avg}"),$(csv_escape "${COST_PER_HOUR}"),$(csv_escape "${efficiency}"),$(csv_escape "${DURATION}"),$(csv_escape "${NOTES}")"
+  row="$(csv_escape "${timestamp}"),$(csv_escape "${PROVIDER}"),$(csv_escape "${GPU_MODEL}"),$(csv_escape "${VRAM_MB}"),$(csv_escape "${SM_COUNT}"),$(csv_escape "${DRIVER_VERSION}"),$(csv_escape "${hashrate}"),$(csv_escape "${util_avg}"),$(csv_escape "${COST_PER_HOUR}"),$(csv_escape "${cost_per_sec}"),$(csv_escape "${hash_per_dollar}"),$(csv_escape "${DURATION}"),$(csv_escape "${NOTES}")"
 
   echo "${CSV_HEADER}"
   echo "${row}"
@@ -343,14 +359,15 @@ run_live() {
   fi
   hashrate="$(awk -v h="${hashrate}" 'BEGIN { printf "%.6f", h }')"
 
-  local efficiency
-  efficiency="$(awk -v h="${hashrate}" -v c="${COST_PER_HOUR}" 'BEGIN {
-    if (c+0 > 0) printf "%.6f", h / c
-  }')"
+  local cost_per_sec hash_per_dollar
+  {
+    read -r cost_per_sec
+    read -r hash_per_dollar
+  } < <(compute_cost_metrics "${hashrate}" "${COST_PER_HOUR}")
 
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  emit_row "${ts}" "${hashrate}" "${util_avg}" "${efficiency}"
+  emit_row "${ts}" "${hashrate}" "${util_avg}" "${cost_per_sec}" "${hash_per_dollar}"
 }
 
 run_benchmark() {
@@ -397,14 +414,15 @@ run_benchmark() {
     util_avg="$(awk -v u="${util_avg}" 'BEGIN { printf "%.2f", u }')"
   fi
 
-  local efficiency
-  efficiency="$(awk -v h="${hashrate}" -v c="${COST_PER_HOUR}" 'BEGIN {
-    if (c+0 > 0) printf "%.6f", h / c
-  }')"
+  local cost_per_sec hash_per_dollar
+  {
+    read -r cost_per_sec
+    read -r hash_per_dollar
+  } < <(compute_cost_metrics "${hashrate}" "${COST_PER_HOUR}")
 
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  emit_row "${ts}" "${hashrate}" "${util_avg}" "${efficiency}"
+  emit_row "${ts}" "${hashrate}" "${util_avg}" "${cost_per_sec}" "${hash_per_dollar}"
 }
 
 # --- args ---

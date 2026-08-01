@@ -74,8 +74,9 @@ print_ssh_hint() {
   echo "On the pod:"
   cat <<EOF
   cd ${REMOTE_DIR}
-  # full automated path (edit local remote-run.sh, re-upload, re-run):
+  # builds miner from git (MINER_BRANCH=illuzen/gpu-bench) + release node:
   bash -x ./remote-run.sh --cost-per-hour ${cost} --duration 30 --warmup 20
+  # FORCE_MINER_BUILD=1 ./remote-run.sh ...   # after pushing new commits
 
   # Vulkan sanity:
   nvidia-smi

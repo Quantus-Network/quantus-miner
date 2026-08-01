@@ -1,5 +1,6 @@
-# Full RunPod NVIDIA gpuTypeId list (AMD omitted — WGPU Vulkan path is NVIDIA).
-# Source: https://docs.runpod.io/references/gpu-types
+# RunPod NVIDIA gpuTypeId list (must match REST POST /pods enum).
+# AMD omitted — WGPU Vulkan path is NVIDIA.
+# Refresh from API errors or https://docs.runpod.io/references/gpu-types
 # Usage: ./runpod-sweep.sh --gpus-file gpus.all.txt
 
 # Consumer / GeForce
@@ -26,7 +27,9 @@ NVIDIA RTX 4000 Ada Generation
 NVIDIA RTX 4000 SFF Ada Generation
 NVIDIA RTX 5000 Ada Generation
 NVIDIA RTX 6000 Ada Generation
+NVIDIA RTX PRO 4000 Blackwell
 NVIDIA RTX PRO 4500 Blackwell
+NVIDIA RTX PRO 5000 Blackwell
 NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
 NVIDIA RTX PRO 6000 Blackwell Server Edition
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition
@@ -35,9 +38,9 @@ NVIDIA RTX PRO 6000 Blackwell Workstation Edition
 NVIDIA L4
 NVIDIA L40
 NVIDIA L40S
-NVIDIA A30
 NVIDIA A40
 NVIDIA A100 80GB PCIe
+NVIDIA A100-SXM4-40GB
 NVIDIA A100-SXM4-80GB
 NVIDIA H100 PCIe
 NVIDIA H100 NVL
@@ -46,6 +49,6 @@ NVIDIA H200
 NVIDIA H200 NVL
 NVIDIA B200
 NVIDIA B300 SXM6 AC
+NVIDIA B300 SXM6 AC MIG 1g.34gb
 Tesla V100-PCIE-16GB
 Tesla V100-SXM2-16GB
-Tesla V100-SXM2-32GB

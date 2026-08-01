@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run on a GPU host (e.g. RunPod): fetch release binaries, start --dev node +
-# GPU miner, sample Prometheus into results.csv.
+# Run on a GPU host (e.g. RunPod): fetch node release + build miner from git,
+# start --dev node + GPU miner, sample Prometheus into results.csv.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,8 +9,14 @@ BIN_DIR="${WORK_DIR}/bin"
 RUN_DIR="${WORK_DIR}/.run"
 RESULTS_CSV="${WORK_DIR}/results.csv"
 
+# Miner: default builds from git (iterate without re-releasing).
+# MINER_SOURCE=release still downloads a GitHub release binary.
+MINER_SOURCE="${MINER_SOURCE:-git}"
+MINER_REPO="${MINER_REPO:-https://github.com/Quantus-Network/quantus-miner.git}"
+MINER_BRANCH="${MINER_BRANCH:-illuzen/gpu-bench}"
 MINER_VERSION="${MINER_VERSION:-v3.3.1}"
 MINER_URL="${MINER_URL:-https://github.com/Quantus-Network/quantus-miner/releases/download/${MINER_VERSION}/quantus-miner-linux-x86_64}"
+FORCE_MINER_BUILD="${FORCE_MINER_BUILD:-0}"
 NODE_URL="${NODE_URL:-}" # optional override; default = latest chain release
 
 PROVIDER="${PROVIDER:-runpod}"
@@ -27,17 +33,23 @@ usage() {
 Usage: ./remote-run.sh [options]
 
   --provider NAME         cloud_provider column (default: runpod)
-  --cost-per-hour USD     required for efficiency column
+  --cost-per-hour USD     required for hash_per_dollar column
   --duration SECONDS      Prometheus sample window (default: 60)
   --gpu-devices N         default 1
   --warmup SECONDS        wait after miner start before sampling (default: 30)
   --notes TEXT
-  --miner-url URL         override miner binary URL
+  --miner-branch REF      git branch/tag/commit to build (default: illuzen/gpu-bench)
+  --miner-repo URL        git remote (default: Quantus-Network/quantus-miner)
+  --miner-source git|release
+                          git = clone+cargo build (default); release = binary URL
+  --miner-url URL         release binary URL (with --miner-source release)
+  --force-miner-build     rebuild even if binary exists
   --help
 
-Downloads linux x86_64 release binaries, runs quantus-node --dev with
---miner-listen-port, runs quantus-miner against 127.0.0.1, then samples
-:9900/metrics into results.csv (via record.sh --live).
+Builds quantus-miner from git (or downloads a release), downloads quantus-node,
+runs --dev + GPU miner, samples :9900/metrics into results.csv.
+
+Env: MINER_SOURCE, MINER_REPO, MINER_BRANCH, FORCE_MINER_BUILD, MINER_URL, NODE_URL
 EOF
 }
 
@@ -56,7 +68,11 @@ while [[ $# -gt 0 ]]; do
     --gpu-devices) GPU_DEVICES="${2:-}"; shift 2 ;;
     --warmup) WARMUP_SECONDS="${2:-}"; shift 2 ;;
     --notes) NOTES="${2:-}"; shift 2 ;;
-    --miner-url) MINER_URL="${2:-}"; shift 2 ;;
+    --miner-branch) MINER_BRANCH="${2:-}"; shift 2 ;;
+    --miner-repo) MINER_REPO="${2:-}"; shift 2 ;;
+    --miner-source) MINER_SOURCE="${2:-}"; shift 2 ;;
+    --miner-url) MINER_URL="${2:-}"; MINER_SOURCE="release"; shift 2 ;;
+    --force-miner-build) FORCE_MINER_BUILD=1; shift ;;
     --node-url) NODE_URL="${2:-}"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *)
@@ -287,17 +303,111 @@ EOF
   fi
 }
 
-download_miner() {
+ensure_rust() {
+  if command -v cargo >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Installing Rust toolchain (rustup) ..." >&2
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  # shellcheck disable=SC1091
+  source "${HOME}/.cargo/env"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo not available after rustup install" >&2
+    exit 1
+  fi
+}
+
+ensure_build_deps() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 0
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null 2>&1 || true
+  apt-get install -y -qq \
+    git curl ca-certificates build-essential pkg-config libssl-dev \
+    >/dev/null 2>&1 || \
+    apt-get install -y -qq git curl build-essential pkg-config libssl-dev || true
+}
+
+download_miner_release() {
   local dest="${BIN_DIR}/quantus-miner"
-  if [[ -x "${dest}" ]]; then
+  if [[ -x "${dest}" && "${FORCE_MINER_BUILD}" != "1" ]]; then
     echo "Using existing ${dest}" >&2
     echo "${dest}"
     return
   fi
-  echo "Downloading miner: ${MINER_URL}" >&2
+  echo "Downloading miner release: ${MINER_URL}" >&2
   curl -fL "${MINER_URL}" -o "${dest}"
   chmod +x "${dest}"
   echo "${dest}"
+}
+
+# Clone MINER_BRANCH from MINER_REPO and cargo build -p miner-cli --release.
+build_miner_from_git() {
+  local dest="${BIN_DIR}/quantus-miner"
+  local src="${WORK_DIR}/quantus-miner-src"
+  local rev_file="${BIN_DIR}/quantus-miner.rev"
+  local built_rev=""
+
+  ensure_build_deps
+  require_cmd git
+  ensure_rust
+  # shellcheck disable=SC1091
+  [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
+
+  echo "Miner source: ${MINER_REPO} @ ${MINER_BRANCH}" >&2
+  if [[ -d "${src}/.git" ]]; then
+    git -C "${src}" remote set-url origin "${MINER_REPO}"
+    git -C "${src}" fetch --depth 1 origin "${MINER_BRANCH}"
+    git -C "${src}" checkout -f FETCH_HEAD
+  else
+    rm -rf "${src}"
+    if ! git clone --depth 1 --branch "${MINER_BRANCH}" "${MINER_REPO}" "${src}"; then
+      echo "error: git clone failed for ${MINER_REPO} branch ${MINER_BRANCH}" >&2
+      echo "Push the branch to origin, or set MINER_BRANCH / MINER_REPO." >&2
+      exit 1
+    fi
+  fi
+
+  built_rev="$(git -C "${src}" rev-parse HEAD)"
+  if [[ -x "${dest}" && "${FORCE_MINER_BUILD}" != "1" && -f "${rev_file}" ]]; then
+    if [[ "$(cat "${rev_file}")" == "${built_rev}" ]]; then
+      echo "Using existing ${dest} (rev ${built_rev})" >&2
+      echo "${dest}"
+      return
+    fi
+  fi
+
+  echo "Building quantus-miner (release, rev ${built_rev}) ..." >&2
+  (
+    cd "${src}"
+    cargo build -p miner-cli --release
+  )
+  if [[ ! -x "${src}/target/release/quantus-miner" ]]; then
+    echo "error: cargo build did not produce target/release/quantus-miner" >&2
+    exit 1
+  fi
+  mkdir -p "${BIN_DIR}"
+  cp -f "${src}/target/release/quantus-miner" "${dest}"
+  chmod +x "${dest}"
+  echo "${built_rev}" >"${rev_file}"
+  echo "Built ${dest}" >&2
+  echo "${dest}"
+}
+
+download_miner() {
+  case "${MINER_SOURCE}" in
+    git | build | source)
+      build_miner_from_git
+      ;;
+    release | binary)
+      download_miner_release
+      ;;
+    *)
+      echo "error: unknown MINER_SOURCE=${MINER_SOURCE} (use git or release)" >&2
+      exit 1
+      ;;
+  esac
 }
 
 download_node() {

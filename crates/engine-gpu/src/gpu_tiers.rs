@@ -41,35 +41,185 @@ impl CompiledGpuTier {
 // Use word boundaries (\b) to avoid substring issues like "550" matching "5500"
 
 const NVIDIA_TIERS: &[GpuTier] = &[
-    // Blackwell (RTX 50 series)
+    // --- Workstation / datacenter first (avoid "rtx 40" / "rtx 50" substring traps) ---
+    // Blackwell PRO (e.g. "NVIDIA RTX PRO 6000 Blackwell Server Edition")
     GpuTier {
-        pattern: r"\b50[89]0\b",
+        pattern: r"rtx pro 6000|pro 6000 blackwell",
+        name: "NVIDIA RTX PRO 6000 (Blackwell)",
+        workgroup_divisor: 6,
+        min_workgroups: 5120,
+    },
+    GpuTier {
+        pattern: r"rtx pro 5000|pro 5000 blackwell",
+        name: "NVIDIA RTX PRO 5000 (Blackwell)",
+        workgroup_divisor: 7,
+        min_workgroups: 4608,
+    },
+    GpuTier {
+        pattern: r"rtx pro 4500|pro 4500 blackwell",
+        name: "NVIDIA RTX PRO 4500 (Blackwell)",
+        workgroup_divisor: 8,
+        min_workgroups: 4096,
+    },
+    GpuTier {
+        pattern: r"rtx pro 4000|pro 4000 blackwell|rtx pro",
+        name: "NVIDIA RTX PRO (Blackwell)",
+        workgroup_divisor: 9,
+        min_workgroups: 3584,
+    },
+    // Ada Lovelace workstation (must precede consumer `\brtx 50xx` / `\brtx 40xx`)
+    GpuTier {
+        pattern: r"rtx 6000 ada|6000 ada generation",
+        name: "NVIDIA RTX 6000 Ada (Workstation)",
+        workgroup_divisor: 8,
+        min_workgroups: 4096,
+    },
+    GpuTier {
+        pattern: r"rtx 5000 ada|5000 ada generation",
+        name: "NVIDIA RTX 5000 Ada (Workstation)",
+        workgroup_divisor: 9,
+        min_workgroups: 3584,
+    },
+    GpuTier {
+        pattern: r"rtx 4000 ada|4000 ada generation|4000 sff ada",
+        name: "NVIDIA RTX 4000 Ada (Workstation)",
+        workgroup_divisor: 11,
+        min_workgroups: 2560,
+    },
+    GpuTier {
+        pattern: r"rtx 2000 ada|2000 ada generation",
+        name: "NVIDIA RTX 2000 Ada (Workstation)",
+        workgroup_divisor: 14,
+        min_workgroups: 1536,
+    },
+    // Datacenter — largest / newest first. L40S before L40 before L4.
+    GpuTier {
+        pattern: r"\bb300\b|\bb200\b",
+        name: "NVIDIA B200/B300 (Blackwell DC)",
+        workgroup_divisor: 6,
+        min_workgroups: 5120,
+    },
+    GpuTier {
+        pattern: r"\bh200\b",
+        name: "NVIDIA H200 (Hopper)",
+        workgroup_divisor: 7,
+        min_workgroups: 4608,
+    },
+    GpuTier {
+        pattern: r"\bh100\b",
+        name: "NVIDIA H100 (Hopper)",
+        workgroup_divisor: 7,
+        min_workgroups: 4608,
+    },
+    GpuTier {
+        pattern: r"\ba100\b",
+        name: "NVIDIA A100 (Ampere DC)",
+        workgroup_divisor: 8,
+        min_workgroups: 4096,
+    },
+    GpuTier {
+        pattern: r"\bl40s\b",
+        name: "NVIDIA L40S (Ada DC)",
+        workgroup_divisor: 8,
+        min_workgroups: 4096,
+    },
+    GpuTier {
+        pattern: r"\bl40\b",
+        name: "NVIDIA L40 (Ada DC)",
+        workgroup_divisor: 8,
+        min_workgroups: 4096,
+    },
+    GpuTier {
+        pattern: r"\ba40\b",
+        name: "NVIDIA A40 (Ampere DC)",
+        workgroup_divisor: 10,
+        min_workgroups: 3072,
+    },
+    GpuTier {
+        pattern: r"\bl4\b",
+        name: "NVIDIA L4 (Ada DC)",
+        workgroup_divisor: 11,
+        min_workgroups: 2560,
+    },
+    GpuTier {
+        pattern: r"\ba30\b",
+        name: "NVIDIA A30 (Ampere DC)",
+        workgroup_divisor: 12,
+        min_workgroups: 2048,
+    },
+    // Ampere workstation (RTX Axxxx) — split by class; was one shared pro bucket
+    GpuTier {
+        pattern: r"rtx a6000|\ba6000\b",
+        name: "NVIDIA RTX A6000 (Ampere Pro)",
+        workgroup_divisor: 10,
+        min_workgroups: 3072,
+    },
+    GpuTier {
+        pattern: r"rtx a5000|\ba5000\b",
+        name: "NVIDIA RTX A5000 (Ampere Pro)",
+        workgroup_divisor: 11,
+        min_workgroups: 2560,
+    },
+    GpuTier {
+        pattern: r"rtx a4500|\ba4500\b",
+        name: "NVIDIA RTX A4500 (Ampere Pro)",
+        workgroup_divisor: 11,
+        min_workgroups: 2560,
+    },
+    GpuTier {
+        pattern: r"rtx a4000|\ba4000\b",
+        name: "NVIDIA RTX A4000 (Ampere Pro)",
+        workgroup_divisor: 12,
+        min_workgroups: 2048,
+    },
+    GpuTier {
+        pattern: r"rtx a2000|\ba2000\b",
+        name: "NVIDIA RTX A2000 (Ampere Pro)",
+        workgroup_divisor: 16,
+        min_workgroups: 1024,
+    },
+    GpuTier {
+        pattern: r"rtx a\d{4}",
+        name: "NVIDIA RTX A-series (Ampere Pro)",
+        workgroup_divisor: 12,
+        min_workgroups: 2048,
+    },
+    GpuTier {
+        pattern: r"tesla|\bv100\b|quadro",
+        name: "NVIDIA Tesla/Quadro (Legacy Pro)",
+        workgroup_divisor: 14,
+        min_workgroups: 1536,
+    },
+    // --- GeForce consumer ---
+    // Blackwell (RTX 50 series). Do NOT use bare "rtx 50" (matches "RTX 5000 Ada").
+    GpuTier {
+        pattern: r"\b50[89]0\b|\brtx 50[89]0\b",
         name: "NVIDIA RTX 50 Flagship (Blackwell)",
         workgroup_divisor: 6,
         min_workgroups: 5120,
     },
     GpuTier {
-        pattern: r"\b50[67]0\b|rtx 50",
+        pattern: r"\b50[67]0\b|\brtx 50[67]0\b",
         name: "NVIDIA RTX 50 (Blackwell)",
         workgroup_divisor: 7,
         min_workgroups: 4608,
     },
-    // Ada Lovelace (RTX 40 series)
+    // Ada Lovelace (RTX 40 series). Do NOT use bare "rtx 40" (matches "RTX 4000 Ada").
     GpuTier {
-        pattern: r"\b40[89]0\b",
+        pattern: r"\b40[89]0\b|\brtx 40[89]0\b",
         name: "NVIDIA RTX 40 Flagship (Ada)",
         workgroup_divisor: 8,
         min_workgroups: 4096,
     },
     GpuTier {
-        pattern: r"\b40[67]0\b|rtx 40",
+        pattern: r"\b40[67]0\b|\brtx 40[67]0\b",
         name: "NVIDIA RTX 40 (Ada)",
         workgroup_divisor: 10,
         min_workgroups: 3072,
     },
     // Ampere/Turing (RTX 30/20 series)
     GpuTier {
-        pattern: r"\b30[5-9]0\b|\b20[6-8]0\b|rtx 30|rtx 20",
+        pattern: r"\b30[5-9]0\b|\b20[6-8]0\b|\brtx 30[5-9]0\b|\brtx 20[6-8]0\b",
         name: "NVIDIA RTX 30/20 (Ampere/Turing)",
         workgroup_divisor: 12,
         min_workgroups: 2048,
@@ -120,13 +270,6 @@ const NVIDIA_TIERS: &[GpuTier] = &[
         name: "NVIDIA GT (Entry-Level)",
         workgroup_divisor: 28,
         min_workgroups: 256,
-    },
-    // Professional
-    GpuTier {
-        pattern: r"quadro|rtx a\d|tesla|\ba100\b|\bh100\b|\bl4\b",
-        name: "NVIDIA Quadro/Professional",
-        workgroup_divisor: 10,
-        min_workgroups: 2560,
     },
 ];
 
@@ -646,6 +789,63 @@ mod tests {
         // GTX 10 series
         let tier = detect_gpu_tier("NVIDIA GeForce GTX 1080 Ti", 0x10DE, false);
         assert_eq!(tier.name, "NVIDIA GTX 16/10 (Turing/Pascal)");
+    }
+
+    #[test]
+    fn test_nvidia_ada_workstation_not_confused_with_geforce() {
+        // Must not match bare "rtx 40" / "rtx 50" GeForce tiers.
+        let tier = detect_gpu_tier("NVIDIA RTX 4000 Ada Generation", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 4000 Ada (Workstation)");
+        assert!(!tier.is_fallback);
+
+        let tier = detect_gpu_tier("NVIDIA RTX 5000 Ada Generation", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 5000 Ada (Workstation)");
+        assert!(!tier.is_fallback);
+
+        let tier = detect_gpu_tier("NVIDIA RTX 6000 Ada Generation", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 6000 Ada (Workstation)");
+        assert!(!tier.is_fallback);
+    }
+
+    #[test]
+    fn test_nvidia_ampere_pro_split_by_class() {
+        let a2000 = detect_gpu_tier("NVIDIA RTX A2000", 0x10DE, false);
+        assert_eq!(a2000.name, "NVIDIA RTX A2000 (Ampere Pro)");
+        assert_eq!(a2000.workgroup_divisor, 16);
+
+        let a4500 = detect_gpu_tier("NVIDIA RTX A4500", 0x10DE, false);
+        assert_eq!(a4500.name, "NVIDIA RTX A4500 (Ampere Pro)");
+        assert_eq!(a4500.workgroup_divisor, 11);
+
+        let a6000 = detect_gpu_tier("NVIDIA RTX A6000", 0x10DE, false);
+        assert_eq!(a6000.name, "NVIDIA RTX A6000 (Ampere Pro)");
+        assert_eq!(a6000.workgroup_divisor, 10);
+
+        // Smaller cards should use a more conservative (higher) divisor.
+        assert!(a2000.workgroup_divisor > a4500.workgroup_divisor);
+        assert!(a4500.workgroup_divisor >= a6000.workgroup_divisor);
+    }
+
+    #[test]
+    fn test_nvidia_datacenter_l40_before_l4() {
+        let l4 = detect_gpu_tier("NVIDIA L4", 0x10DE, false);
+        assert_eq!(l4.name, "NVIDIA L4 (Ada DC)");
+
+        let l40 = detect_gpu_tier("NVIDIA L40", 0x10DE, false);
+        assert_eq!(l40.name, "NVIDIA L40 (Ada DC)");
+
+        let l40s = detect_gpu_tier("NVIDIA L40S", 0x10DE, false);
+        assert_eq!(l40s.name, "NVIDIA L40S (Ada DC)");
+
+        let h100 = detect_gpu_tier("NVIDIA H100 80GB HBM3", 0x10DE, false);
+        assert_eq!(h100.name, "NVIDIA H100 (Hopper)");
+
+        let pro = detect_gpu_tier(
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            0x10DE,
+            false,
+        );
+        assert_eq!(pro.name, "NVIDIA RTX PRO 6000 (Blackwell)");
     }
 
     #[test]
