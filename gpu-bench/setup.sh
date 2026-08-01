@@ -239,7 +239,7 @@ ensure_node_key() {
   local key_file="${RUN_DIR}/node-keys/key_node"
   mkdir -p "$(dirname "${key_file}")"
   if [[ ! -f "${key_file}" ]]; then
-    echo "Generating node key at ${key_file} ..."
+    echo "Generating node key at ${key_file} ..." >&2
     "${node_bin}" key generate-node-key --file "${key_file}"
   fi
   echo "${key_file}"

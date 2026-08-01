@@ -79,11 +79,10 @@ query_gpu_static() {
   local line
   if ! line="$(nvidia-smi --query-gpu=name,memory.total,multiprocessor_count,driver_version \
     --format=csv,noheader,nounits 2>/dev/null | head -n 1)"; then
-    echo "error: failed to query GPU via nvidia-smi" >&2
-    exit 1
+    line=""
   fi
   if [[ -z "${line}" ]]; then
-    # Older drivers may lack multiprocessor_count
+    # Some drivers (e.g. 580.x) do not support multiprocessor_count
     line="$(nvidia-smi --query-gpu=name,memory.total,driver_version \
       --format=csv,noheader,nounits 2>/dev/null | head -n 1)"
     GPU_MODEL="$(echo "${line}" | awk -F', ' '{print $1}')"
