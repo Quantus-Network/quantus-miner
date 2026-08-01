@@ -68,6 +68,22 @@ cargo build -p miner-cli --release
 - **Linux**: `nvidia-smi` (NVIDIA) or `radeontop` (AMD)  
 - **Windows**: Task Manager GPU tab
 
+### Cloud GPU bench + hardware spreadsheet
+
+Provider-agnostic tooling to run the miner on a rented NVIDIA GPU and append
+hashrate / utilization / VRAM / efficiency rows to a CSV:
+
+```bash
+cd gpu-bench
+cp .env.example .env   # set REWARDS_INNER_HASH for full stack
+./setup.sh
+./record.sh --provider vast.ai --cost-per-hour 0.35
+```
+
+Or hardware-only (no node): `./record.sh --benchmark --provider runpod --cost-per-hour 0.42`
+
+See [`gpu-bench/README.md`](gpu-bench/README.md).
+
 ## Examples
 
 ```bash

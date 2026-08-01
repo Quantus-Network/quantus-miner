@@ -1,0 +1,4 @@
+.run/
+*.log
+.env
+results.local.csv
