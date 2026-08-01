@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_BASE="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 OUT_DIR="${OUT_DIR:-${SCRIPT_DIR}/sweep-out}"
+# Shared collaborative dataset (tracked in git). Per-pod temps stay in OUT_DIR.
+RESULTS_CSV="${RESULTS_CSV:-${SCRIPT_DIR}/results.csv}"
 SSH_KEY="${SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 SSH_USER="${SSH_USER:-root}"
 CLOUD_TYPE="${CLOUD_TYPE:-COMMUNITY}"
@@ -49,7 +51,8 @@ Environment:
   IMAGE_NAME         Docker image (default: runpod/base … ubuntu2404 for GLIBC)
   TEMPLATE_ID        Optional RunPod template id (skips IMAGE_NAME)
   DURATION           Sample seconds per GPU (default 60)
-  OUT_DIR            Where to write merged results (default ./sweep-out)
+  RESULTS_CSV        Collaborative dataset to append (default ./results.csv)
+  OUT_DIR            Per-pod temp rows (default ./sweep-out, gitignored)
   KEEP_ON_FAILURE=1  Do not delete Pod if remote-run fails
   HOST_RETRIES       New Pods to try if host lacks Vulkan libs (default 3)
 
@@ -545,8 +548,8 @@ run_one_attempt() {
     local local_row="${OUT_DIR}/row-${pod_id}.csv"
     ssh_download "${mode}" "${host}" "${port}" \
       "${REMOTE_DIR}/results.csv" "${local_row}"
-    tail -n +2 "${local_row}" >>"${MERGED}"
-    echo "Appended results to ${MERGED}" >&2
+    tail -n +2 "${local_row}" >>"${RESULTS_CSV}"
+    echo "Appended results to ${RESULTS_CSV}" >&2
     delete_pod "${pod_id}"
     return 0
   fi
@@ -631,9 +634,10 @@ runpod_sweep_main() {
   fi
 
   mkdir -p "${OUT_DIR}"
-  MERGED="${OUT_DIR}/results.csv"
-  if [[ ! -f "${MERGED}" ]]; then
-    head -n 1 "${SCRIPT_DIR}/results.csv" >"${MERGED}"
+  if [[ ! -f "${RESULTS_CSV}" ]]; then
+    printf '%s\n' \
+      "timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,efficiency,sample_seconds,notes" \
+      >"${RESULTS_CSV}"
   fi
 
   local failed=0
@@ -645,7 +649,7 @@ runpod_sweep_main() {
     fi
   done
 
-  echo "Merged CSV: ${MERGED}" >&2
+  echo "Dataset CSV: ${RESULTS_CSV}" >&2
   exit "${failed}"
 }
 

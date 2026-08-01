@@ -110,7 +110,9 @@ chmod +x remote-run.sh record.sh runpod-sweep.sh setup.sh
 ./runpod-sweep.sh "NVIDIA GeForce RTX 4090" "NVIDIA GeForce RTX 3090"
 ```
 
-Merged rows land in `sweep-out/results.csv`.
+Successful rows append to the shared dataset [`results.csv`](results.csv)
+(commit new rows so others can reuse them). Per-pod temps go under
+`sweep-out/` (gitignored).
 
 On failure the Pod is deleted unless `KEEP_ON_FAILURE=1`.
 
@@ -126,6 +128,11 @@ IP (common on Community), it falls back to proxy SSH
 3. `quantus-miner serve --gpu-devices 1 --cpu-workers 0` → `:9900`  
 4. Sample Prometheus (`miner_gpu_hash_rate`) + `nvidia-smi` into CSV  
 5. Tear down
+
+## Collaborative dataset
+
+[`results.csv`](results.csv) is the shared hardware comparison table. After a
+sweep or `record.sh` run, commit any new rows you want others to see.
 
 ## Spreadsheet columns
 
