@@ -14,23 +14,24 @@ DEFAULT_CHAIN_DIR="$(cd "${REPO_ROOT}/.." && pwd)/chain"
 NODE_CONTAINER_NAME="${NODE_CONTAINER_NAME:-quantus-gpu-bench-node}"
 
 NODE_MODE="native" # native | docker
+DEV_MODE=0          # 1 = --dev local chain (no rewards hash / no sync)
 
 usage() {
   cat <<'EOF'
-Usage: ./setup.sh [start|stop|status|fetch-node|wormhole] [--docker]
+Usage: ./setup.sh [start|stop|status|fetch-node|wormhole] [--docker] [--dev]
 
   start       Download/build binaries, start native node + GPU miner (default)
   stop        Stop miner and node
   status      Show run state
   fetch-node  Download quantus-node into .run/bin/ (no start)
   wormhole    Print a new wormhole address + inner_hash (for REWARDS_INNER_HASH)
+  --dev       Local --dev chain (no Planck sync, rewards hash optional)
   --docker    Use Docker for the node instead of a native binary
               (not recommended on RunPod / nested-Docker hosts)
 
 Environment (see .env.example):
-  REWARDS_INNER_HASH   Required for start
+  REWARDS_INNER_HASH   Required for start unless --dev
   QUANTUS_NODE_BIN     Prebuilt quantus-node (skips download)
-  QUANTUS_MINER_DIR    Path to quantus-miner checkout (default: parent of gpu-bench)
   MINER_BIN            Prebuilt quantus-miner (skips cargo build)
   GPU_DEVICES          Number of GPUs (default: 1)
 EOF
@@ -246,15 +247,9 @@ ensure_node_key() {
 }
 
 start_node_native() {
-  ensure_rewards
   local node_bin
   node_bin="$(resolve_node_bin)"
-  local key_file
-  key_file="$(ensure_node_key "${node_bin}")"
 
-  local chain="${CHAIN:-planck}"
-  local node_name="${NODE_NAME:-gpu-bench-node}"
-  local p2p_port="${P2P_PORT:-30333}"
   local rpc_port="${RPC_PORT:-9944}"
   local prom_port="${PROMETHEUS_PORT:-9615}"
   local miner_listen_port="${HOST_MINER_LISTEN_PORT:-9833}"
@@ -265,25 +260,44 @@ start_node_native() {
 
   local log_file="${RUN_DIR}/node.log"
   echo "Starting native quantus-node: ${node_bin}"
-  echo "  --miner-listen-port ${miner_listen_port} --chain ${chain}"
 
-  nohup "${node_bin}" \
-    --validator \
-    --base-path "${base_path}" \
-    --chain "${chain}" \
-    --node-key-file "${key_file}" \
-    --rewards-inner-hash "${REWARDS_INNER_HASH}" \
-    --name "${node_name}" \
-    --port "${p2p_port}" \
-    --rpc-port "${rpc_port}" \
-    --prometheus-port "${prom_port}" \
-    --prometheus-external \
-    --miner-listen-port "${miner_listen_port}" \
-    --wasm-execution compiled \
-    --db-cache 2048 \
-    --rpc-cors all \
-    --max-blocks-per-request 64 \
-    >"${log_file}" 2>&1 &
+  if [[ "${DEV_MODE}" -eq 1 ]]; then
+    echo "  --dev --miner-listen-port ${miner_listen_port}"
+    nohup "${node_bin}" \
+      --dev \
+      --base-path "${base_path}" \
+      --rpc-port "${rpc_port}" \
+      --prometheus-port "${prom_port}" \
+      --prometheus-external \
+      --miner-listen-port "${miner_listen_port}" \
+      --rpc-cors all \
+      >"${log_file}" 2>&1 &
+  else
+    ensure_rewards
+    local key_file
+    key_file="$(ensure_node_key "${node_bin}")"
+    local chain="${CHAIN:-planck}"
+    local node_name="${NODE_NAME:-gpu-bench-node}"
+    local p2p_port="${P2P_PORT:-30333}"
+    echo "  --miner-listen-port ${miner_listen_port} --chain ${chain}"
+    nohup "${node_bin}" \
+      --validator \
+      --base-path "${base_path}" \
+      --chain "${chain}" \
+      --node-key-file "${key_file}" \
+      --rewards-inner-hash "${REWARDS_INNER_HASH}" \
+      --name "${node_name}" \
+      --port "${p2p_port}" \
+      --rpc-port "${rpc_port}" \
+      --prometheus-port "${prom_port}" \
+      --prometheus-external \
+      --miner-listen-port "${miner_listen_port}" \
+      --wasm-execution compiled \
+      --db-cache 2048 \
+      --rpc-cors all \
+      --max-blocks-per-request 64 \
+      >"${log_file}" 2>&1 &
+  fi
 
   local pid=$!
   echo "${pid}" >"${RUN_DIR}/node.pid"
@@ -510,6 +524,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --docker)
       NODE_MODE="docker"
+      shift
+      ;;
+    --dev)
+      DEV_MODE=1
       shift
       ;;
     -h | --help | help)

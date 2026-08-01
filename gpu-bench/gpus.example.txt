@@ -1,0 +1,7 @@
+# One RunPod gpuTypeId per line (from console / API).
+# Lines starting with # are ignored.
+#NVIDIA GeForce RTX 4090
+NVIDIA GeForce RTX 3090
+#NVIDIA RTX A5000
+NVIDIA L4
+NVIDIA RTX A4000

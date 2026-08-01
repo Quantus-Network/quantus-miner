@@ -75,13 +75,16 @@ hashrate / utilization / VRAM / efficiency rows to a CSV:
 
 ```bash
 cd gpu-bench
-cp .env.example .env
-./setup.sh wormhole    # save inner_hash into .env
-./setup.sh             # native node + GPU miner (same host)
-./record.sh --provider vast.ai --cost-per-hour 0.35
+./setup.sh --dev       # local --dev node + GPU miner (no sync / no rewards hash)
+./record.sh --provider runpod --cost-per-hour 0.69
 ```
 
-Or hardware-only (no node): `./record.sh --benchmark --provider runpod --cost-per-hour 0.42`
+RunPod multi-GPU sweep (REST API + SSH, release binaries, Prometheus → CSV):
+
+```bash
+export RUNPOD_API_KEY=...
+./runpod-sweep.sh --gpus-file gpus.example.txt
+```
 
 See [`gpu-bench/README.md`](gpu-bench/README.md).
 

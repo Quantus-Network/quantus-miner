@@ -1,0 +1,51 @@
+# Full RunPod NVIDIA gpuTypeId list (AMD omitted — WGPU Vulkan path is NVIDIA).
+# Source: https://docs.runpod.io/references/gpu-types
+# Usage: ./runpod-sweep.sh --gpus-file gpus.all.txt
+
+# Consumer / GeForce
+NVIDIA GeForce RTX 3070
+NVIDIA GeForce RTX 3080
+NVIDIA GeForce RTX 3080 Ti
+NVIDIA GeForce RTX 3090
+NVIDIA GeForce RTX 3090 Ti
+NVIDIA GeForce RTX 4070 Ti
+NVIDIA GeForce RTX 4080
+NVIDIA GeForce RTX 4080 SUPER
+NVIDIA GeForce RTX 4090
+NVIDIA GeForce RTX 5080
+NVIDIA GeForce RTX 5090
+
+# Pro / Ada / Ampere workstation
+NVIDIA RTX A2000
+NVIDIA RTX A4000
+NVIDIA RTX A4500
+NVIDIA RTX A5000
+NVIDIA RTX A6000
+NVIDIA RTX 2000 Ada Generation
+NVIDIA RTX 4000 Ada Generation
+NVIDIA RTX 4000 SFF Ada Generation
+NVIDIA RTX 5000 Ada Generation
+NVIDIA RTX 6000 Ada Generation
+NVIDIA RTX PRO 4500 Blackwell
+NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+NVIDIA RTX PRO 6000 Blackwell Server Edition
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+
+# Data center
+NVIDIA L4
+NVIDIA L40
+NVIDIA L40S
+NVIDIA A30
+NVIDIA A40
+NVIDIA A100 80GB PCIe
+NVIDIA A100-SXM4-80GB
+NVIDIA H100 PCIe
+NVIDIA H100 NVL
+NVIDIA H100 80GB HBM3
+NVIDIA H200
+NVIDIA H200 NVL
+NVIDIA B200
+NVIDIA B300 SXM6 AC
+Tesla V100-PCIE-16GB
+Tesla V100-SXM2-16GB
+Tesla V100-SXM2-32GB

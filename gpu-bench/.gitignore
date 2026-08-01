@@ -2,3 +2,4 @@
 *.log
 .env
 results.local.csv
+sweep-out/

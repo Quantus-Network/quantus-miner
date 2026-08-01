@@ -74,28 +74,89 @@ ensure_results_header() {
   fi
 }
 
+# Best-effort SM / multiprocessor count. Many cloud drivers omit
+# --query-gpu=multiprocessor_count (fails the whole CSV row), so we try
+# several sources after name/VRAM are already known.
+query_sm_count() {
+  local name="${1:-}"
+  local sm=""
+
+  sm="$(nvidia-smi --query-gpu=multiprocessor_count --format=csv,noheader,nounits 2>/dev/null \
+    | head -n 1 | tr -d '[:space:]')"
+  if [[ "${sm}" =~ ^[0-9]+$ ]]; then
+    echo "${sm}"
+    return
+  fi
+
+  sm="$(nvidia-smi -q 2>/dev/null \
+    | awk -F: 'tolower($0) ~ /multiprocessor count/ {
+        gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit
+      }')"
+  if [[ "${sm}" =~ ^[0-9]+$ ]]; then
+    echo "${sm}"
+    return
+  fi
+
+  sm="$(nvidia-smi -q -x 2>/dev/null \
+    | sed -n 's/.*<multiprocessor_count>\([0-9][0-9]*\)<\/multiprocessor_count>.*/\1/p' \
+    | head -n 1)"
+  if [[ "${sm}" =~ ^[0-9]+$ ]]; then
+    echo "${sm}"
+    return
+  fi
+
+  # Static fallback for common RunPod SKUs (architecture SM counts).
+  case "${name}" in
+    *"RTX 3070"*) echo 46 ;;
+    *"RTX 3080 Ti"*) echo 80 ;;
+    *"RTX 3080"*) echo 68 ;;
+    *"RTX 3090 Ti"*) echo 84 ;;
+    *"RTX 3090"*) echo 82 ;;
+    *"RTX 4070 Ti"*) echo 60 ;;
+    *"RTX 4080 SUPER"*) echo 80 ;;
+    *"RTX 4080"*) echo 76 ;;
+    *"RTX 4090"*) echo 128 ;;
+    *"RTX 5080"*) echo 84 ;;
+    *"RTX 5090"*) echo 170 ;;
+    *"RTX A2000"*) echo 26 ;;
+    *"RTX A4000"*) echo 48 ;;
+    *"RTX A4500"*) echo 56 ;;
+    *"RTX A5000"*) echo 64 ;;
+    *"RTX A6000"*) echo 84 ;;
+    *"RTX 2000 Ada"*) echo 22 ;;
+    *"RTX 4000 Ada"*|*"RTX 4000 SFF Ada"*) echo 48 ;;
+    *"RTX 5000 Ada"*) echo 100 ;;
+    *"RTX 6000 Ada"*) echo 142 ;;
+    *"RTX PRO 4500"*) echo 80 ;;
+    *"RTX PRO 6000"*) echo 188 ;;
+    *"NVIDIA L4"|*" L4") echo 60 ;;
+    *"L40S"*) echo 142 ;;
+    *"L40"*) echo 142 ;;
+    *"NVIDIA A30"|*" A30") echo 56 ;;
+    *"NVIDIA A40"|*" A40") echo 84 ;;
+    *"A100"*) echo 108 ;;
+    *"H100 NVL"*) echo 132 ;;
+    *"H100"*) echo 132 ;;
+    *"H200"*) echo 132 ;;
+    *"B200"*) echo 160 ;;
+    *"B300"*) echo 160 ;;
+    *"V100"*) echo 80 ;;
+    *) echo "" ;;
+  esac
+}
+
 query_gpu_static() {
-  # name, memory.total [MiB], multiprocessor_count, driver_version
   local line
-  if ! line="$(nvidia-smi --query-gpu=name,memory.total,multiprocessor_count,driver_version \
-    --format=csv,noheader,nounits 2>/dev/null | head -n 1)"; then
+  SM_COUNT=""
+  if ! line="$(nvidia-smi --query-gpu=name,memory.total,driver_version \
+    --format=csv,noheader,nounits 2>/dev/null | head -n 1)" || [[ -z "${line}" ]]; then
     echo "error: failed to query GPU via nvidia-smi" >&2
     exit 1
   fi
-  if [[ -z "${line}" ]]; then
-    # Older drivers may lack multiprocessor_count
-    line="$(nvidia-smi --query-gpu=name,memory.total,driver_version \
-      --format=csv,noheader,nounits 2>/dev/null | head -n 1)"
-    GPU_MODEL="$(echo "${line}" | awk -F', ' '{print $1}')"
-    VRAM_MB="$(echo "${line}" | awk -F', ' '{print $2}' | tr -d ' ')"
-    SM_COUNT=""
-    DRIVER_VERSION="$(echo "${line}" | awk -F', ' '{print $3}' | tr -d ' ')"
-    return
-  fi
   GPU_MODEL="$(echo "${line}" | awk -F', ' '{print $1}')"
   VRAM_MB="$(echo "${line}" | awk -F', ' '{print $2}' | tr -d ' ')"
-  SM_COUNT="$(echo "${line}" | awk -F', ' '{print $3}' | tr -d ' ')"
-  DRIVER_VERSION="$(echo "${line}" | awk -F', ' '{print $4}' | tr -d ' ')"
+  DRIVER_VERSION="$(echo "${line}" | awk -F', ' '{print $3}' | tr -d ' ')"
+  SM_COUNT="$(query_sm_count "${GPU_MODEL}")"
 }
 
 read_gpu_util() {
