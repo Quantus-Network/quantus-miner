@@ -147,6 +147,9 @@ query_sm_count() {
 }
 
 query_gpu_static() {
+  # Query name/VRAM/driver without multiprocessor_count — some drivers (e.g. 580.x)
+  # reject that field and, under pipefail, abort before any fallback. SM count is
+  # filled separately via query_sm_count (nvidia-smi / -q / static table).
   local line
   SM_COUNT=""
   if ! line="$(nvidia-smi --query-gpu=name,memory.total,driver_version \

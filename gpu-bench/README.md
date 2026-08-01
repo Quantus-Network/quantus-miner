@@ -1,7 +1,9 @@
 # GPU miner bench (provider-agnostic)
 
-Spin up a Quantus `--dev` node + GPU miner on a rented NVIDIA host, scrape
-Prometheus hashrate into [`results.csv`](results.csv), and compare hardware.
+Spin up a Quantus `--dev` node + GPU miner on any rented NVIDIA host (Clore,
+RunPod, Vast.ai, etc.), scrape Prometheus hashrate into [`results.csv`](results.csv),
+and compare hardware. You supply `--provider` and `--cost-per-hour` — the scripts
+have no provider-specific logic (except the optional RunPod API sweep).
 
 ## Miner binary (git build by default)
 
@@ -24,15 +26,20 @@ linux x86_64 tarball. Container disk defaults to **50GB** for cargo `target/`.
 ```bash
 cd gpu-bench
 ./setup.sh --dev          # native --dev node + GPU miner (no rewards hash)
-./record.sh --provider runpod --cost-per-hour 0.69
+./record.sh --provider clore --cost-per-hour 0.35    # or runpod, vast, ...
 ./setup.sh stop
 ```
 
-On-pod one-shot (downloads binaries itself):
+For Planck (non-dev) mining, set `REWARDS_INNER_HASH` via `./setup.sh wormhole`
+and run `./setup.sh` without `--dev`.
+
+On-pod one-shot (builds miner from git + downloads node):
 
 ```bash
 ./remote-run.sh --provider runpod --cost-per-hour 0.69 --duration 60
 ```
+
+Hardware-only (no node): `./record.sh --benchmark --provider runpod --cost-per-hour 0.42`
 
 ## RunPod API sweep
 
@@ -129,7 +136,7 @@ IP (common on Community), it falls back to proxy SSH
 
 ### What each Pod does
 
-1. Download `quantus-node` + `quantus-miner` release binaries  
+1. Build `quantus-miner` from git (`MINER_BRANCH`) + download `quantus-node` release  
 2. `quantus-node --dev --miner-listen-port 9833` (local chain, no Planck sync)  
 3. `quantus-miner serve --gpu-devices 1 --cpu-workers 0` → `:9900`  
 4. Sample Prometheus (`miner_gpu_hash_rate`) + `nvidia-smi` into CSV  
