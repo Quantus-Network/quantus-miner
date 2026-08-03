@@ -78,6 +78,10 @@ print_ssh_hint() {
   bash -x ./remote-run.sh --cost-per-hour ${cost} --duration 30 --warmup 20
   # FORCE_MINER_BUILD=1 ./remote-run.sh ...   # after pushing new commits
 
+  # A/B gpu-batch-size (needs pushed CLI fix: range >= batch size):
+  # FORCE_MINER_BUILD=1 ./remote-run.sh --cost-per-hour ${cost} --duration 20 --warmup 15
+  # ./batch-tune.sh --duration 30
+
   # Vulkan sanity:
   nvidia-smi
   ls -l /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so* 2>/dev/null || true

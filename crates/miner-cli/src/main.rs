@@ -257,8 +257,10 @@ async fn run_benchmark(
     let mut handles = Vec::new();
     let total_hashes = Arc::new(std::sync::Mutex::new(0u64));
 
-    let cpu_chunk = 10_000u64;
-    let gpu_chunk = 1_000_000u64;
+    // Range size must be >= engine batch size; otherwise search_range clamps
+    // this_batch_size to the range and --gpu-batch-size A/B is inert.
+    let cpu_chunk = cpu_batch_size.max(10_000);
+    let gpu_chunk = gpu_batch_size as u64;
 
     for worker_id in 0..total_workers {
         let (engine, nonces_per_batch) = if worker_id < effective_cpu_workers {
