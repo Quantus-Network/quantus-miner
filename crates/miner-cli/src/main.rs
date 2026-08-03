@@ -199,7 +199,13 @@ async fn run_benchmark(
     duration: u64,
     allow_integrated: bool,
 ) {
-    let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
+    // When --gpu-devices is set and --cpu-workers is omitted, default to GPU-only
+    // so hardware A/B numbers aren't polluted by host CPU hashrate.
+    let effective_cpu_workers = match (cpu_workers, gpu_devices) {
+        (Some(n), _) => n,
+        (None, Some(_)) => 0,
+        (None, None) => num_cpus::get(),
+    };
 
     // Initialize GPU engine (no throttle for benchmark)
     let (gpu_engine, effective_gpu_devices) = match miner_service::resolve_gpu_configuration(
@@ -225,6 +231,8 @@ async fn run_benchmark(
         num_cpus::get()
     );
     println!("GPU Devices: {}", effective_gpu_devices);
+    println!("GPU batch size: {} nonces", gpu_batch_size);
+    println!("CPU batch size: {} hashes", cpu_batch_size);
     println!("Duration: {} seconds", duration);
     println!();
 
@@ -246,7 +254,8 @@ async fn run_benchmark(
     // Random header hash for benchmark
     let mut header = [0u8; 32];
     rand::rng().fill_bytes(&mut header);
-    let difficulty = U512::MAX; // High difficulty - no solutions expected
+    // Bitcoin-style: target = MAX / difficulty. MAX → target 1 → essentially never finds.
+    let difficulty = U512::MAX;
 
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
     let ctx = ref_engine.prepare_context(header, difficulty);
@@ -257,8 +266,10 @@ async fn run_benchmark(
     let mut handles = Vec::new();
     let total_hashes = Arc::new(std::sync::Mutex::new(0u64));
 
-    // Range size must be >= engine batch size; otherwise search_range clamps
-    // this_batch_size to the range and --gpu-batch-size A/B is inert.
+    // Range per search_range call must be >= engine batch size; otherwise the GPU
+    // clamps this_batch_size to the range and --gpu-batch-size A/B is inert.
+    // One full batch per call also lets the wall-clock cancel + progress ticker arm
+    // between batches (cancel is only checked between GPU dispatches).
     let cpu_chunk = cpu_batch_size.max(10_000);
     let gpu_chunk = gpu_batch_size as u64;
 
@@ -276,21 +287,22 @@ async fn run_benchmark(
 
         let handle = thread::spawn(move || {
             let stride = U512::from(1_000_000_000_000u64);
-            let worker_start = U512::from(worker_id as u64).saturating_mul(stride);
-            let worker_range = EngineRange {
-                start: worker_start,
-                end: worker_start
-                    .saturating_add(U512::from(nonces_per_batch))
-                    .saturating_sub(U512::from(1u64)),
-            };
+            let mut nonce = U512::from(worker_id as u64).saturating_mul(stride);
 
             loop {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
 
+                let worker_range = EngineRange {
+                    start: nonce,
+                    end: nonce
+                        .saturating_add(U512::from(nonces_per_batch))
+                        .saturating_sub(U512::from(1u64)),
+                };
+
                 let cancel_check = AtomicBoolCancelCheck(&cancel);
-                let result = engine.search_range(&ctx, worker_range.clone(), &cancel_check);
+                let result = engine.search_range(&ctx, worker_range, &cancel_check);
 
                 match result {
                     engine_cpu::EngineStatus::Found { hash_count, .. }
@@ -302,10 +314,11 @@ async fn run_benchmark(
                     engine_cpu::EngineStatus::Running { .. } => {}
                 }
 
-                // Exit if device is lost
                 if matches!(result, engine_cpu::EngineStatus::DeviceLost { .. }) {
                     break;
                 }
+
+                nonce = nonce.saturating_add(U512::from(nonces_per_batch));
 
                 if start.elapsed() >= Duration::from_secs(duration) {
                     break;

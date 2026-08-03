@@ -1,15 +1,14 @@
 # GPU miner bench (provider-agnostic)
 
-Spin up a Quantus `--dev` node + GPU miner on any rented NVIDIA host (Clore,
-RunPod, Vast.ai, etc.), scrape Prometheus hashrate into [`results.csv`](results.csv),
-and compare hardware. You supply `--provider` and `--cost-per-hour` — the scripts
-have no provider-specific logic (except the optional RunPod API sweep).
+Rent an NVIDIA GPU, build `quantus-miner`, run **`benchmark` across batch sizes**
+(no node), and append rows to [`results.csv`](results.csv) for hardware
+comparison. You supply `--provider` and `--cost-per-hour`.
 
 ## Miner binary (git build by default)
 
 `remote-run.sh` / the RunPod sweep **clone + `cargo build -p miner-cli --release`**
 from a git branch (default `illuzen/gpu-bench`) so you can iterate without
-cutting a GitHub release. Push the branch before sweeping.
+cutting a GitHub release. **Push the branch before sweeping.**
 
 ```bash
 export MINER_BRANCH=illuzen/gpu-bench   # default
@@ -17,29 +16,27 @@ export MINER_BRANCH=illuzen/gpu-bench   # default
 # export MINER_SOURCE=release
 ```
 
-`quantus-node` still comes from the latest
-[chain release](https://github.com/Quantus-Network/chain/releases/latest)
-linux x86_64 tarball. Container disk defaults to **50GB** for cargo `target/`.
+Container disk defaults to **50GB** for cargo `target/`. No `quantus-node`
+download — hardware benches use `quantus-miner benchmark` only.
 
-## Same-host (manual)
-
-```bash
-cd gpu-bench
-./setup.sh --dev          # native --dev node + GPU miner (no rewards hash)
-./record.sh --provider clore --cost-per-hour 0.35    # or runpod, vast, ...
-./setup.sh stop
-```
-
-For Planck (non-dev) mining, set `REWARDS_INNER_HASH` via `./setup.sh wormhole`
-and run `./setup.sh` without `--dev`.
-
-On-pod one-shot (builds miner from git + downloads node):
+## On-pod one-shot
 
 ```bash
-./remote-run.sh --provider runpod --cost-per-hour 0.69 --duration 60
+./remote-run.sh --provider runpod --cost-per-hour 0.69 --duration 30
+# default batch sizes: 1M 4M 8M 16M (one CSV row each, notes include batch=N)
+./remote-run.sh --cost-per-hour 0.39 --batch-sizes "1000000 16777216"
 ```
 
-Hardware-only (no node): `./record.sh --benchmark --provider runpod --cost-per-hour 0.42`
+Or call record directly if the miner is already built:
+
+```bash
+MINER_BIN=./bin/quantus-miner ./record.sh --benchmark \
+  --provider runpod --cost-per-hour 0.42 \
+  --batch-sizes "1000000 4194304 16777216" --duration 30
+```
+
+Local full stack (node + serve) is still available via `./setup.sh --dev` +
+`./record.sh --live` when you need end-to-end mining, not just hardware H/s.
 
 ## RunPod API sweep
 
@@ -51,127 +48,89 @@ Uses the **REST API** (not MCP): create Pod → SSH → `remote-run.sh` → scp 
 - SSH public key added in RunPod **Settings → SSH Public Keys**
 - `curl`, `ssh`, `scp`, `python3`
 
-### 2. How to make a RunPod template (optional but nice)
+### 2. Image / template tips
 
-You don’t *need* a custom template — the sweep defaults to a slim RunPod CUDA
-base image (`runpod/base:…-cuda…`) with port `22/tcp`. **Don’t use PyTorch**
-images unless you need Torch; they’re much larger and unused here. NVIDIA
-drivers are on the host; the image just needs CUDA userspace + RunPod’s
-`/start.sh` (SSH).
+Default image: `runpod/base:1.1.0-cuda1281-ubuntu2404` with
+`NVIDIA_DRIVER_CAPABILITIES=all` (Vulkan/WGPU). Container disk ~50GB for git
+builds. Expose TCP 22 for SSH.
 
-**Console**
-
-1. [Templates → New Template](https://www.console.runpod.io/user/templates)
-2. Image: e.g. `runpod/base:1.1.0-cuda1281-ubuntu2404` (use **24.04** — node needs GLIBC ≥ 2.38)
-3. Env: `NVIDIA_DRIVER_CAPABILITIES=all` (required for Vulkan/WGPU; compute-only → llvmpipe only)
-4. Container disk ~50GB if building miner from git (cargo `target/`); volume 0 unless you need persistence
-5. Expose **TCP 22** (SSH). `runpod/base` / `runpod/pytorch` already start `sshd`.
-6. Save → copy the template id → `export TEMPLATE_ID=...`
-
-**API**
-
-```bash
-curl -sS -X POST https://rest.runpod.io/v1/templates \
-  -H "Authorization: Bearer $RUNPOD_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "quantus-gpu-bench",
-    "imageName": "runpod/base:1.1.0-cuda1281-ubuntu2404",
-    "category": "NVIDIA",
-    "containerDiskInGb": 50,
-    "volumeInGb": 0,
-    "volumeMountPath": "/workspace",
-    "ports": ["22/tcp", "9900/http"],
-    "env": { "NVIDIA_DRIVER_CAPABILITIES": "all" },
-    "isPublic": false
-  }'
-```
-
-### 3. Debug one Pod interactively (recommended first)
-
-Creates a Pod, uploads scripts, prints SSH, and **leaves it running** so you
-can fix Vulkan / miner commands without pay-per-recreate:
+### 3. Debug one Pod interactively
 
 ```bash
 export RUNPOD_API_KEY=...
-chmod +x runpod-shell.sh remote-run.sh record.sh runpod-sweep.sh
+chmod +x runpod-shell.sh remote-run.sh record.sh runpod-sweep.sh batch-tune.sh
 
 ./runpod-shell.sh "NVIDIA L4"
-# ssh … (printed), or: ./runpod-shell.sh --ssh
+./runpod-shell.sh --ssh
+# on pod:
+#   cd /workspace/quantus-gpu-bench
+#   ./remote-run.sh --cost-per-hour … --duration 30
 
-# edit remote-run.sh locally, then:
-./runpod-shell.sh --upload
-# on pod: bash -x ./remote-run.sh --cost-per-hour … --duration 30
-
-./runpod-shell.sh --delete   # stop billing when done
+./runpod-shell.sh --delete
 ```
 
 ### 4. Run the sweep
 
 ```bash
 export RUNPOD_API_KEY=...
-# optional: export TEMPLATE_ID=...
-# optional: export CLOUD_TYPE=SECURE   # default COMMUNITY
-# optional: export SSH_KEY=~/.ssh/id_ed25519
-
-chmod +x remote-run.sh record.sh runpod-sweep.sh setup.sh
+# optional: export BATCH_SIZES="1000000 16777216"
+# optional: export DURATION=30
+# optional: export CLOUD_TYPE=SECURE
 
 ./runpod-sweep.sh --gpus-file gpus.example.txt
-# full NVIDIA catalog:
 ./runpod-sweep.sh --gpus-file gpus.all.txt
-# or:
-./runpod-sweep.sh "NVIDIA GeForce RTX 4090" "NVIDIA GeForce RTX 3090"
 ```
 
-Successful rows append to the shared dataset [`results.csv`](results.csv)
-(commit new rows so others can reuse them). Per-pod temps go under
-`sweep-out/` (gitignored).
-
-On failure the Pod is deleted unless `KEEP_ON_FAILURE=1`.
-
-If Community has no capacity for a GPU, the sweep retries on **Secure**
-(`FALLBACK_SECURE=1` by default). If a Pod is RUNNING but never gets a public
-IP (common on Community), it falls back to proxy SSH
-(`podId@ssh.runpod.io`) and pipes files instead of `scp`.
+Successful rows append to [`results.csv`](results.csv) (one row per batch size
+per Pod). Commit new rows so others can reuse them.
 
 ### What each Pod does
 
-1. Build `quantus-miner` from git (`MINER_BRANCH`) + download `quantus-node` release  
-2. `quantus-node --dev --miner-listen-port 9833` (local chain, no Planck sync)  
-3. `quantus-miner serve --gpu-devices 1 --cpu-workers 0` → `:9900`  
-4. Sample Prometheus (`miner_gpu_hash_rate`) + `nvidia-smi` into CSV  
+1. Build `quantus-miner` from git (`MINER_BRANCH`)  
+2. Ensure NVIDIA Vulkan ICD (not Mesa llvmpipe)  
+3. Smoke-test `benchmark` (5s)  
+4. Sweep `--gpu-batch-size` values → append CSV rows (`notes` includes `batch=N`)  
 5. Tear down
+
+## Knobs that matter for differently shaped GPUs
+
+| Knob | Where | Notes |
+|------|--------|--------|
+| `--gpu-batch-size` | CLI / sweep | **Main runtime knob.** Nonces per dispatch; interacts with tier workgroup hints (`nonces_per_thread` vs occupancy). |
+| GPU tier table | `crates/engine-gpu/src/gpu_tiers.rs` | Per-name `workgroup_divisor` + `min_workgroups`. Not a CLI flag — edit + rebuild to retune a class of cards. |
+| `--gpu-devices` | CLI | How many GPUs; bench defaults to GPU-only when this is set. |
+| `--allow-integrated` | CLI | Include iGPUs when a discrete GPU is present. |
+| `--gpu-throttle-ms` | `serve` only | Delay between batches; not used in `benchmark`. |
+| threads/workgroup | hardcoded `256` | Not exposed. |
+
+If util stays low across 1M→16M, dispatch shape may not be the bottleneck (driver, kernel, or tier mis-detect). Check miner logs for `tier:` / `workgroups:`.
 
 ## Collaborative dataset
 
-[`results.csv`](results.csv) is the shared hardware comparison table. After a
-sweep or `record.sh` run, commit any new rows you want others to see.
+[`results.csv`](results.csv) is the shared hardware comparison table. Prefer the
+row with the best hashrate (or hash_per_dollar) per GPU when ranking hardware.
 
 ## Spreadsheet columns
 
 | Column | Source |
 |--------|--------|
 | `cloud_provider` | `runpod` / flag |
-| `gpu_model`, `vram_mb`, `sm_count` | `nvidia-smi` (not the RunPod catalog) |
-| `hashrate` | avg `miner_gpu_hash_rate` from `:9900/metrics` |
-| `gpu_utilization_pct` | avg `utilization.gpu` |
-| `cost_per_hour` | Pod `costPerHr` from API (sweep) or your flag |
+| `gpu_model`, `vram_mb`, `sm_count` | `nvidia-smi` |
+| `hashrate` | `benchmark` Total hashes / Total time |
+| `gpu_utilization_pct` | avg `utilization.gpu` during the run |
+| `cost_per_hour` | Pod `costPerHr` (sweep) or your flag |
 | `cost_per_sec` | `cost_per_hour / 3600` |
-| `hash_per_dollar` | `hashrate / cost_per_sec` (hashes per $) |
+| `hash_per_dollar` | `hashrate / cost_per_sec` |
+| `notes` | includes `batch=N` for sweep rows |
 
 ## Scripts
 
 | Script | Role |
 |--------|------|
-| [`setup.sh`](setup.sh) | Local native node+miner (`--dev` or Planck) |
-| [`remote-run.sh`](remote-run.sh) | On-box: fetch bins, `--dev`, mine, `record.sh` |
-| [`record.sh`](record.sh) | Prometheus / nvidia-smi → CSV row |
+| [`remote-run.sh`](remote-run.sh) | On-box: build miner, Vulkan, batch-size benchmark → CSV |
+| [`record.sh`](record.sh) | `--benchmark` (or `--live`) → CSV row(s) |
+| [`batch-tune.sh`](batch-tune.sh) | Quick util/hashrate table without cost columns |
 | [`runpod-sweep.sh`](runpod-sweep.sh) | RunPod REST API multi-GPU loop |
 | [`runpod-shell.sh`](runpod-shell.sh) | One Pod + SSH; keep alive for manual debug |
+| [`setup.sh`](setup.sh) | Local native node+miner (`--dev` or Planck) |
 | [`gpus.all.txt`](gpus.all.txt) | Full RunPod NVIDIA `gpuTypeId` list |
-
-## Notes
-
-- `--dev` is for **hardware comparison**, not mainnet rewards.
-- Prefer this over `chain/miner-stack` on cloud GPUs (Compose / nested Docker).
-- Catalog “vCPU” is host CPU, not CUDA SMs — SM count comes from inside the Pod.

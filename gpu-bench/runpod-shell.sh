@@ -21,7 +21,7 @@ Same env as runpod-sweep.sh (RUNPOD_API_KEY, IMAGE_NAME, CLOUD_TYPE, SSH_KEY, â€
 
 On the pod, typical debug loop:
   cd /workspace/quantus-gpu-bench
-  bash -x ./remote-run.sh --cost-per-hour 0.39 --duration 30 --warmup 20
+  bash -x ./remote-run.sh --cost-per-hour 0.39 --duration 30
 
   # or step through (see printed hints)
 EOF
@@ -74,13 +74,10 @@ print_ssh_hint() {
   echo "On the pod:"
   cat <<EOF
   cd ${REMOTE_DIR}
-  # builds miner from git (MINER_BRANCH=illuzen/gpu-bench) + release node:
-  bash -x ./remote-run.sh --cost-per-hour ${cost} --duration 30 --warmup 20
+  # build miner + benchmark batch-size sweep (no node):
+  bash -x ./remote-run.sh --cost-per-hour ${cost} --duration 30
   # FORCE_MINER_BUILD=1 ./remote-run.sh ...   # after pushing new commits
-
-  # A/B gpu-batch-size (needs pushed CLI fix: range >= batch size):
-  # FORCE_MINER_BUILD=1 ./remote-run.sh --cost-per-hour ${cost} --duration 20 --warmup 15
-  # ./batch-tune.sh --duration 30
+  # ./remote-run.sh --cost-per-hour ${cost} --batch-sizes "1000000 16777216"
 
   # Vulkan sanity:
   nvidia-smi
@@ -150,9 +147,10 @@ cmd_create() {
 
   ssh_upload_files "${mode}" "${host}" "${port}" \
     "${SCRIPT_DIR}/remote-run.sh" \
-    "${SCRIPT_DIR}/record.sh"
+    "${SCRIPT_DIR}/record.sh" \
+    "${SCRIPT_DIR}/batch-tune.sh"
   ssh_cmd "${mode}" "${host}" "${port}" \
-    "chmod +x '${REMOTE_DIR}/remote-run.sh' '${REMOTE_DIR}/record.sh'"
+    "chmod +x '${REMOTE_DIR}/remote-run.sh' '${REMOTE_DIR}/record.sh' '${REMOTE_DIR}/batch-tune.sh'"
 
   write_state "${pod_id}" "${mode}" "${host}" "${port}" "${cost}" "${gpu_type}"
   print_ssh_hint "${mode}" "${host}" "${port}" "${cost}" "${pod_id}"
@@ -163,9 +161,10 @@ cmd_upload() {
   echo "Uploading scripts to ${POD_ID} (${REMOTE_DIR}) ..." >&2
   ssh_upload_files "${SSH_MODE}" "${SSH_HOST}" "${SSH_PORT}" \
     "${SCRIPT_DIR}/remote-run.sh" \
-    "${SCRIPT_DIR}/record.sh"
+    "${SCRIPT_DIR}/record.sh" \
+    "${SCRIPT_DIR}/batch-tune.sh"
   ssh_cmd "${SSH_MODE}" "${SSH_HOST}" "${SSH_PORT}" \
-    "chmod +x '${REMOTE_DIR}/remote-run.sh' '${REMOTE_DIR}/record.sh'"
+    "chmod +x '${REMOTE_DIR}/remote-run.sh' '${REMOTE_DIR}/record.sh' '${REMOTE_DIR}/batch-tune.sh'"
   echo "Done." >&2
 }
 

@@ -16,6 +16,9 @@ DURATION=60
 NOTES=""
 DRY_RUN=0
 GPU_DEVICES_FLAG=""
+GPU_BATCH_SIZE="${GPU_BATCH_SIZE:-}"
+# Space-separated list; when set with --benchmark, runs one row per size.
+BATCH_SIZES="${BATCH_SIZES:-}"
 
 usage() {
   cat <<'EOF'
@@ -28,13 +31,16 @@ Options:
   --cost-per-hour USD    Hourly cost in USD (e.g. 0.35)
   --duration SECONDS     Sample / benchmark window (default: 60)
   --gpu-devices N        GPUs for --benchmark (default: GPU_DEVICES or 1)
+  --gpu-batch-size N     Single GPU batch size for --benchmark
+  --batch-sizes "N N"    Sweep several batch sizes (one CSV row each)
   --notes TEXT           Optional notes column
   --dry-run              Print the CSV row but do not append
   -h, --help             Show this help
 
 Examples:
   ./record.sh --provider vast.ai --cost-per-hour 0.35
-  ./record.sh --benchmark --provider runpod --cost-per-hour 0.42 --duration 60
+  ./record.sh --benchmark --provider runpod --cost-per-hour 0.42 --duration 30
+  ./record.sh --benchmark --batch-sizes "1000000 4194304 16777216" --provider runpod --cost-per-hour 0.39
 EOF
 }
 
@@ -373,35 +379,50 @@ run_live() {
   emit_row "${ts}" "${hashrate}" "${util_avg}" "${cost_per_sec}" "${hash_per_dollar}"
 }
 
-run_benchmark() {
-  local miner_bin
-  miner_bin="$(resolve_miner_bin)"
-  local gpu_devices="${GPU_DEVICES_FLAG:-${GPU_DEVICES:-1}}"
+run_benchmark_once() {
+  local miner_bin="$1"
+  local gpu_devices="$2"
+  local batch_size="$3"
+  local notes_extra="$4"
 
   local util_file bench_log
   util_file="$(mktemp)"
   bench_log="$(mktemp)"
-  trap 'rm -f "${util_file}" "${bench_log}"' RETURN
 
-  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}) ..." >&2
+  local batch_label="default"
+  if [[ -n "${batch_size}" ]]; then
+    batch_label="${batch_size}"
+  fi
+
+  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}, batch=${batch_label}) ..." >&2
   sample_util_during "${util_file}" "${DURATION}" &
   local sampler_pid=$!
 
   set +e
-  "${miner_bin}" benchmark \
-    --cpu-workers 0 \
-    --gpu-devices "${gpu_devices}" \
-    --duration "${DURATION}" \
-    >"${bench_log}" 2>&1
+  if [[ -n "${batch_size}" ]]; then
+    "${miner_bin}" benchmark \
+      --cpu-workers 0 \
+      --gpu-devices "${gpu_devices}" \
+      --gpu-batch-size "${batch_size}" \
+      --duration "${DURATION}" \
+      >"${bench_log}" 2>&1
+  else
+    "${miner_bin}" benchmark \
+      --cpu-workers 0 \
+      --gpu-devices "${gpu_devices}" \
+      --duration "${DURATION}" \
+      >"${bench_log}" 2>&1
+  fi
   local bench_rc=$?
   set -e
 
   wait "${sampler_pid}" 2>/dev/null || true
 
   if [[ "${bench_rc}" -ne 0 ]]; then
-    echo "error: benchmark failed (exit ${bench_rc}). Output:" >&2
+    echo "error: benchmark failed (exit ${bench_rc}, batch=${batch_label}). Output:" >&2
     cat "${bench_log}" >&2
-    exit 1
+    rm -f "${util_file}" "${bench_log}"
+    return 1
   fi
 
   cat "${bench_log}" >&2
@@ -409,8 +430,9 @@ run_benchmark() {
   local hashrate util_avg
   hashrate="$(parse_benchmark_hashrate "$(cat "${bench_log}")")"
   if [[ -z "${hashrate}" ]]; then
-    echo "error: could not parse hashrate from benchmark output" >&2
-    exit 1
+    echo "error: could not parse hashrate from benchmark output (batch=${batch_label})" >&2
+    rm -f "${util_file}" "${bench_log}"
+    return 1
   fi
   util_avg="$(average_list <"${util_file}")"
   if [[ -n "${util_avg}" ]]; then
@@ -423,9 +445,55 @@ run_benchmark() {
     read -r hash_per_dollar
   } < <(compute_cost_metrics "${hashrate}" "${COST_PER_HOUR}")
 
+  local saved_notes="${NOTES}"
+  if [[ -n "${notes_extra}" ]]; then
+    if [[ -n "${NOTES}" ]]; then
+      NOTES="${NOTES};${notes_extra}"
+    else
+      NOTES="${notes_extra}"
+    fi
+  fi
+
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   emit_row "${ts}" "${hashrate}" "${util_avg}" "${cost_per_sec}" "${hash_per_dollar}"
+  NOTES="${saved_notes}"
+
+  rm -f "${util_file}" "${bench_log}"
+  return 0
+}
+
+run_benchmark() {
+  local miner_bin
+  miner_bin="$(resolve_miner_bin)"
+  local gpu_devices="${GPU_DEVICES_FLAG:-${GPU_DEVICES:-1}}"
+
+  local sizes=()
+  if [[ -n "${BATCH_SIZES}" ]]; then
+    # shellcheck disable=SC2206
+    sizes=(${BATCH_SIZES})
+  elif [[ -n "${GPU_BATCH_SIZE}" ]]; then
+    sizes=("${GPU_BATCH_SIZE}")
+  else
+    sizes=("")
+  fi
+
+  local bs note_extra
+  local any_ok=0
+  for bs in "${sizes[@]}"; do
+    note_extra=""
+    if [[ -n "${bs}" ]]; then
+      note_extra="batch=${bs}"
+    fi
+    if run_benchmark_once "${miner_bin}" "${gpu_devices}" "${bs}" "${note_extra}"; then
+      any_ok=1
+    fi
+  done
+
+  if [[ "${any_ok}" -ne 1 ]]; then
+    echo "error: all benchmark runs failed" >&2
+    exit 1
+  fi
 }
 
 # --- args ---
@@ -453,6 +521,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gpu-devices)
       GPU_DEVICES_FLAG="${2:-}"
+      shift 2
+      ;;
+    --gpu-batch-size)
+      GPU_BATCH_SIZE="${2:-}"
+      shift 2
+      ;;
+    --batch-sizes)
+      BATCH_SIZES="${2:-}"
       shift 2
       ;;
     --notes)

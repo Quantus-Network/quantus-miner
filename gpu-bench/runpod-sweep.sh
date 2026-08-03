@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orchestrate RunPod Pods via REST API: for each GPU type, create → SSH →
-# remote-run.sh (--dev node + miner + Prometheus CSV) → scp results → delete.
+# remote-run.sh (miner build + benchmark batch-size sweep → CSV) → scp → delete.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,18 +13,16 @@ SSH_USER="${SSH_USER:-root}"
 CLOUD_TYPE="${CLOUD_TYPE:-COMMUNITY}"
 # Prefer runpod/base (CUDA + SSH, no PyTorch). Drivers come from the host.
 # Use a current Hub tag — stale tags leave Pods RUNNING with runtime=null forever.
-# Ubuntu 24.04 required: recent quantus-node releases need GLIBC_2.38+
-# (22.04 ships 2.35 and will fail with "GLIBC_2.38 not found").
+# Ubuntu 24.04 base is fine for miner builds; keep NVIDIA_DRIVER_CAPABILITIES=all.
 IMAGE_NAME="${IMAGE_NAME:-runpod/base:1.1.0-cuda1281-ubuntu2404}"
 TEMPLATE_ID="${TEMPLATE_ID:-}"
 # Community hosts often reject large disks ("machine does not have the resources").
-# Binaries + --dev chain fit in a small container disk; volume defaults to 0.
 # Cargo build of miner needs more disk than a release binary download.
 CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-50}"
 VOLUME_GB="${VOLUME_GB:-0}"
-DURATION="${DURATION:-60}"
-WARMUP_SECONDS="${WARMUP_SECONDS:-45}"
+DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
+BATCH_SIZES="${BATCH_SIZES:-1000000 4194304 8388608 16777216}"
 REMOTE_DIR="${REMOTE_DIR:-/workspace/quantus-gpu-bench}"
 MINER_SOURCE="${MINER_SOURCE:-git}"
 MINER_REPO="${MINER_REPO:-https://github.com/Quantus-Network/quantus-miner.git}"
@@ -54,7 +52,8 @@ Environment:
   CLOUD_TYPE         COMMUNITY (default) or SECURE
   IMAGE_NAME         Docker image (default: runpod/base … ubuntu2404 for GLIBC)
   TEMPLATE_ID        Optional RunPod template id (skips IMAGE_NAME)
-  DURATION           Sample seconds per GPU (default 60)
+  DURATION           Benchmark seconds per batch size (default 30)
+  BATCH_SIZES        Space-separated gpu-batch-size list (default 1M 4M 8M 16M)
   RESULTS_CSV        Collaborative dataset to append (default ./results.csv)
   OUT_DIR            Per-pod temp rows (default ./sweep-out, gitignored)
   KEEP_ON_FAILURE=1  Do not delete Pod if remote-run fails
@@ -564,8 +563,8 @@ run_one_attempt() {
        --provider runpod \
        --cost-per-hour '${cost}' \
        --duration '${DURATION}' \
-       --warmup '${WARMUP_SECONDS}' \
        --gpu-devices '${GPU_DEVICES}' \
+       --batch-sizes '${BATCH_SIZES}' \
        --miner-source '${MINER_SOURCE}' \
        --miner-repo '${MINER_REPO}' \
        --miner-branch '${MINER_BRANCH}' \

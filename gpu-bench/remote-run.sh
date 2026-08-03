@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run on a GPU host (e.g. RunPod): fetch node release + build miner from git,
-# start --dev node + GPU miner, sample Prometheus into results.csv.
+# Run on a GPU host (e.g. RunPod): build miner from git, ensure NVIDIA Vulkan,
+# run quantus-miner benchmark across batch sizes → results.csv (no node).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,15 +17,13 @@ MINER_BRANCH="${MINER_BRANCH:-illuzen/gpu-bench}"
 MINER_VERSION="${MINER_VERSION:-v3.3.1}"
 MINER_URL="${MINER_URL:-https://github.com/Quantus-Network/quantus-miner/releases/download/${MINER_VERSION}/quantus-miner-linux-x86_64}"
 FORCE_MINER_BUILD="${FORCE_MINER_BUILD:-0}"
-NODE_URL="${NODE_URL:-}" # optional override; default = latest chain release
 
 PROVIDER="${PROVIDER:-runpod}"
 COST_PER_HOUR="${COST_PER_HOUR:-}"
-DURATION="${DURATION:-60}"
+DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
-METRICS_PORT="${METRICS_PORT:-9900}"
-MINER_LISTEN_PORT="${MINER_LISTEN_PORT:-9833}"
-WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
+# Default sweep: 1M → 16M. Override with --batch-sizes or BATCH_SIZES.
+BATCH_SIZES="${BATCH_SIZES:-1000000 4194304 8388608 16777216}"
 NOTES="${NOTES:-}"
 
 usage() {
@@ -34,9 +32,9 @@ Usage: ./remote-run.sh [options]
 
   --provider NAME         cloud_provider column (default: runpod)
   --cost-per-hour USD     required for hash_per_dollar column
-  --duration SECONDS      Prometheus sample window (default: 60)
+  --duration SECONDS      per-batch-size benchmark window (default: 30)
   --gpu-devices N         default 1
-  --warmup SECONDS        wait after miner start before sampling (default: 30)
+  --batch-sizes "N N N"   GPU batch sizes to sweep (default: 1M 4M 8M 16M)
   --notes TEXT
   --miner-branch REF      git branch/tag/commit to build (default: illuzen/gpu-bench)
   --miner-repo URL        git remote (default: Quantus-Network/quantus-miner)
@@ -46,10 +44,11 @@ Usage: ./remote-run.sh [options]
   --force-miner-build     rebuild even if binary exists
   --help
 
-Builds quantus-miner from git (or downloads a release), downloads quantus-node,
-runs --dev + GPU miner, samples :9900/metrics into results.csv.
+Builds quantus-miner from git (or downloads a release), sets up NVIDIA Vulkan,
+runs `quantus-miner benchmark` for each batch size (no node), appends rows to
+results.csv (notes include batch=N).
 
-Env: MINER_SOURCE, MINER_REPO, MINER_BRANCH, FORCE_MINER_BUILD, MINER_URL, NODE_URL
+Env: MINER_SOURCE, MINER_REPO, MINER_BRANCH, FORCE_MINER_BUILD, MINER_URL, BATCH_SIZES
 EOF
 }
 
@@ -66,14 +65,15 @@ while [[ $# -gt 0 ]]; do
     --cost-per-hour) COST_PER_HOUR="${2:-}"; shift 2 ;;
     --duration) DURATION="${2:-}"; shift 2 ;;
     --gpu-devices) GPU_DEVICES="${2:-}"; shift 2 ;;
-    --warmup) WARMUP_SECONDS="${2:-}"; shift 2 ;;
+    --batch-sizes) BATCH_SIZES="${2:-}"; shift 2 ;;
     --notes) NOTES="${2:-}"; shift 2 ;;
     --miner-branch) MINER_BRANCH="${2:-}"; shift 2 ;;
     --miner-repo) MINER_REPO="${2:-}"; shift 2 ;;
     --miner-source) MINER_SOURCE="${2:-}"; shift 2 ;;
     --miner-url) MINER_URL="${2:-}"; MINER_SOURCE="release"; shift 2 ;;
     --force-miner-build) FORCE_MINER_BUILD=1; shift ;;
-    --node-url) NODE_URL="${2:-}"; shift 2 ;;
+    # Deprecated no-ops (node path removed)
+    --warmup | --node-url) shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *)
       echo "error: unknown option: $1" >&2
@@ -430,159 +430,46 @@ download_miner() {
   esac
 }
 
-download_node() {
-  local dest="${BIN_DIR}/quantus-node"
-  if [[ -x "${dest}" ]]; then
-    echo "Using existing ${dest}" >&2
-    printf '%s\n' "${dest}"
-    return
-  fi
-
-  local url="${NODE_URL}"
-  if [[ -z "${url}" ]]; then
-    echo "Resolving latest quantus-node release ..." >&2
-    local release_json tag
-    release_json="$(curl -fsSL https://api.github.com/repos/Quantus-Network/chain/releases/latest)"
-    tag="$(echo "${release_json}" | grep -o '"tag_name": "[^"]*"' | head -n 1 | cut -d'"' -f4)"
-    url="https://github.com/Quantus-Network/chain/releases/download/${tag}/quantus-node-${tag}-x86_64-unknown-linux-gnu.tar.gz"
-  fi
-
-  echo "Downloading node: ${url}" >&2
-  local tmp
-  tmp="$(mktemp -d)"
-  curl -fL "${url}" -o "${tmp}/node.tar.gz"
-  tar -xzf "${tmp}/node.tar.gz" -C "${tmp}"
-  if [[ ! -f "${tmp}/quantus-node" ]]; then
-    echo "error: archive missing quantus-node" >&2
-    exit 1
-  fi
-  mv "${tmp}/quantus-node" "${dest}"
-  chmod +x "${dest}"
-  rm -rf "${tmp}"
-  printf '%s\n' "${dest}"
-}
-
-stop_pidfile() {
-  local pidfile="$1"
-  if [[ ! -f "${pidfile}" ]]; then
-    return 0
-  fi
-  local pid
-  pid="$(cat "${pidfile}")"
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill "${pid}" 2>/dev/null || true
-    sleep 1
-    kill -9 "${pid}" 2>/dev/null || true
-  fi
-  rm -f "${pidfile}"
-}
-
-cleanup() {
-  stop_pidfile "${RUN_DIR}/miner.pid"
-  stop_pidfile "${RUN_DIR}/node.pid"
-}
-trap cleanup EXIT
-
 ensure_nvidia_vulkan
-NODE_BIN="$(download_node)"
 MINER_BIN="$(download_miner | tail -n 1)"
 if [[ ! -x "${MINER_BIN}" ]]; then
   echo "error: miner binary missing or not executable: '${MINER_BIN}'" >&2
   exit 1
 fi
 
-# Fail fast with a clear hint if the host glibc is too old for the release binary.
-if ! "${NODE_BIN}" --version >/tmp/qnode-ver.txt 2>/tmp/qnode-ver.err; then
-  if grep -q 'GLIBC_' /tmp/qnode-ver.err 2>/dev/null; then
-    echo "error: quantus-node needs a newer glibc than this image provides:" >&2
-    cat /tmp/qnode-ver.err >&2
-    echo "Use an Ubuntu 24.04+ image, e.g. IMAGE_NAME=runpod/base:1.1.0-cuda1281-ubuntu2404" >&2
-    exit 1
-  fi
-fi
-
 echo "GPU:"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || nvidia-smi || true
 
-mkdir -p "${RUN_DIR}/node-data"
-echo "Starting quantus-node --dev ..."
-nohup "${NODE_BIN}" \
-  --dev \
-  --base-path "${RUN_DIR}/node-data" \
-  --rpc-port 9944 \
-  --prometheus-port 9615 \
-  --prometheus-external \
-  --miner-listen-port "${MINER_LISTEN_PORT}" \
-  --rpc-cors all \
-  >"${RUN_DIR}/node.log" 2>&1 &
-echo $! >"${RUN_DIR}/node.pid"
-sleep 3
-
-if ! kill -0 "$(cat "${RUN_DIR}/node.pid")" 2>/dev/null; then
-  echo "error: node failed to start; log:" >&2
-  tail -n 80 "${RUN_DIR}/node.log" >&2 || true
-  if grep -q 'GLIBC_' "${RUN_DIR}/node.log" 2>/dev/null; then
-    echo "hint: IMAGE_NAME=runpod/base:1.1.0-cuda1281-ubuntu2404 (GLIBC 2.38+)" >&2
-  fi
-  exit 1
-fi
-
-echo "Starting quantus-miner (gpu-devices=${GPU_DEVICES}) ..."
-# Keep VK_ICD_FILENAMES / NVIDIA caps in the miner environment.
-nohup env \
+# Smoke-test GPU path before spending minutes on a batch sweep.
+echo "Smoke-testing benchmark (5s) ..."
+set +e
+smoke_log="$(mktemp)"
+env \
   VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-}" \
   NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-all}" \
   __GLX_VENDOR_LIBRARY_NAME=nvidia \
   LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}" \
-  "${MINER_BIN}" serve \
-  --node-addr "127.0.0.1:${MINER_LISTEN_PORT}" \
-  --gpu-devices "${GPU_DEVICES}" \
+  "${MINER_BIN}" benchmark \
   --cpu-workers 0 \
-  --metrics-port "${METRICS_PORT}" \
-  >"${RUN_DIR}/miner.log" 2>&1 &
-echo $! >"${RUN_DIR}/miner.pid"
-sleep 3
-
-if ! kill -0 "$(cat "${RUN_DIR}/miner.pid")" 2>/dev/null; then
-  echo "error: miner failed to start; log:" >&2
-  tail -n 80 "${RUN_DIR}/miner.log" >&2 || true
-  if grep -qiE 'No usable GPU|llvmpipe|Vulkan' "${RUN_DIR}/miner.log" 2>/dev/null; then
+  --gpu-devices "${GPU_DEVICES}" \
+  --gpu-batch-size 1000000 \
+  --duration 5 \
+  >"${smoke_log}" 2>&1
+smoke_rc=$?
+set -e
+if [[ "${smoke_rc}" -ne 0 ]]; then
+  echo "error: benchmark smoke test failed; log:" >&2
+  cat "${smoke_log}" >&2
+  if grep -qiE 'No usable GPU|llvmpipe|Vulkan|Failed to initialize GPU' "${smoke_log}" 2>/dev/null; then
     echo "hint: need NVIDIA Vulkan ICD + NVIDIA_DRIVER_CAPABILITIES=all (not Mesa llvmpipe)" >&2
+    rm -f "${smoke_log}"
+    exit "${EXIT_COMPUTE_ONLY}"
   fi
+  rm -f "${smoke_log}"
   exit 1
 fi
-
-# Wait for metrics + non-zero hashrate (jobs from --dev)
-echo "Warming up ${WARMUP_SECONDS}s / waiting for hashrate ..."
-ready=0
-for ((i = 0; i < WARMUP_SECONDS + 60; i++)); do
-  if ! kill -0 "$(cat "${RUN_DIR}/miner.pid")" 2>/dev/null; then
-    echo "error: miner exited during warmup; log:" >&2
-    tail -n 80 "${RUN_DIR}/miner.log" >&2 || true
-    exit 1
-  fi
-  if curl -sf "http://127.0.0.1:${METRICS_PORT}/metrics" \
-    | awk '/^miner_gpu_hash_rate[[:space:]]/ { if ($2+0 > 0) found=1 } END { exit !found }'; then
-    ready=1
-    break
-  fi
-  sleep 1
-done
-
-if [[ "${ready}" -ne 1 ]]; then
-  echo "warning: no positive miner_gpu_hash_rate yet; sampling anyway" >&2
-  echo "--- miner log ---" >&2
-  tail -n 40 "${RUN_DIR}/miner.log" >&2 || true
-  echo "--- node log ---" >&2
-  tail -n 40 "${RUN_DIR}/node.log" >&2 || true
-fi
-
-# Point record.sh at our run dir / metrics
-export METRICS_PORT
-mkdir -p "${SCRIPT_DIR}/.run" 2>/dev/null || true
-# record.sh reads .run/metrics.port relative to its own dir — use WORK_DIR copy
-echo "${METRICS_PORT}" >"${WORK_DIR}/.run/metrics.port"
+rm -f "${smoke_log}"
 
 NOTE_ARGS=()
 if [[ -n "${NOTES}" ]]; then
@@ -590,12 +477,22 @@ if [[ -n "${NOTES}" ]]; then
 fi
 
 cd "${WORK_DIR}"
-./record.sh --live \
+echo "Batch-size sweep: ${BATCH_SIZES} (${DURATION}s each)"
+export MINER_BIN
+env \
+  VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-}" \
+  NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-all}" \
+  __GLX_VENDOR_LIBRARY_NAME=nvidia \
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}" \
+  MINER_BIN="${MINER_BIN}" \
+  ./record.sh --benchmark \
   --provider "${PROVIDER}" \
   --cost-per-hour "${COST_PER_HOUR}" \
   --duration "${DURATION}" \
+  --gpu-devices "${GPU_DEVICES}" \
+  --batch-sizes "${BATCH_SIZES}" \
   "${NOTE_ARGS[@]}"
 
 echo "Done. Results: ${RESULTS_CSV}"
-cat "${RESULTS_CSV}"
-# Leave processes up until EXIT trap on script end — stop after record so CSV is final
+tail -n 8 "${RESULTS_CSV}" || true

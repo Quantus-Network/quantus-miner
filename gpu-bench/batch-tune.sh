@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# A/B GPU batch sizes on a pod (or any host with a built miner + NVIDIA GPU).
-# Samples nvidia-smi util during each run and prints a comparison table.
+# Quick A/B of GPU batch sizes (util + hashrate table). No cost columns.
+# For CSV rows with cost/hash_per_dollar, prefer:
+#   ./remote-run.sh --cost-per-hour … --batch-sizes "…"
 #
 # Usage (on pod, after miner is built):
 #   cd /workspace/quantus-gpu-bench
 #   ./batch-tune.sh
 #   ./batch-tune.sh --sizes "1000000 4194304 16777216" --duration 30
-#
-# Or from laptop via runpod-shell (see comments at bottom of this file).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
