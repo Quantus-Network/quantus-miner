@@ -74,10 +74,11 @@ print_ssh_hint() {
   echo "On the pod:"
   cat <<EOF
   cd ${REMOTE_DIR}
-  # build miner + benchmark batch-size sweep (no node):
+  # build miner + batch sweep with simulated NewJob (no node):
   bash -x ./remote-run.sh --cost-per-hour ${cost} --duration 30
   # FORCE_MINER_BUILD=1 ./remote-run.sh ...   # after pushing new commits
-  # ./remote-run.sh --cost-per-hour ${cost} --batch-sizes "1000000 16777216"
+  # ./remote-run.sh --job-interval 0              # sustained peak
+  # ./remote-run.sh --difficulty max              # cancel-only churn
 
   # Vulkan sanity:
   nvidia-smi

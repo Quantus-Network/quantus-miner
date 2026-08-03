@@ -13,25 +13,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-/workspace/quantus-gpu-bench}"
 BIN_DIR="${BIN_DIR:-${WORK_DIR}/bin}"
 OUT_CSV="${OUT_CSV:-${WORK_DIR}/batch-tune.csv}"
-SIZES="${SIZES:-1000000 4194304 8388608 16777216}"
+SIZES="${SIZES:-262144 524288 1000000 4194304}"
 DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
 CPU_WORKERS="${CPU_WORKERS:-0}"
+JOB_INTERVAL="${JOB_INTERVAL:-2}"
+DIFFICULTY="${DIFFICULTY:-}"
 MINER_BIN="${MINER_BIN:-}"
 
 usage() {
   cat <<'EOF'
 Usage: ./batch-tune.sh [options]
 
-  --sizes "N N N"     batch sizes to try (default: 1M 4M 8M 16M)
+  --sizes "N N N"     batch sizes to try (default: 256K 512K 1M 4M)
   --duration SECONDS  per-size benchmark window (default: 30)
+  --job-interval SEC  simulated NewJob period (default: 2; 0 = sustained)
+  --difficulty DEC    difficulty for job sim (or max)
   --gpu-devices N     default 1
   --cpu-workers N     default 0 (GPU-only)
   --miner-bin PATH    override miner binary
   --out PATH          results CSV (default: $WORK_DIR/batch-tune.csv)
   --help
-
-Requires a miner built with the gpu_chunk=batch_size CLI fix (illuzen/gpu-bench).
 EOF
 }
 
@@ -39,6 +41,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --sizes) SIZES="$2"; shift 2 ;;
     --duration) DURATION="$2"; shift 2 ;;
+    --job-interval) JOB_INTERVAL="$2"; shift 2 ;;
+    --difficulty) DIFFICULTY="$2"; shift 2 ;;
     --gpu-devices) GPU_DEVICES="$2"; shift 2 ;;
     --cpu-workers) CPU_WORKERS="$2"; shift 2 ;;
     --miner-bin) MINER_BIN="$2"; shift 2 ;;
@@ -104,12 +108,12 @@ GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head
 echo "miner:  ${MINER_BIN}"
 echo "gpu:    ${GPU_NAME}"
 echo "sizes:  ${SIZES}"
-echo "window: ${DURATION}s  gpu_devices=${GPU_DEVICES} cpu_workers=${CPU_WORKERS}"
+echo "window: ${DURATION}s  gpu_devices=${GPU_DEVICES} cpu_workers=${CPU_WORKERS} job_interval=${JOB_INTERVAL}"
 echo
 
 mkdir -p "$(dirname "${OUT_CSV}")"
 if [[ ! -f "${OUT_CSV}" ]]; then
-  echo "timestamp,gpu_name,batch_size,duration_s,hashrate_hs,avg_util_pct,notes" >"${OUT_CSV}"
+  echo "timestamp,gpu_name,batch_size,duration_s,hashrate_hs,avg_util_pct,job_interval,notes" >"${OUT_CSV}"
 fi
 
 printf "%-12s  %-14s  %-10s\n" "batch_size" "hashrate" "avg_util%"
@@ -126,13 +130,22 @@ for bs in ${SIZES}; do
   ) >"${util_log}" &
   util_pid=$!
 
+  bench_cmd=(
+    "${MINER_BIN}" benchmark
+    --gpu-devices "${GPU_DEVICES}"
+    --cpu-workers "${CPU_WORKERS}"
+    --gpu-batch-size "${bs}"
+    --duration "${DURATION}"
+  )
+  if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
+    bench_cmd+=(--job-interval "${JOB_INTERVAL}")
+  fi
+  if [[ -n "${DIFFICULTY}" ]]; then
+    bench_cmd+=(--difficulty "${DIFFICULTY}")
+  fi
+
   set +e
-  "${MINER_BIN}" benchmark \
-    --gpu-devices "${GPU_DEVICES}" \
-    --cpu-workers "${CPU_WORKERS}" \
-    --gpu-batch-size "${bs}" \
-    --duration "${DURATION}" \
-    >"${log}" 2>&1
+  "${bench_cmd[@]}" >"${log}" 2>&1
   rc=$?
   set -e
 
@@ -157,7 +170,7 @@ for bs in ${SIZES}; do
   fi
 
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "${ts},${GPU_NAME},${bs},${DURATION},${rate},${util},${notes}" >>"${OUT_CSV}"
+  echo "${ts},${GPU_NAME},${bs},${DURATION},${rate},${util},${JOB_INTERVAL},${notes}" >>"${OUT_CSV}"
   printf "%-12s  %-14s  %-10s\n" "${bs}" "${rate_disp}" "${util}%"
 
   rm -f "${log}" "${util_log}"

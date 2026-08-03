@@ -22,7 +22,9 @@ CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-50}"
 VOLUME_GB="${VOLUME_GB:-0}"
 DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
-BATCH_SIZES="${BATCH_SIZES:-1000000 4194304 8388608 16777216}"
+BATCH_SIZES="${BATCH_SIZES:-262144 524288 1000000 4194304}"
+JOB_INTERVAL="${JOB_INTERVAL:-2}"
+DIFFICULTY="${DIFFICULTY:-}"
 REMOTE_DIR="${REMOTE_DIR:-/workspace/quantus-gpu-bench}"
 MINER_SOURCE="${MINER_SOURCE:-git}"
 MINER_REPO="${MINER_REPO:-https://github.com/Quantus-Network/quantus-miner.git}"
@@ -53,7 +55,9 @@ Environment:
   IMAGE_NAME         Docker image (default: runpod/base … ubuntu2404 for GLIBC)
   TEMPLATE_ID        Optional RunPod template id (skips IMAGE_NAME)
   DURATION           Benchmark seconds per batch size (default 30)
-  BATCH_SIZES        Space-separated gpu-batch-size list (default 1M 4M 8M 16M)
+  BATCH_SIZES        Space-separated gpu-batch-size list (default 256K 512K 1M 4M)
+  JOB_INTERVAL       Simulated NewJob seconds (default 2; 0 = sustained)
+  DIFFICULTY         Optional decimal or max for job simulation
   RESULTS_CSV        Collaborative dataset to append (default ./results.csv)
   OUT_DIR            Per-pod temp rows (default ./sweep-out, gitignored)
   KEEP_ON_FAILURE=1  Do not delete Pod if remote-run fails
@@ -565,6 +569,8 @@ run_one_attempt() {
        --duration '${DURATION}' \
        --gpu-devices '${GPU_DEVICES}' \
        --batch-sizes '${BATCH_SIZES}' \
+       --job-interval '${JOB_INTERVAL}' \
+       ${DIFFICULTY:+--difficulty '${DIFFICULTY}'} \
        --miner-source '${MINER_SOURCE}' \
        --miner-repo '${MINER_REPO}' \
        --miner-branch '${MINER_BRANCH}' \

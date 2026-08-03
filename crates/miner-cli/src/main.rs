@@ -1,16 +1,19 @@
 use clap::{Parser, Subcommand};
-use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
+use engine_cpu::{AtomicBoolCancelCheck, EngineRange, JobIdCancelCheck, MinerEngine};
 use miner_service::{run, ServiceConfig};
+use pow_core::JobContext;
 use primitive_types::U512;
 use rand::RngCore;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 // CLI defaults
 const DEFAULT_GPU_BATCH_SIZE: u32 = 1_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
+/// Default difficulty when `--job-interval` is set: ~1s to find at 10 MH/s.
+const DEFAULT_JOB_DIFFICULTY: u64 = 10_000_000;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -84,6 +87,16 @@ enum Command {
         /// Benchmark duration in seconds (default: 10)
         #[arg(short, long, default_value_t = 10)]
         duration: u64,
+
+        /// Simulate node job churn: every N seconds push a new random header
+        /// (like NewJob). 0 = sustained single job (default).
+        #[arg(long = "job-interval", default_value_t = 0.0)]
+        job_interval: f64,
+
+        /// PoW difficulty for job simulation (decimal). Use "max" for unreachable
+        /// (cancel-only churn). Default when --job-interval > 0: 10000000.
+        #[arg(long = "difficulty")]
+        difficulty: Option<String>,
 
         /// Allow integrated GPUs (APUs) even when discrete GPUs are available
         #[arg(long = "allow-integrated", env = "MINER_ALLOW_INTEGRATED")]
@@ -161,6 +174,8 @@ async fn main() {
             gpu_batch_size,
             cpu_batch_size,
             duration,
+            job_interval,
+            difficulty,
             allow_integrated,
             verbose,
         } => {
@@ -171,6 +186,8 @@ async fn main() {
                 gpu_batch_size,
                 cpu_batch_size,
                 duration,
+                job_interval,
+                difficulty,
                 allow_integrated,
             )
             .await;
@@ -191,12 +208,39 @@ fn init_logger(verbose: bool) {
     env_logger::init();
 }
 
+fn parse_difficulty(raw: Option<&str>, job_interval: f64) -> U512 {
+    match raw {
+        None if job_interval > 0.0 => U512::from(DEFAULT_JOB_DIFFICULTY),
+        None => U512::MAX,
+        Some(s) if s.eq_ignore_ascii_case("max") => U512::MAX,
+        Some(s) => match U512::from_dec_str(s) {
+            Ok(d) if !d.is_zero() => d,
+            Ok(_) => {
+                eprintln!("❌ ERROR: --difficulty must be non-zero (or \"max\")");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("❌ ERROR: invalid --difficulty '{s}' (decimal or \"max\")");
+                std::process::exit(1);
+            }
+        },
+    }
+}
+
+fn random_header() -> [u8; 32] {
+    let mut header = [0u8; 32];
+    rand::rng().fill_bytes(&mut header);
+    header
+}
+
 async fn run_benchmark(
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
     gpu_batch_size: u32,
     cpu_batch_size: u64,
     duration: u64,
+    job_interval: f64,
+    difficulty_arg: Option<String>,
     allow_integrated: bool,
 ) {
     // When --gpu-devices is set and --cpu-workers is omitted, default to GPU-only
@@ -222,6 +266,7 @@ async fn run_benchmark(
     };
 
     let total_workers = effective_cpu_workers + effective_gpu_devices;
+    let difficulty = parse_difficulty(difficulty_arg.as_deref(), job_interval);
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
@@ -234,10 +279,25 @@ async fn run_benchmark(
     println!("GPU batch size: {} nonces", gpu_batch_size);
     println!("CPU batch size: {} hashes", cpu_batch_size);
     println!("Duration: {} seconds", duration);
+    if job_interval > 0.0 {
+        println!("Job interval: {:.2}s (simulated NewJob)", job_interval);
+        if difficulty == U512::MAX {
+            println!("Difficulty: max (cancel-only churn, no finds)");
+        } else {
+            println!("Difficulty: {difficulty}");
+        }
+    } else {
+        println!("Job interval: off (sustained single job)");
+    }
     println!();
 
     if total_workers == 0 {
         eprintln!("Error: No workers specified");
+        std::process::exit(1);
+    }
+
+    if job_interval < 0.0 {
+        eprintln!("❌ ERROR: --job-interval must be >= 0");
         std::process::exit(1);
     }
 
@@ -248,28 +308,55 @@ async fn run_benchmark(
         None
     };
 
+    if job_interval > 0.0 {
+        run_benchmark_with_jobs(
+            cpu_engine,
+            gpu_engine,
+            effective_cpu_workers,
+            effective_gpu_devices,
+            duration,
+            job_interval,
+            difficulty,
+        )
+        .await;
+    } else {
+        run_benchmark_sustained(
+            cpu_engine,
+            gpu_engine,
+            effective_cpu_workers,
+            effective_gpu_devices,
+            gpu_batch_size,
+            cpu_batch_size,
+            duration,
+        )
+        .await;
+    }
+}
+
+/// Continuous hashing on one header (difficulty MAX). Measures peak sustained H/s.
+async fn run_benchmark_sustained(
+    cpu_engine: Option<Arc<dyn MinerEngine>>,
+    gpu_engine: Option<Arc<dyn MinerEngine>>,
+    effective_cpu_workers: usize,
+    effective_gpu_devices: usize,
+    gpu_batch_size: u32,
+    cpu_batch_size: u64,
+    duration: u64,
+) {
+    let total_workers = effective_cpu_workers + effective_gpu_devices;
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let benchmark_start = Instant::now();
 
-    // Random header hash for benchmark
-    let mut header = [0u8; 32];
-    rand::rng().fill_bytes(&mut header);
-    // Bitcoin-style: target = MAX / difficulty. MAX → target 1 → essentially never finds.
+    let header = random_header();
     let difficulty = U512::MAX;
-
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
     let ctx = ref_engine.prepare_context(header, difficulty);
 
-    println!("⛏️  Starting benchmark...");
+    println!("⛏️  Starting sustained benchmark...");
 
-    // Spawn worker threads
     let mut handles = Vec::new();
-    let total_hashes = Arc::new(std::sync::Mutex::new(0u64));
+    let total_hashes = Arc::new(Mutex::new(0u64));
 
-    // Range per search_range call must be >= engine batch size; otherwise the GPU
-    // clamps this_batch_size to the range and --gpu-batch-size A/B is inert.
-    // One full batch per call also lets the wall-clock cancel + progress ticker arm
-    // between batches (cancel is only checked between GPU dispatches).
     let cpu_chunk = cpu_batch_size.max(10_000);
     let gpu_chunk = gpu_batch_size as u64;
 
@@ -290,7 +377,7 @@ async fn run_benchmark(
             let mut nonce = U512::from(worker_id as u64).saturating_mul(stride);
 
             loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -331,14 +418,178 @@ async fn run_benchmark(
         handles.push(handle);
     }
 
-    // Progress updates
+    progress_and_join(
+        handles,
+        cancel_flag,
+        total_hashes,
+        benchmark_start,
+        duration,
+        None,
+        None,
+    )
+    .await;
+}
+
+/// Serve-like path: open-ended search, JobId cancel, periodic NewJob, idle after Found.
+async fn run_benchmark_with_jobs(
+    cpu_engine: Option<Arc<dyn MinerEngine>>,
+    gpu_engine: Option<Arc<dyn MinerEngine>>,
+    effective_cpu_workers: usize,
+    effective_gpu_devices: usize,
+    duration: u64,
+    job_interval: f64,
+    difficulty: U512,
+) {
+    let total_workers = effective_cpu_workers + effective_gpu_devices;
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let current_job_id = Arc::new(AtomicU64::new(0));
+    let job_ctx: Arc<RwLock<JobContext>> = Arc::new(RwLock::new(JobContext::new(
+        random_header(),
+        difficulty,
+    )));
+    let total_hashes = Arc::new(Mutex::new(0u64));
+    let finds = Arc::new(AtomicU64::new(0));
+    let jobs_started = Arc::new(AtomicU64::new(0));
+
+    // Publish job 1 (ctx before id bump so workers never see a stale header).
+    {
+        *job_ctx.write().unwrap() = JobContext::new(random_header(), difficulty);
+        let id = current_job_id.fetch_add(1, Ordering::SeqCst) + 1;
+        jobs_started.store(id, Ordering::Relaxed);
+    }
+
+    println!("⛏️  Starting job-simulation benchmark...");
+
+    let mut handles = Vec::new();
+    let benchmark_start = Instant::now();
+
+    for worker_id in 0..total_workers {
+        let engine = if worker_id < effective_cpu_workers {
+            cpu_engine.as_ref().unwrap().clone()
+        } else {
+            gpu_engine.as_ref().unwrap().clone()
+        };
+
+        let stop = stop_flag.clone();
+        let job_id_counter = current_job_id.clone();
+        let job_ctx = job_ctx.clone();
+        let hashes = total_hashes.clone();
+        let finds = finds.clone();
+
+        let handle = thread::spawn(move || {
+            let stride = U512::from(1_000_000_000_000u64);
+            let worker_start = U512::from(worker_id as u64).saturating_mul(stride);
+
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let my_job_id = job_id_counter.load(Ordering::SeqCst);
+                if my_job_id == 0 {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+
+                let ctx = job_ctx.read().unwrap().clone();
+                let cancel_check = JobIdCancelCheck {
+                    current_job_id: &job_id_counter,
+                    my_job_id,
+                };
+
+                // Match serve: open-ended range; engine batches internally.
+                let range = EngineRange {
+                    start: worker_start,
+                    end: U512::MAX,
+                };
+
+                let result = engine.search_range(&ctx, range, &cancel_check);
+
+                match result {
+                    engine_cpu::EngineStatus::Found { hash_count, .. } => {
+                        *hashes.lock().unwrap() += hash_count;
+                        finds.fetch_add(1, Ordering::Relaxed);
+                        // Serve parks the GPU until the next NewJob after a find.
+                        while !stop.load(Ordering::Relaxed)
+                            && job_id_counter.load(Ordering::SeqCst) == my_job_id
+                        {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                    engine_cpu::EngineStatus::Cancelled { hash_count }
+                    | engine_cpu::EngineStatus::Exhausted { hash_count } => {
+                        *hashes.lock().unwrap() += hash_count;
+                    }
+                    engine_cpu::EngineStatus::DeviceLost { hash_count } => {
+                        *hashes.lock().unwrap() += hash_count;
+                        break;
+                    }
+                    engine_cpu::EngineStatus::Running { .. } => {}
+                }
+            }
+
+            engine_gpu::GpuEngine::clear_worker_resources();
+        });
+
+        handles.push(handle);
+    }
+
+    // Job feeder (simulated node)
+    let feeder_stop = stop_flag.clone();
+    let feeder_job_id = current_job_id.clone();
+    let feeder_ctx = job_ctx.clone();
+    let feeder_jobs = jobs_started.clone();
+    let feeder = thread::spawn(move || {
+        let interval = Duration::from_secs_f64(job_interval);
+        while !feeder_stop.load(Ordering::Relaxed) {
+            thread::sleep(interval);
+            if feeder_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            *feeder_ctx.write().unwrap() = JobContext::new(random_header(), difficulty);
+            let id = feeder_job_id.fetch_add(1, Ordering::SeqCst) + 1;
+            feeder_jobs.store(id, Ordering::Relaxed);
+            log::info!("simulated NewJob id={id}");
+        }
+    });
+
+    let stats = Some((finds.clone(), jobs_started.clone()));
+    progress_and_join(
+        handles,
+        stop_flag.clone(),
+        total_hashes,
+        benchmark_start,
+        duration,
+        stats,
+        Some(current_job_id.clone()),
+    )
+    .await;
+
+    stop_flag.store(true, Ordering::Relaxed);
+    current_job_id.fetch_add(1, Ordering::SeqCst);
+    let _ = feeder.join();
+}
+
+async fn progress_and_join(
+    handles: Vec<thread::JoinHandle<()>>,
+    stop_flag: Arc<AtomicBool>,
+    total_hashes: Arc<Mutex<u64>>,
+    benchmark_start: Instant,
+    duration: u64,
+    job_stats: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
+    job_id_to_bump: Option<Arc<AtomicU64>>,
+) {
     let mut last_update = Instant::now();
 
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         if benchmark_start.elapsed() >= Duration::from_secs(duration) {
-            cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            stop_flag.store(true, Ordering::Relaxed);
+            // Cancel in-flight GPU batches (JobIdCancelCheck) and wake Found-waiters.
+            if let Some(ref job_id) = job_id_to_bump {
+                job_id.fetch_add(1, Ordering::SeqCst);
+            }
             break;
         }
 
@@ -347,13 +598,22 @@ async fn run_benchmark(
             let elapsed = benchmark_start.elapsed().as_secs_f64();
             if current > 0 {
                 let rate = current as f64 / elapsed;
-                println!("⏱️  {:.1}s - {} H/s", elapsed, format_hash_rate(rate));
+                if let Some((finds, jobs)) = &job_stats {
+                    println!(
+                        "⏱️  {:.1}s - {} H/s (jobs={}, finds={})",
+                        elapsed,
+                        format_hash_rate(rate),
+                        jobs.load(Ordering::Relaxed),
+                        finds.load(Ordering::Relaxed)
+                    );
+                } else {
+                    println!("⏱️  {:.1}s - {} H/s", elapsed, format_hash_rate(rate));
+                }
             }
             last_update = Instant::now();
         }
     }
 
-    // Wait for threads
     for handle in handles {
         let _ = handle.join();
     }
@@ -368,10 +628,9 @@ async fn run_benchmark(
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
     println!("Total hashes: {}", final_hashes);
     println!("Average rate: {} H/s", format_hash_rate(avg_rate));
-
-    if total_workers > 1 {
-        let per_worker = avg_rate / total_workers as f64;
-        println!("Per-worker: {} H/s", format_hash_rate(per_worker));
+    if let Some((finds, jobs)) = job_stats {
+        println!("Jobs started: {}", jobs.load(Ordering::Relaxed));
+        println!("Solutions found: {}", finds.load(Ordering::Relaxed));
     }
 
     println!("✅ Benchmark completed!");

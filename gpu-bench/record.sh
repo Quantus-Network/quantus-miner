@@ -19,6 +19,8 @@ GPU_DEVICES_FLAG=""
 GPU_BATCH_SIZE="${GPU_BATCH_SIZE:-}"
 # Space-separated list; when set with --benchmark, runs one row per size.
 BATCH_SIZES="${BATCH_SIZES:-}"
+JOB_INTERVAL="${JOB_INTERVAL:-0}"
+DIFFICULTY="${DIFFICULTY:-}"
 
 usage() {
   cat <<'EOF'
@@ -33,6 +35,8 @@ Options:
   --gpu-devices N        GPUs for --benchmark (default: GPU_DEVICES or 1)
   --gpu-batch-size N     Single GPU batch size for --benchmark
   --batch-sizes "N N"    Sweep several batch sizes (one CSV row each)
+  --job-interval SECONDS Simulated NewJob period (0 = sustained; default 0)
+  --difficulty DEC|max   Difficulty for job simulation
   --notes TEXT           Optional notes column
   --dry-run              Print the CSV row but do not append
   -h, --help             Show this help
@@ -40,7 +44,8 @@ Options:
 Examples:
   ./record.sh --provider vast.ai --cost-per-hour 0.35
   ./record.sh --benchmark --provider runpod --cost-per-hour 0.42 --duration 30
-  ./record.sh --benchmark --batch-sizes "1000000 4194304 16777216" --provider runpod --cost-per-hour 0.39
+  ./record.sh --benchmark --job-interval 2 --batch-sizes "262144 524288 1000000" \
+      --provider runpod --cost-per-hour 0.39
 EOF
 }
 
@@ -394,25 +399,28 @@ run_benchmark_once() {
     batch_label="${batch_size}"
   fi
 
-  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}, batch=${batch_label}) ..." >&2
+  local bench_cmd=(
+    "${miner_bin}" benchmark
+    --cpu-workers 0
+    --gpu-devices "${gpu_devices}"
+    --duration "${DURATION}"
+  )
+  if [[ -n "${batch_size}" ]]; then
+    bench_cmd+=(--gpu-batch-size "${batch_size}")
+  fi
+  if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
+    bench_cmd+=(--job-interval "${JOB_INTERVAL}")
+  fi
+  if [[ -n "${DIFFICULTY}" ]]; then
+    bench_cmd+=(--difficulty "${DIFFICULTY}")
+  fi
+
+  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}, batch=${batch_label}, job_interval=${JOB_INTERVAL}) ..." >&2
   sample_util_during "${util_file}" "${DURATION}" &
   local sampler_pid=$!
 
   set +e
-  if [[ -n "${batch_size}" ]]; then
-    "${miner_bin}" benchmark \
-      --cpu-workers 0 \
-      --gpu-devices "${gpu_devices}" \
-      --gpu-batch-size "${batch_size}" \
-      --duration "${DURATION}" \
-      >"${bench_log}" 2>&1
-  else
-    "${miner_bin}" benchmark \
-      --cpu-workers 0 \
-      --gpu-devices "${gpu_devices}" \
-      --duration "${DURATION}" \
-      >"${bench_log}" 2>&1
-  fi
+  "${bench_cmd[@]}" >"${bench_log}" 2>&1
   local bench_rc=$?
   set -e
 
@@ -485,6 +493,16 @@ run_benchmark() {
     if [[ -n "${bs}" ]]; then
       note_extra="batch=${bs}"
     fi
+    if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
+      if [[ -n "${note_extra}" ]]; then
+        note_extra="${note_extra};job_interval=${JOB_INTERVAL}"
+      else
+        note_extra="job_interval=${JOB_INTERVAL}"
+      fi
+      if [[ -n "${DIFFICULTY}" ]]; then
+        note_extra="${note_extra};difficulty=${DIFFICULTY}"
+      fi
+    fi
     if run_benchmark_once "${miner_bin}" "${gpu_devices}" "${bs}" "${note_extra}"; then
       any_ok=1
     fi
@@ -529,6 +547,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --batch-sizes)
       BATCH_SIZES="${2:-}"
+      shift 2
+      ;;
+    --job-interval)
+      JOB_INTERVAL="${2:-}"
+      shift 2
+      ;;
+    --difficulty)
+      DIFFICULTY="${2:-}"
       shift 2
       ;;
     --notes)

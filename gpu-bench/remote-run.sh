@@ -22,8 +22,12 @@ PROVIDER="${PROVIDER:-runpod}"
 COST_PER_HOUR="${COST_PER_HOUR:-}"
 DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
-# Default sweep: 1M → 16M. Override with --batch-sizes or BATCH_SIZES.
-BATCH_SIZES="${BATCH_SIZES:-1000000 4194304 8388608 16777216}"
+# Downward + 1M + one larger step. Override with --batch-sizes or BATCH_SIZES.
+BATCH_SIZES="${BATCH_SIZES:-262144 524288 1000000 4194304}"
+# Simulate NewJob churn (seconds). 0 = sustained peak H/s (no job switches).
+JOB_INTERVAL="${JOB_INTERVAL:-2}"
+# Optional decimal difficulty for job sim (default in miner: 10000000). Use "max" for cancel-only.
+DIFFICULTY="${DIFFICULTY:-}"
 NOTES="${NOTES:-}"
 
 usage() {
@@ -34,7 +38,9 @@ Usage: ./remote-run.sh [options]
   --cost-per-hour USD     required for hash_per_dollar column
   --duration SECONDS      per-batch-size benchmark window (default: 30)
   --gpu-devices N         default 1
-  --batch-sizes "N N N"   GPU batch sizes to sweep (default: 1M 4M 8M 16M)
+  --batch-sizes "N N N"   GPU batch sizes (default: 256K 512K 1M 4M)
+  --job-interval SECONDS  simulated NewJob period (default: 2; 0 = sustained)
+  --difficulty DEC|max    PoW difficulty for job sim (miner default 1e7)
   --notes TEXT
   --miner-branch REF      git branch/tag/commit to build (default: illuzen/gpu-bench)
   --miner-repo URL        git remote (default: Quantus-Network/quantus-miner)
@@ -46,9 +52,10 @@ Usage: ./remote-run.sh [options]
 
 Builds quantus-miner from git (or downloads a release), sets up NVIDIA Vulkan,
 runs `quantus-miner benchmark` for each batch size (no node), appends rows to
-results.csv (notes include batch=N).
+results.csv (notes include batch=N; job_interval=… when set).
 
-Env: MINER_SOURCE, MINER_REPO, MINER_BRANCH, FORCE_MINER_BUILD, MINER_URL, BATCH_SIZES
+Env: MINER_SOURCE, MINER_REPO, MINER_BRANCH, FORCE_MINER_BUILD, MINER_URL,
+     BATCH_SIZES, JOB_INTERVAL, DIFFICULTY
 EOF
 }
 
@@ -66,6 +73,8 @@ while [[ $# -gt 0 ]]; do
     --duration) DURATION="${2:-}"; shift 2 ;;
     --gpu-devices) GPU_DEVICES="${2:-}"; shift 2 ;;
     --batch-sizes) BATCH_SIZES="${2:-}"; shift 2 ;;
+    --job-interval) JOB_INTERVAL="${2:-}"; shift 2 ;;
+    --difficulty) DIFFICULTY="${2:-}"; shift 2 ;;
     --notes) NOTES="${2:-}"; shift 2 ;;
     --miner-branch) MINER_BRANCH="${2:-}"; shift 2 ;;
     --miner-repo) MINER_REPO="${2:-}"; shift 2 ;;
@@ -477,7 +486,14 @@ if [[ -n "${NOTES}" ]]; then
 fi
 
 cd "${WORK_DIR}"
-echo "Batch-size sweep: ${BATCH_SIZES} (${DURATION}s each)"
+echo "Batch-size sweep: ${BATCH_SIZES} (${DURATION}s each, job_interval=${JOB_INTERVAL})"
+EXTRA_ARGS=()
+if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
+  EXTRA_ARGS+=(--job-interval "${JOB_INTERVAL}")
+fi
+if [[ -n "${DIFFICULTY}" ]]; then
+  EXTRA_ARGS+=(--difficulty "${DIFFICULTY}")
+fi
 export MINER_BIN
 env \
   VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-}" \
@@ -492,6 +508,7 @@ env \
   --duration "${DURATION}" \
   --gpu-devices "${GPU_DEVICES}" \
   --batch-sizes "${BATCH_SIZES}" \
+  "${EXTRA_ARGS[@]}" \
   "${NOTE_ARGS[@]}"
 
 echo "Done. Results: ${RESULTS_CSV}"

@@ -23,8 +23,9 @@ download — hardware benches use `quantus-miner benchmark` only.
 
 ```bash
 ./remote-run.sh --provider runpod --cost-per-hour 0.69 --duration 30
-# default batch sizes: 1M 4M 8M 16M (one CSV row each, notes include batch=N)
-./remote-run.sh --cost-per-hour 0.39 --batch-sizes "1000000 16777216"
+# default: batch sizes 256K 512K 1M 4M, --job-interval 2 (simulated NewJob)
+./remote-run.sh --cost-per-hour 0.39 --job-interval 0   # sustained peak H/s
+./remote-run.sh --cost-per-hour 0.39 --difficulty max   # cancel-only churn
 ```
 
 Or call record directly if the miner is already built:
@@ -32,8 +33,12 @@ Or call record directly if the miner is already built:
 ```bash
 MINER_BIN=./bin/quantus-miner ./record.sh --benchmark \
   --provider runpod --cost-per-hour 0.42 \
-  --batch-sizes "1000000 4194304 16777216" --duration 30
+  --job-interval 2 --batch-sizes "262144 524288 1000000" --duration 30
 ```
+
+`benchmark --job-interval N` rotates a random header every N seconds (like node
+`NewJob`), with default difficulty `10000000`. After a find, workers idle until
+the next job — same cliff as `serve`.
 
 Local full stack (node + serve) is still available via `./setup.sh --dev` +
 `./record.sh --live` when you need end-to-end mining, not just hardware H/s.

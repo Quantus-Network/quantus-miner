@@ -14,6 +14,7 @@ env_logger = { workspace = true }
 log = { workspace = true }
 engine-cpu = { path = "../engine-cpu" }
 engine-gpu = { path = "../engine-gpu" }
+pow-core = { path = "../pow-core" }
 primitive-types = { workspace = true }
 rand = { workspace = true }
 num_cpus = { workspace = true }
