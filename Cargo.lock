@@ -602,7 +602,7 @@ dependencies = [
  "qp-plonky2",
  "qp-plonky2-field",
  "qp-poseidon-constants",
- "qp-poseidon-core",
+ "qp-poseidon-core 3.1.0",
  "rand 0.9.2",
  "rand_chacha 0.9.0",
  "regex",
@@ -2260,6 +2260,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78172860cd960773c72e97fba07ead9e5a1c13086c5746283744933e2e4a577b"
 
 [[package]]
+name = "qp-poseidon-core"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5872607e25ea4ee5fb37e64bf1462168e1a36a4e719cdc8a105533c708253918"
+
+[[package]]
 name = "qpow-math"
 version = "0.1.0"
 source = "git+https://github.com/Quantus-Network/chain.git?tag=v0.7.1-q-day-2#5ea94cb1e5347b12d091b6fa9f9234ceb897ec42"
@@ -2267,7 +2273,7 @@ dependencies = [
  "hex",
  "log",
  "primitive-types 0.13.1",
- "qp-poseidon-core",
+ "qp-poseidon-core 2.1.0",
 ]
 
 [[package]]
