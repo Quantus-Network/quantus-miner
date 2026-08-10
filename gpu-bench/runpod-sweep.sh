@@ -17,8 +17,8 @@ CLOUD_TYPE="${CLOUD_TYPE:-COMMUNITY}"
 IMAGE_NAME="${IMAGE_NAME:-runpod/base:1.1.0-cuda1281-ubuntu2404}"
 TEMPLATE_ID="${TEMPLATE_ID:-}"
 # Community hosts often reject large disks ("machine does not have the resources").
-# Cargo build of miner needs more disk than a release binary download.
-CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-50}"
+# Benchmark path has no node/chain data — only cargo target/ during miner build (~few GB).
+CONTAINER_DISK_GB="${CONTAINER_DISK_GB:-20}"
 VOLUME_GB="${VOLUME_GB:-0}"
 DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
@@ -65,7 +65,7 @@ Environment:
   MINER_SOURCE       git (default, clone+build) or release
   MINER_BRANCH       git ref to build (default: illuzen/gpu-bench)
   MINER_REPO         git URL (default: Quantus-Network/quantus-miner)
-  CONTAINER_DISK_GB  default 50 (cargo build needs room)
+  CONTAINER_DISK_GB  default 20 (cargo build; no node disk)
 
 GPU type ids are RunPod strings, e.g.:
   "NVIDIA GeForce RTX 4090"

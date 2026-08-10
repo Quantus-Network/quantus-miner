@@ -16,8 +16,8 @@ export MINER_BRANCH=illuzen/gpu-bench   # default
 # export MINER_SOURCE=release
 ```
 
-Container disk defaults to **50GB** for cargo `target/`. No `quantus-node`
-download — hardware benches use `quantus-miner benchmark` only.
+Container disk defaults to **20GB** (cargo `target/` during miner build; no
+node/chain data). Override with `CONTAINER_DISK_GB` if needed.
 
 ## On-pod one-shot
 
@@ -37,8 +37,9 @@ MINER_BIN=./bin/quantus-miner ./record.sh --benchmark \
 ```
 
 `benchmark --job-interval N` rotates a random header every N seconds (like node
-`NewJob`), with default difficulty `10000000`. After a find, workers idle until
-the next job — same cliff as `serve`.
+`NewJob`). Default difficulty is `max` (cancel-only preemption, like mainnet).
+Pass `--difficulty <dec>` to also exercise Found→idle. Reports wind_up / busy /
+wind_down ms per GPU.
 
 Local full stack (node + serve) is still available via `./setup.sh --dev` +
 `./record.sh --live` when you need end-to-end mining, not just hardware H/s.
@@ -56,7 +57,7 @@ Uses the **REST API** (not MCP): create Pod → SSH → `remote-run.sh` → scp 
 ### 2. Image / template tips
 
 Default image: `runpod/base:1.1.0-cuda1281-ubuntu2404` with
-`NVIDIA_DRIVER_CAPABILITIES=all` (Vulkan/WGPU). Container disk ~50GB for git
+`NVIDIA_DRIVER_CAPABILITIES=all` (Vulkan/WGPU). Container disk ~20GB for git
 builds. Expose TCP 22 for SSH.
 
 ### 3. Debug one Pod interactively

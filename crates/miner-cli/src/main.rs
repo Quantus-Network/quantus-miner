@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 // CLI defaults
 const DEFAULT_GPU_BATCH_SIZE: u32 = 1_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
-/// Default difficulty when `--job-interval` is set: ~1s to find at 10 MH/s.
-const DEFAULT_JOB_DIFFICULTY: u64 = 10_000_000;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -93,8 +91,9 @@ enum Command {
         #[arg(long = "job-interval", default_value_t = 0.0)]
         job_interval: f64,
 
-        /// PoW difficulty for job simulation (decimal). Use "max" for unreachable
-        /// (cancel-only churn). Default when --job-interval > 0: 10000000.
+        /// PoW difficulty for job simulation (decimal). Default when
+        /// --job-interval > 0: "max" (cancel-only; matches mainnet preemption).
+        /// Pass a decimal to also exercise the Found→idle path.
         #[arg(long = "difficulty")]
         difficulty: Option<String>,
 
@@ -210,7 +209,9 @@ fn init_logger(verbose: bool) {
 
 fn parse_difficulty(raw: Option<&str>, job_interval: f64) -> U512 {
     match raw {
-        None if job_interval > 0.0 => U512::from(DEFAULT_JOB_DIFFICULTY),
+        // Job sim defaults to unreachable difficulty: mainnet almost always
+        // preempts via NewJob rather than a local find.
+        None if job_interval > 0.0 => U512::MAX,
         None => U512::MAX,
         Some(s) if s.eq_ignore_ascii_case("max") => U512::MAX,
         Some(s) => match U512::from_dec_str(s) {
@@ -226,6 +227,32 @@ fn parse_difficulty(raw: Option<&str>, job_interval: f64) -> U512 {
         },
     }
 }
+
+#[derive(Default)]
+struct PhaseAccum {
+    device_index: usize,
+    wind_up: Vec<f64>,
+    busy: Vec<f64>,
+    wind_down: Vec<f64>,
+    samples: u64,
+}
+
+fn mean_ms(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        0.0
+    } else {
+        xs.iter().sum::<f64>() / xs.len() as f64
+    }
+}
+
+fn p50_ms(xs: &mut [f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs[xs.len() / 2]
+}
+
 
 fn random_header() -> [u8; 32] {
     let mut header = [0u8; 32];
@@ -450,6 +477,14 @@ async fn run_benchmark_with_jobs(
     let total_hashes = Arc::new(Mutex::new(0u64));
     let finds = Arc::new(AtomicU64::new(0));
     let jobs_started = Arc::new(AtomicU64::new(0));
+    let phase_stats: Arc<Mutex<Vec<PhaseAccum>>> = Arc::new(Mutex::new(
+        (0..total_workers)
+            .map(|i| PhaseAccum {
+                device_index: i.saturating_sub(effective_cpu_workers),
+                ..Default::default()
+            })
+            .collect(),
+    ));
 
     // Publish job 1 (ctx before id bump so workers never see a stale header).
     {
@@ -464,7 +499,8 @@ async fn run_benchmark_with_jobs(
     let benchmark_start = Instant::now();
 
     for worker_id in 0..total_workers {
-        let engine = if worker_id < effective_cpu_workers {
+        let is_gpu = worker_id >= effective_cpu_workers;
+        let engine = if !is_gpu {
             cpu_engine.as_ref().unwrap().clone()
         } else {
             gpu_engine.as_ref().unwrap().clone()
@@ -475,6 +511,7 @@ async fn run_benchmark_with_jobs(
         let job_ctx = job_ctx.clone();
         let hashes = total_hashes.clone();
         let finds = finds.clone();
+        let phase_stats = phase_stats.clone();
 
         let handle = thread::spawn(move || {
             let stride = U512::from(1_000_000_000_000u64);
@@ -504,6 +541,18 @@ async fn run_benchmark_with_jobs(
                 };
 
                 let result = engine.search_range(&ctx, range, &cancel_check);
+
+                if is_gpu {
+                    if let Some(t) = engine_gpu::GpuEngine::take_last_search_timing() {
+                        let mut stats = phase_stats.lock().unwrap();
+                        let row = &mut stats[worker_id];
+                        row.device_index = t.device_index;
+                        row.wind_up.push(t.wind_up.as_secs_f64() * 1000.0);
+                        row.busy.push(t.busy.as_secs_f64() * 1000.0);
+                        row.wind_down.push(t.wind_down.as_secs_f64() * 1000.0);
+                        row.samples += 1;
+                    }
+                }
 
                 match result {
                     engine_cpu::EngineStatus::Found { hash_count, .. } => {
@@ -568,6 +617,65 @@ async fn run_benchmark_with_jobs(
     stop_flag.store(true, Ordering::Relaxed);
     current_job_id.fetch_add(1, Ordering::SeqCst);
     let _ = feeder.join();
+
+    print_phase_report(&phase_stats.lock().unwrap(), job_interval);
+}
+
+fn print_phase_report(stats: &[PhaseAccum], job_interval: f64) {
+    let gpu_rows: Vec<&PhaseAccum> = stats.iter().filter(|s| s.samples > 0).collect();
+    if gpu_rows.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("📐 Job-phase timings (per GPU worker, ms)");
+    println!("=========================================");
+    println!(
+        "{:<8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>7} {:>8}",
+        "device", "samples", "wind_up", "busy", "wind_down", "wu_p50", "busy_p50", "busy%", "vs_int%"
+    );
+
+    let interval_ms = job_interval * 1000.0;
+    for row in gpu_rows {
+        let mut wu = row.wind_up.clone();
+        let mut bu = row.busy.clone();
+        let mut wd = row.wind_down.clone();
+        let wu_mean = mean_ms(&wu);
+        let bu_mean = mean_ms(&bu);
+        let wd_mean = mean_ms(&wd);
+        let wu_p50 = p50_ms(&mut wu);
+        let bu_p50 = p50_ms(&mut bu);
+        let _wd_p50 = p50_ms(&mut wd);
+        let phase_sum = wu_mean + bu_mean + wd_mean;
+        let busy_share = if phase_sum > 0.0 {
+            (bu_mean / phase_sum) * 100.0
+        } else {
+            0.0
+        };
+        let vs_interval = if interval_ms > 0.0 {
+            (bu_mean / interval_ms) * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "{:<8} {:>8} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>6.1}% {:>7.0}%",
+            row.device_index,
+            row.samples,
+            wu_mean,
+            bu_mean,
+            wd_mean,
+            wu_p50,
+            bu_p50,
+            busy_share,
+            vs_interval
+        );
+    }
+    println!(
+        "(wind_up = setup→first batch; busy = GPU batch wall time; wind_down = cancel seen→return)"
+    );
+    println!(
+        "busy% = share of search phases; vs_int% = mean busy / job-interval ({job_interval:.2}s) — can exceed 100% when a batch overruns the interval"
+    );
 }
 
 async fn progress_and_join(

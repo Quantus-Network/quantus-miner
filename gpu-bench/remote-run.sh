@@ -26,7 +26,7 @@ GPU_DEVICES="${GPU_DEVICES:-1}"
 BATCH_SIZES="${BATCH_SIZES:-262144 524288 1000000 4194304}"
 # Simulate NewJob churn (seconds). 0 = sustained peak H/s (no job switches).
 JOB_INTERVAL="${JOB_INTERVAL:-2}"
-# Optional decimal difficulty for job sim (default in miner: 10000000). Use "max" for cancel-only.
+# Optional decimal difficulty for job sim (miner default: max / cancel-only).
 DIFFICULTY="${DIFFICULTY:-}"
 NOTES="${NOTES:-}"
 

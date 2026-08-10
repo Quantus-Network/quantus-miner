@@ -14,6 +14,22 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::time::{Duration, Instant};
+
+/// Per-`search_range` phase timings for the calling worker thread.
+///
+/// - **wind_up**: entry (after pre-checks) → start of first GPU batch
+/// - **busy**: wall time inside `run_single_batch` calls (steady hashing)
+/// - **wind_down**: cancel observed → return (usually ~0; in-flight batch is in busy)
+#[derive(Debug, Clone)]
+pub struct SearchPhaseTiming {
+    pub device_index: usize,
+    pub wind_up: Duration,
+    pub busy: Duration,
+    pub wind_down: Duration,
+    pub batches_completed: u64,
+    pub cancelled: bool,
+}
 
 /// Represents a single GPU device context.
 struct GpuContext {
@@ -50,6 +66,18 @@ thread_local! {
     /// Set to true when this worker's GPU device is lost/unresponsive.
     /// Once set, the worker will immediately return Cancelled on any search attempt.
     static DEVICE_LOST: RefCell<bool> = const { RefCell::new(false) };
+    static LAST_SEARCH_TIMING: RefCell<Option<SearchPhaseTiming>> = const { RefCell::new(None) };
+}
+
+impl GpuEngine {
+    /// Take phase timings from the most recent `search_range` on this thread.
+    pub fn take_last_search_timing() -> Option<SearchPhaseTiming> {
+        LAST_SEARCH_TIMING.with(|t| t.borrow_mut().take())
+    }
+
+    fn store_search_timing(timing: SearchPhaseTiming) {
+        LAST_SEARCH_TIMING.with(|t| *t.borrow_mut() = Some(timing));
+    }
 }
 
 impl GpuContext {
@@ -513,6 +541,8 @@ impl MinerEngine for GpuEngine {
             return EngineStatus::Cancelled { hash_count: 0 };
         }
 
+        let phase_start = Instant::now();
+
         // Use thread-local assignment for consistent worker-to-GPU mapping
         let device_index = ASSIGNED_GPU_DEVICE.with(|assigned| {
             let mut assigned_ref = assigned.borrow_mut();
@@ -572,10 +602,12 @@ impl MinerEngine for GpuEngine {
             bytemuck::cast_slice(&target_u32s),
         );
 
-        let search_start = std::time::Instant::now();
+        let search_start = Instant::now();
         let mut total_hashes: u64 = 0;
         let mut current_start = range.start;
         let mut batch_num = 0u64;
+        let mut first_batch_at: Option<Instant> = None;
+        let mut busy = Duration::ZERO;
 
         log::info!(
             target: "gpu_engine",
@@ -586,10 +618,26 @@ impl MinerEngine for GpuEngine {
             self.batch_size
         );
 
+        let store_timing = |wind_up: Duration,
+                            busy: Duration,
+                            wind_down: Duration,
+                            batches: u64,
+                            cancelled: bool| {
+            Self::store_search_timing(SearchPhaseTiming {
+                device_index,
+                wind_up,
+                busy,
+                wind_down,
+                batches_completed: batches,
+                cancelled,
+            });
+        };
+
         // Process in batches, checking for cancellation between each batch
         while current_start <= range.end {
             // Check for cancellation at host level BEFORE starting each batch
             if cancel.is_cancelled() {
+                let cancel_seen = Instant::now();
                 let elapsed = search_start.elapsed();
                 let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
                 log::info!(
@@ -601,6 +649,11 @@ impl MinerEngine for GpuEngine {
                     elapsed.as_secs_f64(),
                     format_hashrate(hash_rate)
                 );
+                let wind_up = first_batch_at
+                    .map(|t| t.saturating_duration_since(phase_start))
+                    .unwrap_or_else(|| cancel_seen.saturating_duration_since(phase_start));
+                let wind_down = Instant::now().saturating_duration_since(cancel_seen);
+                store_timing(wind_up, busy, wind_down, batch_num, true);
                 return EngineStatus::Cancelled {
                     hash_count: total_hashes,
                 };
@@ -619,9 +672,15 @@ impl MinerEngine for GpuEngine {
                 remaining.low_u32()
             };
 
+            let batch_start = Instant::now();
+            if first_batch_at.is_none() {
+                first_batch_at = Some(batch_start);
+            }
+
             // Run single batch
             let batch_result =
                 run_single_batch(gpu_ctx, &resources, current_start, this_batch_size);
+            busy += batch_start.elapsed();
 
             match batch_result {
                 BatchResult::Found {
@@ -644,6 +703,10 @@ impl MinerEngine for GpuEngine {
                         format_hashrate(hash_rate)
                     );
 
+                    let wind_up = first_batch_at
+                        .unwrap()
+                        .saturating_duration_since(phase_start);
+                    store_timing(wind_up, busy, Duration::ZERO, batch_num + 1, false);
                     return EngineStatus::Found {
                         candidate,
                         hash_count: total_hashes,
@@ -665,6 +728,10 @@ impl MinerEngine for GpuEngine {
                          This GPU will not process further batches.",
                         device_index
                     );
+                    let wind_up = first_batch_at
+                        .map(|t| t.saturating_duration_since(phase_start))
+                        .unwrap_or_else(|| phase_start.elapsed());
+                    store_timing(wind_up, busy, Duration::ZERO, batch_num, false);
                     return EngineStatus::DeviceLost {
                         hash_count: total_hashes,
                     };
@@ -683,6 +750,12 @@ impl MinerEngine for GpuEngine {
                 let mut remaining = std::time::Duration::from_millis(self.throttle_ms);
                 while remaining > std::time::Duration::ZERO {
                     if cancel.is_cancelled() {
+                        let cancel_seen = Instant::now();
+                        let wind_up = first_batch_at
+                            .unwrap()
+                            .saturating_duration_since(phase_start);
+                        let wind_down = Instant::now().saturating_duration_since(cancel_seen);
+                        store_timing(wind_up, busy, wind_down, batch_num, true);
                         return EngineStatus::Cancelled {
                             hash_count: total_hashes,
                         };
@@ -721,6 +794,11 @@ impl MinerEngine for GpuEngine {
             elapsed.as_secs_f64(),
             format_hashrate(hash_rate)
         );
+
+        let wind_up = first_batch_at
+            .map(|t| t.saturating_duration_since(phase_start))
+            .unwrap_or_else(|| phase_start.elapsed());
+        store_timing(wind_up, busy, Duration::ZERO, batch_num, false);
 
         EngineStatus::Exhausted {
             hash_count: total_hashes,
