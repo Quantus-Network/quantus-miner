@@ -127,7 +127,10 @@ row with the best hashrate (or hash_per_dollar) per GPU when ranking hardware.
 | `cost_per_hour` | Pod `costPerHr` (sweep) or your flag |
 | `cost_per_sec` | `cost_per_hour / 3600` |
 | `hash_per_dollar` | `hashrate / cost_per_sec` |
-| `notes` | includes `batch=N` for sweep rows |
+| `wind_up_ms` | mean setup→first-batch (job-sim only; empty if sustained/`--live`) |
+| `busy_ms` | mean GPU batch wall time per job (job-sim only) |
+| `wind_down_ms` | mean cancel-seen→return (job-sim only) |
+| `notes` | includes `batch=N`, `job_interval=…` for sweep rows |
 
 ## Scripts
 

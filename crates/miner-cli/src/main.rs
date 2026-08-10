@@ -669,6 +669,11 @@ fn print_phase_report(stats: &[PhaseAccum], job_interval: f64) {
             busy_share,
             vs_interval
         );
+        // Machine-readable line for gpu-bench/record.sh → results.csv
+        println!(
+            "PHASE_MS device={} samples={} wind_up={:.2} busy={:.2} wind_down={:.2}",
+            row.device_index, row.samples, wu_mean, bu_mean, wd_mean
+        );
     }
     println!(
         "(wind_up = setup→first batch; busy = GPU batch wall time; wind_down = cancel seen→return)"
