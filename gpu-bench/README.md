@@ -36,10 +36,11 @@ MINER_BIN=./bin/quantus-miner ./record.sh --benchmark \
   --job-interval 2 --batch-sizes "262144 524288 1000000" --duration 30
 ```
 
-`benchmark --job-interval N` rotates a random header every N seconds (like node
-`NewJob`). Default difficulty is `max` (cancel-only preemption, like mainnet).
-Pass `--difficulty <dec>` to also exercise Found→idle. Reports wind_up / busy /
-wind_down ms per GPU.
+`benchmark --job-interval N` rotates a random header about every N seconds (like
+node `NewJob`), with `--job-jitter` ±fraction (default 0.2 → sleep in
+`[0.8N, 1.2N]`) so cancels don't alias to a fixed batch phase. Default difficulty
+is `max` (cancel-only preemption, like mainnet). Pass `--difficulty <dec>` to
+also exercise Found→idle. Reports wind_up / busy / wind_down ms per GPU.
 
 Local full stack (node + serve) is still available via `./setup.sh --dev` +
 `./record.sh --live` when you need end-to-end mining, not just hardware H/s.

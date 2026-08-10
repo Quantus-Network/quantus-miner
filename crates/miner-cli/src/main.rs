@@ -3,7 +3,7 @@ use engine_cpu::{AtomicBoolCancelCheck, EngineRange, JobIdCancelCheck, MinerEngi
 use miner_service::{run, ServiceConfig};
 use pow_core::JobContext;
 use primitive_types::U512;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -91,6 +91,12 @@ enum Command {
         #[arg(long = "job-interval", default_value_t = 0.0)]
         job_interval: f64,
 
+        /// Fractional jitter on --job-interval (uniform ±frac). Default 0.2
+        /// so a 2s interval sleeps in [1.6, 2.4]s. 0 = metronomic. Ignored
+        /// when --job-interval is 0.
+        #[arg(long = "job-jitter", default_value_t = 0.2)]
+        job_jitter: f64,
+
         /// PoW difficulty for job simulation (decimal). Default when
         /// --job-interval > 0: "max" (cancel-only; matches mainnet preemption).
         /// Pass a decimal to also exercise the Found→idle path.
@@ -174,6 +180,7 @@ async fn main() {
             cpu_batch_size,
             duration,
             job_interval,
+            job_jitter,
             difficulty,
             allow_integrated,
             verbose,
@@ -186,6 +193,7 @@ async fn main() {
                 cpu_batch_size,
                 duration,
                 job_interval,
+                job_jitter,
                 difficulty,
                 allow_integrated,
             )
@@ -260,6 +268,20 @@ fn random_header() -> [u8; 32] {
     header
 }
 
+/// Uniform sleep in [interval*(1-jitter), interval*(1+jitter)], floored at 50ms.
+fn jittered_job_delay(interval: f64, jitter_frac: f64) -> Duration {
+    const MIN_SECS: f64 = 0.05;
+    let secs = if jitter_frac <= 0.0 {
+        interval
+    } else {
+        let j = jitter_frac.min(0.99);
+        let lo = interval * (1.0 - j);
+        let hi = interval * (1.0 + j);
+        rand::rng().random_range(lo..=hi)
+    };
+    Duration::from_secs_f64(secs.max(MIN_SECS))
+}
+
 async fn run_benchmark(
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
@@ -267,6 +289,7 @@ async fn run_benchmark(
     cpu_batch_size: u64,
     duration: u64,
     job_interval: f64,
+    job_jitter: f64,
     difficulty_arg: Option<String>,
     allow_integrated: bool,
 ) {
@@ -307,7 +330,11 @@ async fn run_benchmark(
     println!("CPU batch size: {} hashes", cpu_batch_size);
     println!("Duration: {} seconds", duration);
     if job_interval > 0.0 {
-        println!("Job interval: {:.2}s (simulated NewJob)", job_interval);
+        println!(
+            "Job interval: {:.2}s ±{:.0}% (simulated NewJob)",
+            job_interval,
+            job_jitter * 100.0
+        );
         if difficulty == U512::MAX {
             println!("Difficulty: max (cancel-only churn, no finds)");
         } else {
@@ -327,6 +354,10 @@ async fn run_benchmark(
         eprintln!("❌ ERROR: --job-interval must be >= 0");
         std::process::exit(1);
     }
+    if job_jitter < 0.0 || job_jitter >= 1.0 {
+        eprintln!("❌ ERROR: --job-jitter must be in [0, 1)");
+        std::process::exit(1);
+    }
 
     // Create CPU engine
     let cpu_engine: Option<Arc<dyn MinerEngine>> = if effective_cpu_workers > 0 {
@@ -343,6 +374,7 @@ async fn run_benchmark(
             effective_gpu_devices,
             duration,
             job_interval,
+            job_jitter,
             difficulty,
         )
         .await;
@@ -465,6 +497,7 @@ async fn run_benchmark_with_jobs(
     effective_gpu_devices: usize,
     duration: u64,
     job_interval: f64,
+    job_jitter: f64,
     difficulty: U512,
 ) {
     let total_workers = effective_cpu_workers + effective_gpu_devices;
@@ -589,9 +622,8 @@ async fn run_benchmark_with_jobs(
     let feeder_ctx = job_ctx.clone();
     let feeder_jobs = jobs_started.clone();
     let feeder = thread::spawn(move || {
-        let interval = Duration::from_secs_f64(job_interval);
         while !feeder_stop.load(Ordering::Relaxed) {
-            thread::sleep(interval);
+            thread::sleep(jittered_job_delay(job_interval, job_jitter));
             if feeder_stop.load(Ordering::Relaxed) {
                 break;
             }

@@ -24,6 +24,7 @@ DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
 BATCH_SIZES="${BATCH_SIZES:-262144 524288 1000000 4194304}"
 JOB_INTERVAL="${JOB_INTERVAL:-2}"
+JOB_JITTER="${JOB_JITTER:-0.2}"
 DIFFICULTY="${DIFFICULTY:-}"
 REMOTE_DIR="${REMOTE_DIR:-/workspace/quantus-gpu-bench}"
 MINER_SOURCE="${MINER_SOURCE:-git}"
@@ -57,6 +58,7 @@ Environment:
   DURATION           Benchmark seconds per batch size (default 30)
   BATCH_SIZES        Space-separated gpu-batch-size list (default 256K 512K 1M 4M)
   JOB_INTERVAL       Simulated NewJob seconds (default 2; 0 = sustained)
+  JOB_JITTER         ±fraction of JOB_INTERVAL (default 0.2; 0 = metronomic)
   DIFFICULTY         Optional decimal or max for job simulation
   RESULTS_CSV        Collaborative dataset to append (default ./results.csv)
   OUT_DIR            Per-pod temp rows (default ./sweep-out, gitignored)
@@ -570,6 +572,7 @@ run_one_attempt() {
        --gpu-devices '${GPU_DEVICES}' \
        --batch-sizes '${BATCH_SIZES}' \
        --job-interval '${JOB_INTERVAL}' \
+       --job-jitter '${JOB_JITTER}' \
        ${DIFFICULTY:+--difficulty '${DIFFICULTY}'} \
        --miner-source '${MINER_SOURCE}' \
        --miner-repo '${MINER_REPO}' \

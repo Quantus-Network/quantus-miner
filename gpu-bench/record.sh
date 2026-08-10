@@ -20,6 +20,7 @@ GPU_BATCH_SIZE="${GPU_BATCH_SIZE:-}"
 # Space-separated list; when set with --benchmark, runs one row per size.
 BATCH_SIZES="${BATCH_SIZES:-}"
 JOB_INTERVAL="${JOB_INTERVAL:-0}"
+JOB_JITTER="${JOB_JITTER:-0.2}"
 DIFFICULTY="${DIFFICULTY:-}"
 
 usage() {
@@ -36,6 +37,7 @@ Options:
   --gpu-batch-size N     Single GPU batch size for --benchmark
   --batch-sizes "N N"    Sweep several batch sizes (one CSV row each)
   --job-interval SECONDS Simulated NewJob period (0 = sustained; default 0)
+  --job-jitter FRAC      ±fraction of job-interval (default 0.2; 0 = metronomic)
   --difficulty DEC|max   Difficulty for job simulation
   --notes TEXT           Optional notes column
   --dry-run              Print the CSV row but do not append
@@ -458,13 +460,13 @@ run_benchmark_once() {
     bench_cmd+=(--gpu-batch-size "${batch_size}")
   fi
   if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
-    bench_cmd+=(--job-interval "${JOB_INTERVAL}")
+    bench_cmd+=(--job-interval "${JOB_INTERVAL}" --job-jitter "${JOB_JITTER}")
   fi
   if [[ -n "${DIFFICULTY}" ]]; then
     bench_cmd+=(--difficulty "${DIFFICULTY}")
   fi
 
-  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}, batch=${batch_label}, job_interval=${JOB_INTERVAL}) ..." >&2
+  echo "Running GPU benchmark for ${DURATION}s (gpu-devices=${gpu_devices}, batch=${batch_label}, job_interval=${JOB_INTERVAL}, job_jitter=${JOB_JITTER}) ..." >&2
   sample_util_during "${util_file}" "${DURATION}" &
   local sampler_pid=$!
 
@@ -556,9 +558,9 @@ run_benchmark() {
     fi
     if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
       if [[ -n "${note_extra}" ]]; then
-        note_extra="${note_extra};job_interval=${JOB_INTERVAL}"
+        note_extra="${note_extra};job_interval=${JOB_INTERVAL};job_jitter=${JOB_JITTER}"
       else
-        note_extra="job_interval=${JOB_INTERVAL}"
+        note_extra="job_interval=${JOB_INTERVAL};job_jitter=${JOB_JITTER}"
       fi
       if [[ -n "${DIFFICULTY}" ]]; then
         note_extra="${note_extra};difficulty=${DIFFICULTY}"
@@ -612,6 +614,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --job-interval)
       JOB_INTERVAL="${2:-}"
+      shift 2
+      ;;
+    --job-jitter)
+      JOB_JITTER="${2:-}"
       shift 2
       ;;
     --difficulty)

@@ -18,6 +18,7 @@ DURATION="${DURATION:-30}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
 CPU_WORKERS="${CPU_WORKERS:-0}"
 JOB_INTERVAL="${JOB_INTERVAL:-2}"
+JOB_JITTER="${JOB_JITTER:-0.2}"
 DIFFICULTY="${DIFFICULTY:-}"
 MINER_BIN="${MINER_BIN:-}"
 
@@ -28,6 +29,7 @@ Usage: ./batch-tune.sh [options]
   --sizes "N N N"     batch sizes to try (default: 256K 512K 1M 4M)
   --duration SECONDS  per-size benchmark window (default: 30)
   --job-interval SEC  simulated NewJob period (default: 2; 0 = sustained)
+  --job-jitter FRAC   ±fraction of job-interval (default 0.2; 0 = metronomic)
   --difficulty DEC    difficulty for job sim (or max)
   --gpu-devices N     default 1
   --cpu-workers N     default 0 (GPU-only)
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --sizes) SIZES="$2"; shift 2 ;;
     --duration) DURATION="$2"; shift 2 ;;
     --job-interval) JOB_INTERVAL="$2"; shift 2 ;;
+    --job-jitter) JOB_JITTER="$2"; shift 2 ;;
     --difficulty) DIFFICULTY="$2"; shift 2 ;;
     --gpu-devices) GPU_DEVICES="$2"; shift 2 ;;
     --cpu-workers) CPU_WORKERS="$2"; shift 2 ;;
@@ -138,7 +141,7 @@ for bs in ${SIZES}; do
     --duration "${DURATION}"
   )
   if awk -v j="${JOB_INTERVAL}" 'BEGIN { exit !(j+0 > 0) }'; then
-    bench_cmd+=(--job-interval "${JOB_INTERVAL}")
+    bench_cmd+=(--job-interval "${JOB_INTERVAL}" --job-jitter "${JOB_JITTER}")
   fi
   if [[ -n "${DIFFICULTY}" ]]; then
     bench_cmd+=(--difficulty "${DIFFICULTY}")
