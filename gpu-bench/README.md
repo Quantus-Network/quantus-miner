@@ -99,6 +99,40 @@ per Pod). Commit new rows so others can reuse them.
 4. Sweep `--gpu-batch-size` values → append CSV rows (`notes` includes `batch=N`)  
 5. Tear down
 
+## Clore API sweep
+
+Same idea as the RunPod sweep, adapted to Clore.ai's rental model:
+create order → SSH → `remote-run.sh` → scp CSV → cancel. Needs `CLORE_API_KEY`
+(dashboard → settings → API) or a token in `~/.config/clore/token`, a USD
+balance on the account, and your SSH key (sent with each order — no dashboard
+key setup needed).
+
+```bash
+export CLORE_API_KEY=...
+
+./clore-sweep.sh --list "RTX 4090"        # print offers, rent nothing
+./clore-sweep.sh "RTX 4090" "RTX 5080"    # benchmark, append to results.csv
+GPU_COUNT=2 ./clore-sweep.sh "RTX 3090"   # 2x rig: all-GPU + isolated 1-GPU pass
+./clore-sweep.sh --server 98539 --price-per-day 0.5   # exact offer
+```
+
+Clore-specific behavior baked in:
+
+- **Prices are per day** (`cost_per_hour` = price/24), paid from the account's
+  `USD-Blockchain` balance; every order costs a ~$0.10 creation fee.
+- Offers are filtered by `MIN_RELIABILITY` (0.97), `MIN_RATING` (4), and
+  optional `MAX_PRICE_PER_DAY`, then tried cheapest-first with
+  `HOST_RETRIES` fallbacks — hot GPUs get rented out from under you.
+- **Vulkan host screening:** some Clore hosts mount only the CUDA compute
+  userspace; Vulkan is unfixable there (an exact-version driver `.run`
+  extract still fails `vkCreateInstance`). A 30-second probe for
+  `libGLX_nvidia.so.0` right after SSH skips those hosts for the next offer,
+  costing the creation fee instead of a doomed 15-minute build.
+- Orders are **always cancelled** on exit (`KEEP_ON_FAILURE=1` to debug).
+- Clore is where the consumer cards live (30/40/50-series, multi-GPU rigs)
+  at a fraction of RunPod prices — it fills the family gaps the RunPod
+  sweep can't.
+
 ## Knobs that matter for differently shaped GPUs
 
 | Knob | Where | Notes |
