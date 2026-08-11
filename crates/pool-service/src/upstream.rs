@@ -19,6 +19,7 @@ pub async fn run_node_client(
     state: Arc<PoolState>,
     node_addr: SocketAddr,
     auth_token: String,
+    tls_cert_sha256: String,
     mut solutions: Receiver<FoundBlock>,
 ) {
     let mut reconnect_delay = Duration::from_secs(1);
@@ -32,7 +33,7 @@ pub async fn run_node_client(
 
     loop {
         log::info!("Connecting to node at {}...", node_addr);
-        match quic_transport::connect(node_addr, &auth_token).await {
+        match quic_transport::connect(node_addr, &auth_token, &tls_cert_sha256).await {
             Ok((connection, mut send, mut recv)) => {
                 log::info!("Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);

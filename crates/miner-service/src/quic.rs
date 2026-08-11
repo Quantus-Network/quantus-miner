@@ -27,6 +27,7 @@ use pow_core::format_hashrate;
 pub async fn connect_and_mine(
     node_addr: SocketAddr,
     auth_token: &str,
+    tls_cert_sha256: &str,
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
     cpu_workers: usize,
@@ -41,7 +42,7 @@ pub async fn connect_and_mine(
     loop {
         log::info!("⛏️ Connecting to node at {}...", node_addr);
 
-        match establish_connection(node_addr, auth_token).await {
+        match establish_connection(node_addr, auth_token, tls_cert_sha256).await {
             Ok((connection, send, recv)) => {
                 log::info!("⛏️ Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);
@@ -67,8 +68,9 @@ pub async fn connect_and_mine(
 async fn establish_connection(
     addr: SocketAddr,
     auth_token: &str,
+    tls_cert_sha256: &str,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let result = quic_transport::connect(addr, auth_token).await?;
+    let result = quic_transport::connect(addr, auth_token, tls_cert_sha256).await?;
     log::info!(
         "⛏️ QUIC connection and bidirectional stream established to {}",
         addr

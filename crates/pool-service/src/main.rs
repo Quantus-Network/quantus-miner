@@ -41,6 +41,23 @@ struct Args {
     #[arg(long, env = "POOL_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
     auth_token_file: Option<PathBuf>,
 
+    /// SHA-256 fingerprint of the node's miner TLS certificate (hex).
+    /// Required when `--node-addr` is set.
+    #[arg(
+        long,
+        env = "POOL_TLS_CERT_SHA256",
+        conflicts_with = "tls_cert_sha256_file"
+    )]
+    tls_cert_sha256: Option<String>,
+
+    /// Path to a file containing the node's miner TLS cert SHA-256 fingerprint.
+    #[arg(
+        long,
+        env = "POOL_TLS_CERT_SHA256_FILE",
+        conflicts_with = "tls_cert_sha256"
+    )]
+    tls_cert_sha256_file: Option<PathBuf>,
+
     /// Share difficulty: expected number of hashes per captcha solve.
     /// Measured browser WASM rate ≈ 120 kH/s on an M-series laptop, so
     /// 50000 ≈ 0.4 s desktop / ~2 s phone. Raise for stronger rate limiting.
@@ -117,18 +134,25 @@ async fn main() -> anyhow::Result<()> {
         match args.node_addr {
             Some(addr) => {
                 let auth_token = resolve_auth_token(args.auth_token, args.auth_token_file)?;
+                let tls_cert_sha256 =
+                    resolve_tls_cert_sha256(args.tls_cert_sha256, args.tls_cert_sha256_file)?;
                 log::info!("Upstream: quantus-node at {}", addr);
                 tokio::spawn(upstream::run_node_client(
                     state,
                     addr,
                     auth_token,
+                    tls_cert_sha256,
                     solution_rx,
                 ));
             }
             None => {
-                if args.auth_token.is_some() || args.auth_token_file.is_some() {
+                if args.auth_token.is_some()
+                    || args.auth_token_file.is_some()
+                    || args.tls_cert_sha256.is_some()
+                    || args.tls_cert_sha256_file.is_some()
+                {
                     log::warn!(
-                        "Ignoring auth token flags in standalone mode (no --node-addr)"
+                        "Ignoring auth/TLS pin flags in standalone mode (no --node-addr)"
                     );
                 }
                 log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
@@ -149,25 +173,50 @@ fn resolve_auth_token(
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
 ) -> anyhow::Result<String> {
-    if let Some(token) = auth_token {
-        let token = token.trim().to_string();
-        anyhow::ensure!(!token.is_empty(), "--auth-token is empty");
-        return Ok(token);
-    }
-    if let Some(path) = auth_token_file {
-        let contents = std::fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("failed to read --auth-token-file {}: {}", path.display(), e)
-        })?;
-        let token = contents.trim().to_string();
-        anyhow::ensure!(
-            !token.is_empty(),
-            "--auth-token-file {} is empty",
-            path.display()
-        );
-        return Ok(token);
-    }
-    anyhow::bail!(
+    resolve_required_secret(
+        auth_token,
+        auth_token_file,
+        "--auth-token",
+        "--auth-token-file",
         "when --node-addr is set, pass --auth-token <TOKEN> or --auth-token-file <PATH> \
-         (copy from the node's logs or its miner-auth-token file)"
-    );
+         (copy from the node's logs or its miner-auth-token file)",
+    )
+}
+
+fn resolve_tls_cert_sha256(
+    value: Option<String>,
+    file: Option<PathBuf>,
+) -> anyhow::Result<String> {
+    resolve_required_secret(
+        value,
+        file,
+        "--tls-cert-sha256",
+        "--tls-cert-sha256-file",
+        "when --node-addr is set, pass --tls-cert-sha256 <HEX> or \
+         --tls-cert-sha256-file <PATH> (copy from the node's logs or its \
+         miner-tls-cert-sha256 file)",
+    )
+}
+
+fn resolve_required_secret(
+    value: Option<String>,
+    file: Option<PathBuf>,
+    value_flag: &str,
+    file_flag: &str,
+    missing_msg: &str,
+) -> anyhow::Result<String> {
+    if let Some(value) = value {
+        let value = value.trim().to_string();
+        anyhow::ensure!(!value.is_empty(), "{value_flag} is empty");
+        return Ok(value);
+    }
+    if let Some(path) = file {
+        let contents = std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("failed to read {file_flag} {}: {}", path.display(), e)
+        })?;
+        let value = contents.trim().to_string();
+        anyhow::ensure!(!value.is_empty(), "{file_flag} {} is empty", path.display());
+        return Ok(value);
+    }
+    anyhow::bail!("{missing_msg}");
 }

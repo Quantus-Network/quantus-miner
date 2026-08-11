@@ -17,20 +17,23 @@ The binary will be available at `target/release/quantus-miner`.
 ## Running
 
 ```bash
-# Copy the token from the node's logs or its miner-auth-token file, then:
+# Copy auth token + TLS cert fingerprint from the node logs / chain config dir:
 ./target/release/quantus-miner serve \
   --node-addr 127.0.0.1:9833 \
   --auth-token <TOKEN> \
+  --tls-cert-sha256 <FINGERPRINT> \
   --cpu-workers 4
 
-# Or point at the node's token file directly:
+# Or point at the node's files directly:
 ./target/release/quantus-miner serve \
   --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --gpu-devices 1
 
 # Hybrid CPU+GPU mining
 ./target/release/quantus-miner serve \
   --auth-token <TOKEN> \
+  --tls-cert-sha256 <FINGERPRINT> \
   --cpu-workers 4 \
   --gpu-devices 1
 ```
@@ -42,6 +45,8 @@ The binary will be available at `target/release/quantus-miner`.
 | `--node-addr <ADDR>` | `MINER_NODE_ADDR` | Node address to connect to | `127.0.0.1:9833` |
 | `--auth-token <TOKEN>` | `MINER_AUTH_TOKEN` | Shared secret from the node's logs / `miner-auth-token` file | required |
 | `--auth-token-file <PATH>` | `MINER_AUTH_TOKEN_FILE` | Read the shared secret from a file (alternative to `--auth-token`) | — |
+| `--tls-cert-sha256 <HEX>` | `MINER_TLS_CERT_SHA256` | SHA-256 of the node's miner TLS cert (from logs / `miner-tls-cert-sha256`) | required |
+| `--tls-cert-sha256-file <PATH>` | `MINER_TLS_CERT_SHA256_FILE` | Read the TLS cert fingerprint from a file | — |
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
 | `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 |
