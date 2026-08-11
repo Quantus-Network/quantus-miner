@@ -79,7 +79,7 @@ cd gpu-bench
 ./record.sh --provider runpod --cost-per-hour 0.69
 ```
 
-RunPod multi-GPU sweep (REST API + SSH, release binaries, Prometheus → CSV):
+RunPod multi-GPU sweep (REST API + SSH, git-built miner, benchmark output → CSV):
 
 ```bash
 export RUNPOD_API_KEY=...

@@ -43,7 +43,7 @@ Usage: ./remote-run.sh [options]
   --batch-sizes "N N N"   GPU batch sizes (default: 256K 512K 1M 4M)
   --job-interval SECONDS  simulated NewJob period (default: 2; 0 = sustained)
   --job-jitter FRAC       ±fraction of job-interval (default 0.2; 0 = metronomic)
-  --difficulty DEC|max    PoW difficulty for job sim (miner default 1e7)
+  --difficulty DEC|max    PoW difficulty for job sim (miner default: max)
   --notes TEXT
   --miner-branch REF      git branch/tag/commit to build (default: illuzen/gpu-bench)
   --miner-repo URL        git remote (default: Quantus-Network/quantus-miner)
@@ -388,10 +388,15 @@ build_miner_from_git() {
   [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
 
   echo "Miner source: ${MINER_REPO} @ ${MINER_BRANCH}" >&2
+  # Explicit checks: errexit is cleared inside the $(download_miner) command
+  # substitution, so unchecked failures here would silently benchmark stale code.
   if [[ -d "${src}/.git" ]]; then
-    git -C "${src}" remote set-url origin "${MINER_REPO}"
-    git -C "${src}" fetch --depth 1 origin "${MINER_BRANCH}" >&2
-    git -C "${src}" checkout -f FETCH_HEAD >&2
+    if ! git -C "${src}" remote set-url origin "${MINER_REPO}" ||
+      ! git -C "${src}" fetch --depth 1 origin "${MINER_BRANCH}" >&2 ||
+      ! git -C "${src}" checkout -f FETCH_HEAD >&2; then
+      echo "error: git fetch/checkout failed for ${MINER_REPO} @ ${MINER_BRANCH}" >&2
+      exit 1
+    fi
   else
     rm -rf "${src}"
     if ! git clone --depth 1 --branch "${MINER_BRANCH}" "${MINER_REPO}" "${src}" >&2; then
@@ -401,7 +406,7 @@ build_miner_from_git() {
     fi
   fi
 
-  built_rev="$(git -C "${src}" rev-parse HEAD)"
+  built_rev="$(git -C "${src}" rev-parse HEAD)" || exit 1
   if [[ -x "${dest}" && "${FORCE_MINER_BUILD}" != "1" && -f "${rev_file}" ]]; then
     if [[ "$(cat "${rev_file}")" == "${built_rev}" ]]; then
       echo "Using existing ${dest} (rev ${built_rev})" >&2
@@ -411,10 +416,13 @@ build_miner_from_git() {
   fi
 
   echo "Building quantus-miner (release, rev ${built_rev}) ..." >&2
-  (
+  if ! (
     cd "${src}"
     cargo build -p miner-cli --release >&2
-  )
+  ); then
+    echo "error: cargo build failed (rev ${built_rev})" >&2
+    exit 1
+  fi
   if [[ ! -x "${src}/target/release/quantus-miner" ]]; then
     echo "error: cargo build did not produce target/release/quantus-miner" >&2
     exit 1

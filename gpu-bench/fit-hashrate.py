@@ -91,6 +91,14 @@ def main() -> None:
             continue
         samples.append((r.get("gpu_model", "?"), hs, sm, vram, util))
 
+    # One fit point per GPU model: keep the best-H/s row so repeated sweeps and
+    # deliberately suboptimal batch-size rows don't overweight a model.
+    best: dict[str, tuple[str, float, float, float | None, float]] = {}
+    for s in samples:
+        if s[0] not in best or s[1] > best[s[0]][1]:
+            best[s[0]] = s
+    samples = list(best.values())
+
     if len(samples) < 3:
         raise SystemExit(f"need ≥3 rows with util≥{args.min_util} and sm_count; got {len(samples)}")
 
@@ -112,7 +120,7 @@ def main() -> None:
     print("hashrate ≈ " + " + ".join(f"{b:.4g}*{n}" for b, n in zip(beta, names)))
     print(f"R²={r2:.4f}  RMSE={rmse/1e6:.3f} MH/s")
     print()
-    print("Per-GPU residual (best H/s row used if duplicates — showing all fit points sorted by |err|):")
+    print("Per-GPU residual (best H/s row per model, sorted by |err|):")
     ranked = sorted(
         zip(samples, yhat),
         key=lambda t: abs(t[0][1] - t[1]),

@@ -172,16 +172,17 @@ query_sm_count() {
     *"RTX 4000 Ada"*|*"RTX 4000 SFF Ada"*) echo 48 ;;
     *"RTX 5000 Ada"*) echo 100 ;;
     *"RTX 6000 Ada"*) echo 142 ;;
-    *"RTX PRO 4000"*) echo 48 ;;
-    *"RTX PRO 4500"*) echo 80 ;;
-    *"RTX PRO 5000"*) echo 140 ;;
+    *"RTX PRO 4000"*) echo 70 ;;
+    *"RTX PRO 4500"*) echo 82 ;;
+    *"RTX PRO 5000"*) echo 110 ;;
     *"RTX PRO 6000"*) echo 188 ;;
-    *"NVIDIA L4"|*" L4") echo 60 ;;
+    *"NVIDIA L4"|*" L4") echo 58 ;;
     *"L40S"*) echo 142 ;;
     *"L40"*) echo 142 ;;
     *"NVIDIA A40"|*" A40") echo 84 ;;
     *"A100"*) echo 108 ;;
     *"H100 NVL"*) echo 132 ;;
+    *"H100 PCIe"* | *"H100 PCIE"*) echo 114 ;;
     *"H100"*) echo 132 ;;
     *"H200"*) echo 132 ;;
     *"B200"*) echo 160 ;;
@@ -318,9 +319,12 @@ parse_phase_timings() {
 }
 
 sample_util_during() {
-  # Background util sampler; writes samples to $1 for $2 seconds every ~2s
+  # Background util sampler; writes samples to $1 for $2 seconds every ~2s.
+  # Skip the engine wind-up (adapter enumeration + pipeline compile) so idle
+  # init seconds don't drag util_avg below the dataset's util>=50 policy.
   local out_file="$1"
   local seconds="$2"
+  sleep "${UTIL_WARMUP_SECONDS:-5}"
   local end=$((SECONDS + seconds))
   : >"${out_file}"
   while (( SECONDS < end )); do
@@ -499,6 +503,9 @@ run_benchmark_once() {
   local bench_rc=$?
   set -e
 
+  # Stop sampling as soon as the miner exits: post-run idle samples would
+  # understate utilization just like wind-up ones.
+  kill "${sampler_pid}" 2>/dev/null || true
   wait "${sampler_pid}" 2>/dev/null || true
 
   if [[ "${bench_rc}" -ne 0 ]]; then

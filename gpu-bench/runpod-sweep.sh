@@ -505,6 +505,16 @@ delete_pod() {
   api DELETE "/pods/${pod_id}" >/dev/null || true
 }
 
+# Billing guard: delete the in-flight Pod when the sweep dies or is interrupted
+# (Ctrl-C during wait_ssh / build previously leaked a running paid Pod).
+CURRENT_POD_ID=""
+cleanup_current_pod() {
+  if [[ -n "${CURRENT_POD_ID}" && "${KEEP_ON_FAILURE}" != "1" ]]; then
+    echo "cleanup: deleting in-flight Pod ${CURRENT_POD_ID}" >&2
+    delete_pod "${CURRENT_POD_ID}"
+  fi
+}
+
 run_one_attempt() {
   local gpu_type="$1"
   local create_json pod_id create_rc=0
@@ -531,20 +541,28 @@ run_one_attempt() {
     return 1
   fi
   echo "Pod id: ${pod_id}" >&2
+  CURRENT_POD_ID="${pod_id}"
 
   local ready_line tag mode host port cost
   if ! ready_line="$(wait_ssh "${pod_id}")"; then
     delete_pod "${pod_id}"
+    CURRENT_POD_ID=""
     return 1
   fi
   IFS='|' read -r tag mode host port cost <<<"${ready_line}"
   if [[ "${tag}" != "ready" || -z "${mode}" || -z "${host}" || -z "${port}" ]]; then
     echo "error: bad wait_ssh result: ${ready_line}" >&2
     delete_pod "${pod_id}"
+    CURRENT_POD_ID=""
     return 1
   fi
-  if [[ -z "${cost}" ]]; then
-    cost="0"
+  # Fail before the multi-minute paid build: record.sh rejects a non-positive
+  # --cost-per-hour, so a missing costPerHr would only surface after the build.
+  if ! awk -v c="${cost}" 'BEGIN { exit !(c + 0 > 0) }'; then
+    echo "error: Pod ${pod_id} reported no usable costPerHr ('${cost}')" >&2
+    delete_pod "${pod_id}"
+    CURRENT_POD_ID=""
+    return 1
   fi
   if [[ "${mode}" == "direct" ]]; then
     echo "SSH ${SSH_USER}@${host} -p ${port} (costPerHr=${cost})" >&2
@@ -583,11 +601,35 @@ run_one_attempt() {
 
   if [[ "${remote_rc}" -eq 0 ]]; then
     local local_row="${OUT_DIR}/row-${pod_id}.csv"
-    ssh_download "${mode}" "${host}" "${port}" \
-      "${REMOTE_DIR}/results.csv" "${local_row}"
+    local dl_ok=0 dl_try
+    for dl_try in 1 2 3; do
+      if ssh_download "${mode}" "${host}" "${port}" \
+        "${REMOTE_DIR}/results.csv" "${local_row}" &&
+        [[ "$(wc -l <"${local_row}")" -gt 1 ]]; then
+        dl_ok=1
+        break
+      fi
+      echo "download attempt ${dl_try}/3 failed for pod ${pod_id}, retrying ..." >&2
+      sleep 5
+    done
+    if [[ "${dl_ok}" -ne 1 ]]; then
+      echo "error: could not download results.csv from pod ${pod_id}; benchmark data lost" >&2
+      delete_pod "${pod_id}"
+      CURRENT_POD_ID=""
+      return 1
+    fi
+    if [[ ! -f "${RESULTS_CSV}" ]]; then
+      head -n 1 "${local_row}" >"${RESULTS_CSV}"
+    elif ! cmp -s <(head -n 1 "${local_row}") <(head -n 1 "${RESULTS_CSV}"); then
+      echo "error: CSV schema mismatch between ${local_row} and ${RESULTS_CSV}; not appending" >&2
+      delete_pod "${pod_id}"
+      CURRENT_POD_ID=""
+      return 1
+    fi
     tail -n +2 "${local_row}" >>"${RESULTS_CSV}"
     echo "Appended results to ${RESULTS_CSV}" >&2
     delete_pod "${pod_id}"
+    CURRENT_POD_ID=""
     return 0
   fi
 
@@ -599,9 +641,11 @@ run_one_attempt() {
     else
       echo "  ssh -i ${SSH_KEY} ${host}@ssh.runpod.io" >&2
     fi
+    CURRENT_POD_ID=""
     return "${remote_rc}"
   fi
   delete_pod "${pod_id}"
+  CURRENT_POD_ID=""
   # Propagate compute-only so caller can try another host.
   return "${remote_rc}"
 }
@@ -630,6 +674,7 @@ run_one() {
 }
 
 runpod_sweep_main() {
+  trap cleanup_current_pod EXIT
   local GPUS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in

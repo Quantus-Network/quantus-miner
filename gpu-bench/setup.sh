@@ -308,6 +308,10 @@ start_node_native() {
 }
 
 start_node_docker() {
+  if [[ "${DEV_MODE}" -eq 1 ]]; then
+    echo "error: --docker does not support --dev; run ./setup.sh start --dev (native)" >&2
+    exit 1
+  fi
   ensure_rewards
 
   if docker ps -a --format '{{.Names}}' | grep -qx "${NODE_CONTAINER_NAME}"; then

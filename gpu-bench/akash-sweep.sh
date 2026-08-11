@@ -214,11 +214,11 @@ resolve_akt_usd() {
   px="$(curl -fsS "https://api.coingecko.com/api/v3/simple/price?ids=akash-network&vs_currencies=usd" 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["akash-network"]["usd"])' 2>/dev/null)" || px=""
   if [[ -z "${px}" ]]; then
-    echo "warning: could not fetch AKT/USD; using 1.0 (set AKT_USD)" >&2
-    echo "1.0"
-  else
-    echo "${px}"
+    # A made-up rate would silently poison every $/hr and hash_per_dollar row.
+    echo "error: could not fetch AKT/USD price; set AKT_USD=<rate> and retry" >&2
+    return 1
   fi
+  echo "${px}"
 }
 
 # Build SDL JSON body for POST /v1/deployments. Prints the request JSON.
@@ -543,7 +543,8 @@ run_one_attempt() {
   if ! bids="$(wait_bids "${dseq}" "${akt_usd}")" || [[ -z "${bids}" ]]; then
     echo "error: no bids for model=${model} (try raising MAX_PRICE_AMOUNT or check inventory)" >&2
     close_deployment
-    return 3
+    # Distinct rc: no inventory — retrying would just burn more deposits.
+    return 4
   fi
 
   local pph provider gseq oseq denom amount
@@ -560,13 +561,17 @@ run_one_attempt() {
   api POST /v1/deposit-deployment \
     -d "{\"data\":{\"dseq\":\"${dseq}\",\"deposit\":${DEPOSIT_USD}}}" >/dev/null 2>&1 || true
 
-  local host port
-  if ! read -r host port <<<"$(resolve_ssh "${dseq}" "${provider}" "${gseq}" "${oseq}")"; then
+  local host port ssh_info
+  # `read` from a here-string returns 0 even on empty input, so check the
+  # resolve_ssh output itself instead of the read status.
+  if ! ssh_info="$(resolve_ssh "${dseq}" "${provider}" "${gseq}" "${oseq}")" ||
+    [[ -z "${ssh_info}" ]]; then
     echo "error: never got an SSH forwarded port" >&2
     SKIP_PROVIDERS+=("${provider}")
     close_deployment
     return 3
   fi
+  read -r host port <<<"${ssh_info}"
   echo "ssh root@${host} -p ${port}" >&2
 
   local ssh_opts=(-i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "${port}")
@@ -626,10 +631,16 @@ run_one_attempt() {
 
   if [[ "${remote_rc}" -eq 0 ]]; then
     local local_row="${OUT_DIR}/row-akash-${dseq}.csv"
-    scp -q -O -i "${SSH_KEY}" -P "${port}" \
-      "root@${host}:${REMOTE_DIR}/results.csv" "${local_row}"
+    if ! scp -q -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -P "${port}" \
+      "root@${host}:${REMOTE_DIR}/results.csv" "${local_row}" </dev/null ||
+      [[ ! -s "${local_row}" ]]; then
+      echo "error: could not download results.csv (dseq ${dseq}); benchmark data lost" >&2
+      close_deployment
+      return 1
+    fi
     # Drop util<50 rows at append time (matches dataset policy)
-    python3 - "${local_row}" "${RESULTS_CSV}" <<'PY'
+    local append_rc=0
+    python3 - "${local_row}" "${RESULTS_CSV}" <<'PY' || append_rc=1
 import csv, sys
 src, dst = sys.argv[1], sys.argv[2]
 rows = list(csv.DictReader(open(src, newline="")))
@@ -661,6 +672,11 @@ with open(dst, "a", newline="") as out:
         w.writerow({k: r.get(k, "") for k in dst_fields})
 print(f"appended from {src}", file=sys.stderr)
 PY
+    if [[ "${append_rc}" -ne 0 ]]; then
+      echo "error: failed to append ${local_row} to ${RESULTS_CSV}" >&2
+      close_deployment
+      return 1
+    fi
     echo "Appended results to ${RESULTS_CSV}" >&2
     close_deployment
     return 0
@@ -711,6 +727,10 @@ run_one() {
     set -e
     if [[ "${rc}" -eq 0 ]]; then
       return 0
+    fi
+    if [[ "${rc}" -eq 4 ]]; then
+      echo "no bids for ${model}; not retrying" >&2
+      return "${rc}"
     fi
     echo "attempt ${tried} failed (rc=${rc}); retrying with skip=${SKIP_PROVIDERS[*]:-}" >&2
   done

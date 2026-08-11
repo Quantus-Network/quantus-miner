@@ -121,8 +121,25 @@ PY
 }
 
 ORDER_ID=""
+PENDING_SERVER_ID=""
+
+# Find the order id for a server we rented (create_order returns only {"code":0}).
+lookup_order_id() {
+  local server_id="$1"
+  api "${API_BASE}/my_orders" 2>/dev/null | python3 -c "
+import json, sys
+for o in json.load(sys.stdin).get('orders', []):
+    if o.get('si') == ${server_id}:
+        print(o['id'])
+        break" || true
+}
 
 cancel_order() {
+  # Interrupt during resolve_ssh: order exists but ORDER_ID is not yet known.
+  if [[ -z "${ORDER_ID}" && -n "${PENDING_SERVER_ID}" ]]; then
+    ORDER_ID="$(lookup_order_id "${PENDING_SERVER_ID}")"
+  fi
+  PENDING_SERVER_ID=""
   [[ -z "${ORDER_ID}" ]] && return 0
   local i r
   for i in 1 2 3 4 5; do
@@ -199,22 +216,24 @@ run_one_attempt() {
     echo "create_order failed (likely rented out from under us)" >&2
     return 3
   fi
+  # Order is live and billing from here; lets the EXIT trap cancel it even
+  # before resolve_ssh discovers the order id.
+  PENDING_SERVER_ID="${server_id}"
 
   local info host port
   if ! info="$(resolve_ssh "${server_id}")"; then
     echo "order never exposed an SSH endpoint" >&2
-    ORDER_ID="$(api "${API_BASE}/my_orders" | python3 -c "
-import json, sys
-for o in json.load(sys.stdin).get('orders', []):
-    if o.get('si') == ${server_id}:
-        print(o['id'])" || true)"
+    ORDER_ID="$(lookup_order_id "${server_id}")"
     cancel_order
     return 3
   fi
   read -r ORDER_ID host port <<<"${info}"
+  PENDING_SERVER_ID=""
   echo "order ${ORDER_ID}: ssh root@${host} -p ${port}" >&2
 
-  local ssh_opts=(-i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "${port}")
+  # -n: ssh must not read the caller's stdin — run_one iterates candidates via
+  # `while read ... <<<"${cands}"`, and an ssh draining stdin kills the retry loop.
+  local ssh_opts=(-n -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "${port}")
   local deadline=$((SECONDS + SSH_WAIT_SECONDS)) up=0
   while ((SECONDS < deadline)); do
     if ssh "${ssh_opts[@]}" "root@${host}" true 2>/dev/null; then
@@ -241,7 +260,8 @@ for o in json.load(sys.stdin).get('orders', []):
   local gpus_note="gpus=${GPU_COUNT}/${GPU_COUNT}"
   local remote_rc=0
   scp -q -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -P "${port}" \
-    "${SCRIPT_DIR}/remote-run.sh" "${SCRIPT_DIR}/record.sh" "root@${host}:/root/" || remote_rc=1
+    "${SCRIPT_DIR}/remote-run.sh" "${SCRIPT_DIR}/record.sh" "root@${host}:/root/" \
+    </dev/null || remote_rc=1
 
   if [[ "${remote_rc}" -eq 0 ]]; then
     ssh "${ssh_opts[@]}" "root@${host}" \
@@ -276,7 +296,20 @@ for o in json.load(sys.stdin).get('orders', []):
 
   if [[ "${remote_rc}" -eq 0 ]]; then
     local local_row="${OUT_DIR}/row-clore-${ORDER_ID}.csv"
-    scp -q -O -i "${SSH_KEY}" -P "${port}" "root@${host}:${REMOTE_DIR}/results.csv" "${local_row}"
+    if ! scp -q -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -P "${port}" \
+      "root@${host}:${REMOTE_DIR}/results.csv" "${local_row}" </dev/null ||
+      [[ "$(wc -l <"${local_row}")" -le 1 ]]; then
+      echo "error: could not download results.csv (order ${ORDER_ID}); benchmark data lost" >&2
+      cancel_order
+      return 3
+    fi
+    if [[ ! -f "${RESULTS_CSV}" ]]; then
+      head -n 1 "${local_row}" >"${RESULTS_CSV}"
+    elif ! cmp -s <(head -n 1 "${local_row}") <(head -n 1 "${RESULTS_CSV}"); then
+      echo "error: CSV schema mismatch between ${local_row} and ${RESULTS_CSV}; not appending" >&2
+      cancel_order
+      return 1
+    fi
     tail -n +2 "${local_row}" >>"${RESULTS_CSV}"
     echo "Appended results to ${RESULTS_CSV}" >&2
     cancel_order
