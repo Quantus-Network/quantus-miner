@@ -673,7 +673,7 @@ runpod_sweep_main() {
   mkdir -p "${OUT_DIR}"
   if [[ ! -f "${RESULTS_CSV}" ]]; then
     printf '%s\n' \
-      "timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,sample_seconds,notes" \
+      "timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,ideal_hash_per_dollar,sample_seconds,wind_up_ms,busy_ms,wind_down_ms,notes" \
       >"${RESULTS_CSV}"
   fi
 

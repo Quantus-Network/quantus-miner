@@ -133,6 +133,40 @@ Clore-specific behavior baked in:
   at a fraction of RunPod prices — it fills the family gaps the RunPod
   sweep can't.
 
+## Akash Console API sweep
+
+Same end state (SSH → `remote-run.sh` → CSV), but via the **Akash Console
+managed-wallet API**: post an SDL asking for a GPU model → providers bid →
+lease the cheapest → inject SSH → bench → close. Needs `AKASH_API_KEY`
+([console.akash.network](https://console.akash.network) → Settings → API Keys)
+or `~/.config/akash/api_key`, and a funded Console balance (credit card).
+
+```bash
+export AKASH_API_KEY=...
+
+./akash-sweep.sh --list rtx4090          # temp deploy, print bids, close
+./akash-sweep.sh rtx5080 "RTX 4090"      # normalize → rtx5080 / rtx4090
+./akash-sweep.sh --list --gpus-file gpus.all.txt   # map RunPod names → Akash ids
+./akash-sweep.sh --gpus-file gpus.all.txt          # full bench sweep (slow + $)
+DEPOSIT_USD=8 ./akash-sweep.sh h100
+```
+
+`gpus.all.txt` is RunPod-oriented: names are normalized (`NVIDIA GeForce RTX 4090` →
+`rtx4090`, `A100-SXM4-80GB` → `a100`). Many lines get **zero bids** on Akash —
+`--list` first, or trim the file. Each no-bid attempt still burns a small deposit.
+
+Akash-specific notes:
+
+- There is **no offer catalog** — discovery is “deploy SDL → read bids”.
+  `--list` does that without leasing.
+- SDL pricing denom defaults to **`uact`** (Console managed wallet). Bid
+  price is per block; the script converts to `$/hr` (×`AKT_USD` or USDC).
+- SDL asks for `nvidia` + `model: <name>` (e.g. `rtx4090`). Inventory skews
+  AI/datacenter; consumer 50-series may be sparse vs Clore.
+- Default image is `nvidia/cuda:12.6.3-devel-ubuntu24.04` with an SSH
+  entrypoint; providers must expose the NVIDIA runtime.
+- Deployments are closed on EXIT (`KEEP_ON_FAILURE=1` to debug).
+
 ## Knobs that matter for differently shaped GPUs
 
 | Knob | Where | Notes |
@@ -150,6 +184,13 @@ If util stays low across 1M→16M, dispatch shape may not be the bottleneck (dri
 
 [`results.csv`](results.csv) is the shared hardware comparison table. Prefer the
 row with the best hashrate (or hash_per_dollar) per GPU when ranking hardware.
+Rows with utilization under 50% are dropped (unreliable samples).
+
+To fit `hashrate ~ sm_count (+ vram_mb)` (not H/$, which is price-driven):
+
+```bash
+./fit-hashrate.py
+```
 
 ## Spreadsheet columns
 
@@ -162,6 +203,7 @@ row with the best hashrate (or hash_per_dollar) per GPU when ranking hardware.
 | `cost_per_hour` | Pod `costPerHr` (sweep) or your flag |
 | `cost_per_sec` | `cost_per_hour / 3600` |
 | `hash_per_dollar` | `hashrate / cost_per_sec` |
+| `ideal_hash_per_dollar` | `hash_per_dollar / (util/100)` — H/$ scaled to 100% util |
 | `wind_up_ms` | mean setup→first-batch (job-sim only; empty if sustained/`--live`) |
 | `busy_ms` | mean GPU batch wall time per job (job-sim only) |
 | `wind_down_ms` | mean cancel-seen→return (job-sim only) |
@@ -176,5 +218,8 @@ row with the best hashrate (or hash_per_dollar) per GPU when ranking hardware.
 | [`batch-tune.sh`](batch-tune.sh) | Quick util/hashrate table without cost columns |
 | [`runpod-sweep.sh`](runpod-sweep.sh) | RunPod REST API multi-GPU loop |
 | [`runpod-shell.sh`](runpod-shell.sh) | One Pod + SSH; keep alive for manual debug |
+| [`clore-sweep.sh`](clore-sweep.sh) | Clore.ai marketplace rent → bench → cancel |
+| [`akash-sweep.sh`](akash-sweep.sh) | Akash Console API deploy → bid → lease → bench |
+| [`fit-hashrate.py`](fit-hashrate.py) | OLS `hashrate ~ sm_count (+ vram)` |
 | [`setup.sh`](setup.sh) | Local native node+miner (`--dev` or Planck) |
 | [`gpus.all.txt`](gpus.all.txt) | Full RunPod NVIDIA `gpuTypeId` list |

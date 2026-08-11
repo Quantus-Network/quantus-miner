@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="${SCRIPT_DIR}/.run"
 ENV_FILE="${SCRIPT_DIR}/.env"
 RESULTS_CSV="${RESULTS_CSV:-${SCRIPT_DIR}/results.csv}"
-CSV_HEADER="timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,sample_seconds,wind_up_ms,busy_ms,wind_down_ms,notes"
+CSV_HEADER="timestamp,cloud_provider,gpu_model,vram_mb,sm_count,driver_version,hashrate,gpu_utilization_pct,cost_per_hour,cost_per_sec,hash_per_dollar,ideal_hash_per_dollar,sample_seconds,wind_up_ms,busy_ms,wind_down_ms,notes"
 DEFAULT_MINER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 MODE="live"
@@ -87,24 +87,36 @@ ensure_results_header() {
   if [[ "${first}" == "${CSV_HEADER}" ]]; then
     return
   fi
-  # Migrate older schemas by inserting empty phase columns before notes.
+  # Migrate older schemas; recompute ideal_hash_per_dollar when possible.
   local tmp
   tmp="$(mktemp)"
   python3 - "${RESULTS_CSV}" "${tmp}" "${CSV_HEADER}" <<'PY'
 import csv, sys
 src, dst, new_header = sys.argv[1], sys.argv[2], sys.argv[3]
 new_fields = new_header.split(",")
+
+def ideal_hpd(row):
+    try:
+        hpd = float(row.get("hash_per_dollar") or "")
+        util = float(row.get("gpu_utilization_pct") or "")
+    except ValueError:
+        return row.get("ideal_hash_per_dollar", "") or ""
+    if util <= 0 or hpd <= 0:
+        return ""
+    return f"{hpd / (util / 100.0):.6f}"
+
 with open(src, newline="") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
+    rows = list(csv.DictReader(f))
 with open(dst, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=new_fields, lineterminator="\n")
     w.writeheader()
     for r in rows:
-        w.writerow({k: r.get(k, "") for k in new_fields})
+        out = {k: r.get(k, "") for k in new_fields}
+        out["ideal_hash_per_dollar"] = ideal_hpd(r)
+        w.writerow(out)
 PY
   mv "${tmp}" "${RESULTS_CSV}"
-  echo "Migrated ${RESULTS_CSV} header → include wind_up_ms,busy_ms,wind_down_ms" >&2
+  echo "Migrated ${RESULTS_CSV} header to current schema" >&2
 }
 
 # Best-effort SM / multiprocessor count. Many cloud drivers omit
@@ -351,6 +363,16 @@ compute_cost_metrics() {
   }'
 }
 
+# ideal_hash_per_dollar = hash_per_dollar / (util/100)  — empty if util<=0
+compute_ideal_hpd() {
+  local hash_per_dollar="$1"
+  local util_avg="$2"
+  awk -v h="${hash_per_dollar}" -v u="${util_avg}" 'BEGIN {
+    if (h == "" || u == "" || u+0 <= 0) { print ""; exit }
+    printf "%.6f\n", h / (u / 100.0)
+  }'
+}
+
 emit_row() {
   local timestamp="$1"
   local hashrate="$2"
@@ -360,9 +382,11 @@ emit_row() {
   local wind_up_ms="${6:-}"
   local busy_ms="${7:-}"
   local wind_down_ms="${8:-}"
+  local ideal_hash_per_dollar
+  ideal_hash_per_dollar="$(compute_ideal_hpd "${hash_per_dollar}" "${util_avg}")"
 
   local row
-  row="$(csv_escape "${timestamp}"),$(csv_escape "${PROVIDER}"),$(csv_escape "${GPU_MODEL}"),$(csv_escape "${VRAM_MB}"),$(csv_escape "${SM_COUNT}"),$(csv_escape "${DRIVER_VERSION}"),$(csv_escape "${hashrate}"),$(csv_escape "${util_avg}"),$(csv_escape "${COST_PER_HOUR}"),$(csv_escape "${cost_per_sec}"),$(csv_escape "${hash_per_dollar}"),$(csv_escape "${DURATION}"),$(csv_escape "${wind_up_ms}"),$(csv_escape "${busy_ms}"),$(csv_escape "${wind_down_ms}"),$(csv_escape "${NOTES}")"
+  row="$(csv_escape "${timestamp}"),$(csv_escape "${PROVIDER}"),$(csv_escape "${GPU_MODEL}"),$(csv_escape "${VRAM_MB}"),$(csv_escape "${SM_COUNT}"),$(csv_escape "${DRIVER_VERSION}"),$(csv_escape "${hashrate}"),$(csv_escape "${util_avg}"),$(csv_escape "${COST_PER_HOUR}"),$(csv_escape "${cost_per_sec}"),$(csv_escape "${hash_per_dollar}"),$(csv_escape "${ideal_hash_per_dollar}"),$(csv_escape "${DURATION}"),$(csv_escape "${wind_up_ms}"),$(csv_escape "${busy_ms}"),$(csv_escape "${wind_down_ms}"),$(csv_escape "${NOTES}")"
 
   echo "${CSV_HEADER}"
   echo "${row}"
