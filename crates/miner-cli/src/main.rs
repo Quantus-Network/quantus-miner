@@ -215,11 +215,10 @@ fn init_logger(verbose: bool) {
     env_logger::init();
 }
 
-fn parse_difficulty(raw: Option<&str>, job_interval: f64) -> U512 {
+fn parse_difficulty(raw: Option<&str>) -> U512 {
     match raw {
-        // Job sim defaults to unreachable difficulty: mainnet almost always
+        // Default is unreachable difficulty: mainnet almost always
         // preempts via NewJob rather than a local find.
-        None if job_interval > 0.0 => U512::MAX,
         None => U512::MAX,
         Some(s) if s.eq_ignore_ascii_case("max") => U512::MAX,
         Some(s) => match U512::from_dec_str(s) {
@@ -261,7 +260,6 @@ fn p50_ms(xs: &mut [f64]) -> f64 {
     xs[xs.len() / 2]
 }
 
-
 fn random_header() -> [u8; 32] {
     let mut header = [0u8; 32];
     rand::rng().fill_bytes(&mut header);
@@ -282,6 +280,7 @@ fn jittered_job_delay(interval: f64, jitter_frac: f64) -> Duration {
     Duration::from_secs_f64(secs.max(MIN_SECS))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_benchmark(
     cpu_workers: Option<usize>,
     gpu_devices: Option<usize>,
@@ -293,12 +292,13 @@ async fn run_benchmark(
     difficulty_arg: Option<String>,
     allow_integrated: bool,
 ) {
-    // When --gpu-devices is set and --cpu-workers is omitted, default to GPU-only
-    // so hardware A/B numbers aren't polluted by host CPU hashrate.
+    // When --gpu-devices is set to a nonzero count and --cpu-workers is omitted,
+    // default to GPU-only so hardware A/B numbers aren't polluted by host CPU
+    // hashrate. `--gpu-devices 0` still means a CPU-only benchmark.
     let effective_cpu_workers = match (cpu_workers, gpu_devices) {
         (Some(n), _) => n,
-        (None, Some(_)) => 0,
-        (None, None) => num_cpus::get(),
+        (None, Some(g)) if g > 0 => 0,
+        _ => num_cpus::get(),
     };
 
     // Initialize GPU engine (no throttle for benchmark)
@@ -316,7 +316,7 @@ async fn run_benchmark(
     };
 
     let total_workers = effective_cpu_workers + effective_gpu_devices;
-    let difficulty = parse_difficulty(difficulty_arg.as_deref(), job_interval);
+    let difficulty = parse_difficulty(difficulty_arg.as_deref());
 
     println!("🚀 Quantus Miner Benchmark");
     println!("==========================");
@@ -342,6 +342,11 @@ async fn run_benchmark(
         }
     } else {
         println!("Job interval: off (sustained single job)");
+        if difficulty == U512::MAX {
+            println!("Difficulty: max (no finds expected)");
+        } else {
+            println!("Difficulty: {difficulty}");
+        }
     }
     println!();
 
@@ -350,11 +355,11 @@ async fn run_benchmark(
         std::process::exit(1);
     }
 
-    if job_interval < 0.0 {
-        eprintln!("❌ ERROR: --job-interval must be >= 0");
+    if !(0.0..=86_400.0).contains(&job_interval) {
+        eprintln!("❌ ERROR: --job-interval must be in [0, 86400] seconds");
         std::process::exit(1);
     }
-    if job_jitter < 0.0 || job_jitter >= 1.0 {
+    if !(0.0..1.0).contains(&job_jitter) {
         eprintln!("❌ ERROR: --job-jitter must be in [0, 1)");
         std::process::exit(1);
     }
@@ -387,12 +392,14 @@ async fn run_benchmark(
             gpu_batch_size,
             cpu_batch_size,
             duration,
+            difficulty,
         )
         .await;
     }
 }
 
-/// Continuous hashing on one header (difficulty MAX). Measures peak sustained H/s.
+/// Continuous hashing on one header (difficulty MAX by default). Measures peak sustained H/s.
+#[allow(clippy::too_many_arguments)]
 async fn run_benchmark_sustained(
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
@@ -401,13 +408,13 @@ async fn run_benchmark_sustained(
     gpu_batch_size: u32,
     cpu_batch_size: u64,
     duration: u64,
+    difficulty: U512,
 ) {
     let total_workers = effective_cpu_workers + effective_gpu_devices;
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let benchmark_start = Instant::now();
 
     let header = random_header();
-    let difficulty = U512::MAX;
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
     let ctx = ref_engine.prepare_context(header, difficulty);
 
@@ -490,6 +497,7 @@ async fn run_benchmark_sustained(
 }
 
 /// Serve-like path: open-ended search, JobId cancel, periodic NewJob, idle after Found.
+#[allow(clippy::too_many_arguments)]
 async fn run_benchmark_with_jobs(
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
@@ -503,10 +511,8 @@ async fn run_benchmark_with_jobs(
     let total_workers = effective_cpu_workers + effective_gpu_devices;
     let stop_flag = Arc::new(AtomicBool::new(false));
     let current_job_id = Arc::new(AtomicU64::new(0));
-    let job_ctx: Arc<RwLock<JobContext>> = Arc::new(RwLock::new(JobContext::new(
-        random_header(),
-        difficulty,
-    )));
+    let job_ctx: Arc<RwLock<JobContext>> =
+        Arc::new(RwLock::new(JobContext::new(random_header(), difficulty)));
     let total_hashes = Arc::new(Mutex::new(0u64));
     let finds = Arc::new(AtomicU64::new(0));
     let jobs_started = Arc::new(AtomicU64::new(0));
@@ -551,14 +557,13 @@ async fn run_benchmark_with_jobs(
             let worker_start = U512::from(worker_id as u64).saturating_mul(stride);
 
             loop {
+                // Load the job id BEFORE checking stop: shutdown stores stop and
+                // then bumps the id, so a worker that sees the final id also sees
+                // stop and breaks instead of starting a search whose
+                // JobIdCancelCheck would never fire (permanent hang).
+                let my_job_id = job_id_counter.load(Ordering::SeqCst);
                 if stop.load(Ordering::Relaxed) {
                     break;
-                }
-
-                let my_job_id = job_id_counter.load(Ordering::SeqCst);
-                if my_job_id == 0 {
-                    thread::sleep(Duration::from_millis(1));
-                    continue;
                 }
 
                 let ctx = job_ctx.read().unwrap().clone();
@@ -664,7 +669,15 @@ fn print_phase_report(stats: &[PhaseAccum], job_interval: f64) {
     println!("=========================================");
     println!(
         "{:<8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>7} {:>8}",
-        "device", "samples", "wind_up", "busy", "wind_down", "wu_p50", "busy_p50", "busy%", "vs_int%"
+        "device",
+        "samples",
+        "wind_up",
+        "busy",
+        "wind_down",
+        "wu_p50",
+        "busy_p50",
+        "busy%",
+        "vs_int%"
     );
 
     let interval_ms = job_interval * 1000.0;

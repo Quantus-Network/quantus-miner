@@ -87,7 +87,13 @@ const NVIDIA_TIERS: &[GpuTier] = &[
         min_workgroups: 2560,
     },
     GpuTier {
-        pattern: r"rtx 2000 ada|2000 ada generation",
+        pattern: r"rtx 3000 ada|3000 ada generation",
+        name: "NVIDIA RTX 3000 Ada (Workstation)",
+        workgroup_divisor: 12,
+        min_workgroups: 2048,
+    },
+    GpuTier {
+        pattern: r"rtx 2000e? ada|2000e? ada generation",
         name: "NVIDIA RTX 2000 Ada (Workstation)",
         workgroup_divisor: 14,
         min_workgroups: 1536,
@@ -179,13 +185,19 @@ const NVIDIA_TIERS: &[GpuTier] = &[
         min_workgroups: 1024,
     },
     GpuTier {
-        pattern: r"rtx a\d{4}",
+        pattern: r"rtx a\d{3,4}\b",
         name: "NVIDIA RTX A-series (Ampere Pro)",
         workgroup_divisor: 12,
         min_workgroups: 2048,
     },
     GpuTier {
-        pattern: r"tesla|\bv100\b|quadro",
+        pattern: r"\bv100\b",
+        name: "NVIDIA V100 (Volta DC)",
+        workgroup_divisor: 10,
+        min_workgroups: 2560,
+    },
+    GpuTier {
+        pattern: r"tesla|quadro",
         name: "NVIDIA Tesla/Quadro (Legacy Pro)",
         workgroup_divisor: 14,
         min_workgroups: 1536,
@@ -199,7 +211,7 @@ const NVIDIA_TIERS: &[GpuTier] = &[
         min_workgroups: 5120,
     },
     GpuTier {
-        pattern: r"\b50[67]0\b|\brtx 50[67]0\b",
+        pattern: r"\b50[67]0\b|\brtx 50\d0\b",
         name: "NVIDIA RTX 50 (Blackwell)",
         workgroup_divisor: 7,
         min_workgroups: 4608,
@@ -212,14 +224,14 @@ const NVIDIA_TIERS: &[GpuTier] = &[
         min_workgroups: 4096,
     },
     GpuTier {
-        pattern: r"\b40[67]0\b|\brtx 40[67]0\b",
+        pattern: r"\b40[67]0\b|\brtx 40\d0\b",
         name: "NVIDIA RTX 40 (Ada)",
         workgroup_divisor: 10,
         min_workgroups: 3072,
     },
     // Ampere/Turing (RTX 30/20 series)
     GpuTier {
-        pattern: r"\b30[5-9]0\b|\b20[6-8]0\b|\brtx 30[5-9]0\b|\brtx 20[6-8]0\b",
+        pattern: r"\b30[5-9]0\b|\b20[6-8]0\b|\brtx 30\d0\b|\brtx 20\d0\b",
         name: "NVIDIA RTX 30/20 (Ampere/Turing)",
         workgroup_divisor: 12,
         min_workgroups: 2048,
@@ -846,6 +858,44 @@ mod tests {
             false,
         );
         assert_eq!(pro.name, "NVIDIA RTX PRO 6000 (Blackwell)");
+    }
+
+    #[test]
+    fn test_nvidia_entry_level_geforce_not_fallback() {
+        let tier = detect_gpu_tier("NVIDIA GeForce RTX 5050", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 50 (Blackwell)");
+        assert!(!tier.is_fallback);
+
+        let tier = detect_gpu_tier("NVIDIA GeForce RTX 4050 Laptop GPU", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 40 (Ada)");
+        assert!(!tier.is_fallback);
+
+        let tier = detect_gpu_tier("NVIDIA GeForce RTX 2050", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 30/20 (Ampere/Turing)");
+        assert!(!tier.is_fallback);
+    }
+
+    #[test]
+    fn test_nvidia_small_pro_and_workstation_variants_not_fallback() {
+        let tier = detect_gpu_tier("NVIDIA RTX A400", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX A-series (Ampere Pro)");
+        assert!(!tier.is_fallback);
+
+        let tier = detect_gpu_tier("NVIDIA RTX A500", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX A-series (Ampere Pro)");
+
+        let tier = detect_gpu_tier("NVIDIA RTX 3000 Ada Generation Laptop GPU", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 3000 Ada (Workstation)");
+
+        let tier = detect_gpu_tier("NVIDIA RTX 2000E Ada Generation", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA RTX 2000 Ada (Workstation)");
+
+        let tier = detect_gpu_tier("Tesla V100-SXM2-16GB", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA V100 (Volta DC)");
+        assert_eq!(tier.workgroup_divisor, 10);
+
+        let tier = detect_gpu_tier("Tesla T4", 0x10DE, false);
+        assert_eq!(tier.name, "NVIDIA Tesla/Quadro (Legacy Pro)");
     }
 
     #[test]
