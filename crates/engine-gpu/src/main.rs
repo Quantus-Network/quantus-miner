@@ -1,6 +1,11 @@
 mod end_to_end_tests;
 mod tests;
 
+// end_to_end_tests is compiled both into the library and into this binary;
+// re-export at the crate root so its `crate::precompute_header_state` path
+// resolves in the binary as well.
+use engine_gpu::precompute_header_state;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     run().await

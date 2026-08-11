@@ -168,7 +168,13 @@ const TERMINAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<ar
 
 // Helper function to create GoldilocksField from constant array
 fn gf_from_const(val: array<u32, 2>) -> GoldilocksField {
-    return gf_from_u64_parts(val[0], val[1]);
+    return gf_canonicalize(GoldilocksField(val[0], val[1]));
+}
+
+// Fast path for the round constants: they are all < P (verified against the
+// canonical constant tables), so no reduction is needed.
+fn gf_const_raw(val: array<u32, 2>) -> GoldilocksField {
+    return GoldilocksField(val[0], val[1]);
 }
 
 // MDS matrix constants for width 12 - circulant matrix first row
@@ -191,7 +197,10 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 
 // Storage buffers
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
-@group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
+// Precomputed sponge state after absorbing the header-only first chunk and
+// applying one Poseidon2 permutation (computed once per job on the CPU):
+// 12 Goldilocks field elements as [low32, high32] pairs.
+@group(0) @binding(1) var<storage, read> header_state: array<u32, 24>;
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
 @group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 3>; // [total_threads, nonces_per_thread, total_nonces]
@@ -230,17 +239,8 @@ fn gf_from_u32(val: u32) -> GoldilocksField {
     return GoldilocksField(val, 0u);
 }
 
-// Convert a 64-bit value (as two u32s) to GoldilocksField
-fn gf_from_u64_parts(low: u32, high: u32) -> GoldilocksField {
-    var result = GoldilocksField(low, high);
-
-    // Reduce if >= P
-    if (gf_compare(result, gf_from_limbs(P_LIMB0, P_LIMB1)) != 2u) {
-        result = gf_sub(result, gf_from_limbs(P_LIMB0, P_LIMB1));
-    }
-
-    return result;
-}
+// Convert a 64-bit value (as two u32s) to GoldilocksField is handled by
+// gf_from_const / gf_canonicalize for the hot paths.
 
 // Addition with carry for u32 values
 // Returns vec2<u32>(sum, carry)
@@ -292,79 +292,69 @@ fn u32_mul_to_u64(a: u32, b: u32) -> vec2<u32> {
     return vec2<u32>(res_lo, res_hi);
 }
 
-// Compare two GoldilocksField values
-// Returns: 0 if a == b, 1 if a > b, 2 if a < b
-fn gf_compare(a: GoldilocksField, b: GoldilocksField) -> u32 {
-    // Compare from most significant limb to least
-    if (a.limb1 != b.limb1) {
-        return select(2u, 1u, a.limb1 > b.limb1);
-    }
-    if (a.limb0 != b.limb0) {
-        return select(2u, 1u, a.limb0 > b.limb0);
-    }
-    return 0u; // Equal
-}
+// (gf_compare removed: no longer used after branchless arithmetic rewrite)
 
-// Goldilocks field addition
+// Goldilocks field addition (branchless, result may be non-canonical).
+// Mirrors the CPU reference: fold 2^64 overflow as +NEG_ORDER (2^64 ≡ 2^32-1 mod P),
+// with the rare second fold; no final reduction.
 fn gf_add(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // Add limb by limb with carry propagation
-    let add0 = u32_add_with_carry(a.limb0, b.limb0, 0u);
-    let add1 = u32_add_with_carry(a.limb1, b.limb1, add0.y);
+    // 64-bit add with carry out
+    let s0 = a.limb0 + b.limb0;
+    let c0 = select(0u, 1u, s0 < a.limb0);
+    let s1a = a.limb1 + b.limb1;
+    let c1a = select(0u, 1u, s1a < a.limb1);
+    let s1 = s1a + c0;
+    let c1 = c1a + select(0u, 1u, s1 < s1a);
 
-    var result = GoldilocksField(add0.x, add1.x);
+    // First fold: add NEG_ORDER = [0xFFFFFFFF, 0] if the 64-bit add overflowed
+    let t0 = s0 + select(0u, 0xFFFFFFFFu, c1 != 0u);
+    let c2 = select(0u, 1u, t0 < s0);
+    let t1a = s1 + c2;
+    let c3 = select(0u, 1u, t1a < s1);
 
-    // Handle overflow: if carry out, we've computed a + b = result + 2^64
-    // In Goldilocks: 2^64 ≡ 2^32 - 1 (mod P)
-    if (add1.y != 0u) {
-        // Add EPSILON = 0xFFFFFFFF00000000 (Wait, EPSILON is 2^32 - 1)
-        // EPSILON = 0x00000000FFFFFFFF
-        // EPSILON_LIMB0 = 0xFFFFFFFF, EPSILON_LIMB1 = 0
-        let eps_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-        let eps_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
-        result = GoldilocksField(eps_add0.x, eps_add1.x);
+    // Rare second fold (cannot overflow again, per CPU reference)
+    let u0 = t0 + select(0u, 0xFFFFFFFFu, c3 != 0u);
+    let c4 = select(0u, 1u, u0 < t0);
+    let u1 = t1a + c4;
 
-        // If adding EPSILON caused another overflow, add EPSILON again
-        if (eps_add1.y != 0u) {
-            let eps2_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-            let eps2_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps2_add0.y);
-            result = GoldilocksField(eps2_add0.x, eps2_add1.x);
-        }
-    }
-
-    // Final reduction if result >= P
-    let p = gf_from_limbs(P_LIMB0, P_LIMB1);
-    if (gf_compare(result, p) != 2u) { // if result >= P
-        result = gf_sub_no_underflow(result, p);
-    }
-
-    return result;
+    return GoldilocksField(u0, u1);
 }
 
-// Helper for subtraction without underflow (assumes a >= b)
-fn gf_sub_no_underflow(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    let sub0 = u32_sub_with_borrow(a.limb0, b.limb0, 0u);
-    let sub1 = u32_sub_with_borrow(a.limb1, b.limb1, sub0.y);
-    return GoldilocksField(sub0.x, sub1.x);
-}
-
-// Goldilocks field subtraction
+// Goldilocks field subtraction (branchless, result may be non-canonical).
+// Mirrors the CPU reference: a borrow folds as -NEG_ORDER, with the rare second fold.
 fn gf_sub(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // If a >= b, do direct subtraction
-    if (gf_compare(a, b) != 2u) {
-        return gf_sub_no_underflow(a, b);
-    }
+    let d0 = a.limb0 - b.limb0;
+    let bo0 = select(0u, 1u, d0 > a.limb0);
+    let d1a = a.limb1 - b.limb1;
+    let bo1a = select(0u, 1u, d1a > a.limb1);
+    let d1 = d1a - bo0;
+    let bo1 = bo1a + select(0u, 1u, d1 > d1a);
 
-    // Otherwise: a < b, so compute a - b + P
-    let p = gf_from_limbs(P_LIMB0, P_LIMB1);
-    let a_plus_p = gf_add_no_reduction(a, p);
-    return gf_sub_no_underflow(a_plus_p, b);
+    // First fold: subtract NEG_ORDER if the 64-bit subtract underflowed
+    let e0 = d0 - select(0u, 0xFFFFFFFFu, bo1 != 0u);
+    let bb = select(0u, 1u, e0 > d0);
+    let e1 = d1 - bb;
+    let bb2 = select(0u, 1u, e1 > d1);
+
+    // Rare second fold (cannot underflow again, per CPU reference)
+    let f0 = e0 - select(0u, 0xFFFFFFFFu, bb2 != 0u);
+    let bb3 = select(0u, 1u, f0 > e0);
+    let f1 = e1 - bb3;
+
+    return GoldilocksField(f0, f1);
 }
 
-// Addition without final modular reduction (used internally)
-fn gf_add_no_reduction(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    let add0 = u32_add_with_carry(a.limb0, b.limb0, 0u);
-    let add1 = u32_add_with_carry(a.limb1, b.limb1, add0.y);
-    return GoldilocksField(add0.x, add1.x);
+// Canonicalize: return x mod P in [0, P) via one conditional subtract (branchless).
+fn gf_canonicalize(x: GoldilocksField) -> GoldilocksField {
+    let d0 = x.limb0 - P_LIMB0;
+    let b0 = select(0u, 1u, d0 > x.limb0);
+    let d1a = x.limb1 - P_LIMB1;
+    let b1a = select(0u, 1u, d1a > x.limb1);
+    let d1 = d1a - b0;
+    let b1 = b1a + select(0u, 1u, d1 > d1a);
+    // No borrow out => x >= P => take the difference
+    let ge = b1 == 0u;
+    return GoldilocksField(select(x.limb0, d0, ge), select(x.limb1, d1, ge));
 }
 
 // Simplified multiplication that handles carries more carefully
@@ -449,27 +439,19 @@ fn gf_reduce_4limb(limbs: array<u32, 4>) -> GoldilocksField {
     // Step 4: result = t0 + t1 (with overflow handling like CPU)
     let add0 = u32_add_with_carry(t0.limb0, t1.limb0, 0u);
     let add1 = u32_add_with_carry(t0.limb1, t1.limb1, add0.y);
-    var result = GoldilocksField(add0.x, add1.x);
+    let sum = GoldilocksField(add0.x, add1.x);
 
-    // If overflow, add NEG_ORDER
-    if (add1.y != 0u) {
-        let eps_add0 = u32_add_with_carry(result.limb0, EPSILON_LIMB0, 0u);
-        let eps_add1 = u32_add_with_carry(result.limb1, EPSILON_LIMB1, eps_add0.y);
-        result = GoldilocksField(eps_add0.x, eps_add1.x);
-    }
+    // On 64-bit overflow, fold by adding NEG_ORDER (branchless; per the CPU
+    // reference this cannot overflow again here).
+    let f0 = sum.limb0 + select(0u, EPSILON_LIMB0, add1.y != 0u);
+    let fc = select(0u, 1u, f0 < sum.limb0);
+    let f1 = sum.limb1 + fc + select(0u, EPSILON_LIMB1, add1.y != 0u);
 
-    return result;
+    return GoldilocksField(f0, f1);
 }
 
 // Main Goldilocks field multiplication
 fn gf_mul(a: GoldilocksField, b: GoldilocksField) -> GoldilocksField {
-    // Handle special cases
-    if (a.limb0 == 0u && a.limb1 == 0u) { return gf_zero(); }
-    if (b.limb0 == 0u && b.limb1 == 0u) { return gf_zero(); }
-    if (a.limb0 == 1u && a.limb1 == 0u) { return b; }
-    if (b.limb0 == 1u && b.limb1 == 0u) { return a; }
-
-    // General case: multiply and reduce
     let unreduced = gf_mul_unreduced(a, b);
     return gf_reduce_4limb(unreduced);
 }
@@ -551,7 +533,7 @@ fn internal_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
 
     // Apply diagonal matrix: result[i] = state[i] * diag[i] + sum
     for (var i = 0u; i < 12u; i++) {
-        let diag_val = gf_from_u64_parts(
+        let diag_val = gf_from_limbs(
             MDS_MATRIX_DIAG_12[i][0],  // low 32 bits
             MDS_MATRIX_DIAG_12[i][1]   // high 32 bits
         );
@@ -575,7 +557,7 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
     for (var round = 0u; round < 4u; round++) {
         // Add round constants
         for (var i = 0u; i < 12u; i++) {
-            (*state)[i] = gf_add((*state)[i], gf_from_const(INITIAL_EXTERNAL_CONSTANTS[round][i]));
+            (*state)[i] = gf_add((*state)[i], gf_const_raw(INITIAL_EXTERNAL_CONSTANTS[round][i]));
         }
 
         // S-box on all elements
@@ -591,7 +573,7 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
     // Internal rounds (22 rounds)
     for (var round = 0u; round < 22u; round++) {
         // Add round constant to first element only
-        (*state)[0] = gf_add((*state)[0], gf_from_const(INTERNAL_CONSTANTS[round]));
+        (*state)[0] = gf_add((*state)[0], gf_const_raw(INTERNAL_CONSTANTS[round]));
         // S-box on first element only
         (*state)[0] = sbox((*state)[0]);
         // Internal linear layer (diagonal matrix)
@@ -602,7 +584,7 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
     for (var round = 0u; round < 4u; round++) {
         // Add round constants
         for (var i = 0u; i < 12u; i++) {
-            (*state)[i] = gf_add((*state)[i], gf_from_const(TERMINAL_EXTERNAL_CONSTANTS[round][i]));
+            (*state)[i] = gf_add((*state)[i], gf_const_raw(TERMINAL_EXTERNAL_CONSTANTS[round][i]));
         }
         // S-box on all elements
         for (var i = 0u; i < 12u; i++) {
@@ -614,94 +596,98 @@ fn poseidon2_permute(state: ptr<function, array<GoldilocksField, 12>>) {
 }
 
 // Convert bytes to Goldilocks field elements matching reference implementation
-// Reference uses 4 bytes per field element with injective padding, creating 25 field elements from 96 bytes
+// Reference uses 4 bytes per field element with injective padding, creating 25 field
+// elements from 96 bytes. Since input words are little-endian u32s, each 4-byte group
+// is exactly the input u32; element 24 is the terminator value 1.
 fn bytes_to_field_elements(input: array<u32, 24>) -> array<GoldilocksField, 25> {
     var felts: array<GoldilocksField, 25>;
-
-    // Convert u32 array to bytes (96 bytes total)
-    var bytes: array<u32, 96>;  // Using u32s to store bytes for easier processing
     for (var i = 0u; i < 24u; i++) {
-        let val = input[i];
-        bytes[i * 4u + 0u] = val & 0xFFu;         // byte 0
-        bytes[i * 4u + 1u] = (val >> 8u) & 0xFFu;  // byte 1
-        bytes[i * 4u + 2u] = (val >> 16u) & 0xFFu; // byte 2
-        bytes[i * 4u + 3u] = (val >> 24u) & 0xFFu; // byte 3
+        felts[i] = gf_from_u32(input[i]);
     }
-
-    // Apply injective padding: add 1 byte, then pad with zeros to 4-byte alignment
-    var padded_len = 96u + 1u; // 96 bytes + 1 marker byte = 97
-    let padding_needed = (4u - (padded_len % 4u)) % 4u;
-    padded_len = padded_len + padding_needed; // Should be 100 bytes (25 u32s worth)
-
-    // Create padded byte array
-    var padded_bytes: array<u32, 100>;
-    for (var i = 0u; i < 96u; i++) {
-        padded_bytes[i] = bytes[i];
-    }
-    padded_bytes[96] = 1u; // End marker
-    for (var i = 97u; i < 100u; i++) {
-        padded_bytes[i] = 0u; // Padding zeros
-    }
-
-    // Convert every 4 bytes to one field element (25 field elements total)
-    for (var i = 0u; i < 25u; i++) {
-        let byte_idx = i * 4u;
-        // Create u32 from 4 bytes in little-endian order
-        let val = padded_bytes[byte_idx] |
-                 (padded_bytes[byte_idx + 1u] << 8u) |
-                 (padded_bytes[byte_idx + 2u] << 16u) |
-                 (padded_bytes[byte_idx + 3u] << 24u);
-        felts[i] = gf_from_u32(val);
-    }
-
+    felts[24] = gf_one();
     return felts;
 }
 
-// Convert field elements back to bytes
+// Convert field elements back to bytes (canonical form, matching CPU output)
 fn field_elements_to_bytes(felts: array<GoldilocksField, 4>) -> array<u32, 8> {
     var result: array<u32, 8>;
     for (var i = 0u; i < 4u; i++) {
-        result[i * 2u] = felts[i].limb0;
-        result[i * 2u + 1u] = felts[i].limb1;
+        let c = gf_canonicalize(felts[i]);
+        result[i * 2u] = c.limb0;
+        result[i * 2u + 1u] = c.limb1;
     }
     return result;
 }
 
-// Fixed Poseidon2 hash function with proper sponge construction
-fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
+// Absorb phase of the Poseidon2 sponge for a 96-byte (24 u32) input.
+// Returns the state after all absorbs and the final permutation, i.e. the state
+// from which the first squeeze is read. Matches the CPU reference exactly.
+fn poseidon2_absorb(input: array<u32, 24>) -> array<GoldilocksField, 12> {
     var state: array<GoldilocksField, 12>;
 
-    // Initialize state to zero
-    for (var i = 0u; i < 12u; i++) {
+    // First chunk: state starts at zero, so the absorb is a direct load.
+    for (var i = 0u; i < 8u; i++) {
+        state[i] = gf_from_u32(input[i]);
+    }
+    for (var i = 8u; i < 12u; i++) {
         state[i] = gf_zero();
     }
-
-    // Convert input to field elements (25 total: 24 from input + 1 terminator)
-    let input_felts = bytes_to_field_elements(input);
-
-    // Sponge construction matching CPU reference exactly:
-    // CPU processes field elements using push_to_buf() which absorbs in chunks of RATE=8
-
-    // Process first 24 elements (3 complete chunks of 8)
-    for (var chunk = 0u; chunk < 3u; chunk++) {
-        // Absorb 8 elements for this chunk
-        for (var i = 0u; i < 8u; i++) {
-            let felt_idx = chunk * 8u + i;
-            state[i] = gf_add(state[i], input_felts[felt_idx]);
-        }
-        // Permute after each complete chunk
-        poseidon2_permute(&state);
-    }
-
-    // Process remaining 1 element (partial chunk)
-    // Now we have element 24 (the terminator = 1) remaining
-    state[0] = gf_add(state[0], input_felts[24u]); // Add the terminator (value 1)
-
-    // Add sponge padding marker (ONE) to the next position
-    state[1] = gf_add(state[1], gf_one());
-
-    // Final permutation
     poseidon2_permute(&state);
+
+    // Second chunk
+    for (var i = 0u; i < 8u; i++) {
+        state[i] = gf_add(state[i], gf_from_u32(input[8u + i]));
+    }
+    poseidon2_permute(&state);
+
+    // Third chunk
+    for (var i = 0u; i < 8u; i++) {
+        state[i] = gf_add(state[i], gf_from_u32(input[16u + i]));
+    }
+    poseidon2_permute(&state);
+
+    // Terminator felt (1) at position 0, sponge padding marker (1) at position 1
+    state[0] = gf_add(state[0], gf_one());
+    state[1] = gf_add(state[1], gf_one());
+    poseidon2_permute(&state);
+
+    return state;
+}
+
+// Absorb phase continuation from a precomputed header state.
+// `state` is the sponge state after the header-only first chunk absorb+permute
+// (computed once per job on the CPU); `nonce_words` are the 16 big-endian nonce
+// words (input words 8..24 of the full hash input). Returns the state from which
+// the first squeeze is read. Matches poseidon2_absorb(header_words ++ nonce_words).
+fn poseidon2_absorb_from_state(
+    state_in: array<GoldilocksField, 12>,
+    nonce_words: array<u32, 16>,
+) -> array<GoldilocksField, 12> {
+    var state = state_in;
+
+    // Second chunk (nonce words 0..8)
+    for (var i = 0u; i < 8u; i++) {
+        state[i] = gf_add(state[i], gf_from_u32(nonce_words[i]));
+    }
+    poseidon2_permute(&state);
+
+    // Third chunk (nonce words 8..16)
+    for (var i = 0u; i < 8u; i++) {
+        state[i] = gf_add(state[i], gf_from_u32(nonce_words[8u + i]));
+    }
+    poseidon2_permute(&state);
+
+    // Terminator felt (1) at position 0, sponge padding marker (1) at position 1
+    state[0] = gf_add(state[0], gf_one());
+    state[1] = gf_add(state[1], gf_one());
+    poseidon2_permute(&state);
+
+    return state;
+}
+
+// Fixed Poseidon2 hash function with proper sponge construction
+fn poseidon2_hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
+    var state = poseidon2_absorb(input);
 
     // First squeeze - get first 4 field elements (POSEIDON2_OUTPUT=4 -> 32 bytes)
     let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
@@ -822,6 +808,19 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Base logical index for this thread
     let base_index = thread_id * nonces_per_thread;
 
+    // Load the precomputed header state once per thread
+    // (the header-only first absorb+permute was done on the CPU).
+    var header_st: array<GoldilocksField, 12>;
+    for (var i = 0u; i < 12u; i++) {
+        header_st[i] = GoldilocksField(header_state[2u * i], header_state[2u * i + 1u]);
+    }
+
+    // Load the difficulty target once per thread (constant for the whole batch).
+    var tgt: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        tgt[i] = difficulty_target[i];
+    }
+
     // Work coarsening: each thread processes a contiguous block of nonces
     for (var j = 0u; j < nonces_per_thread; j = j + 1u) {
         let logical_index = base_index + j;
@@ -852,50 +851,96 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             carry = select(0u, 1u, sum < val);
         }
 
-        // Construct input (96 bytes = 24 u32s)
-        // Header (32 bytes = 8 u32s) followed by Nonce (64 bytes = 16 u32s)
-        var input: array<u32, 24>;
-        for (var i = 0u; i < 8u; i++) {
-            input[i] = header[i];
-        }
         // Nonce needs to be Big Endian in the byte stream for hashing.
         // current_nonce is Little Endian words.
+        var nonce_words: array<u32, 16>;
         for (var i = 0u; i < 16u; i++) {
             let val = current_nonce[15u - i];
             // Reverse bytes
-            let rev = ((val & 0xFFu) << 24u) |
-                      ((val & 0xFF00u) << 8u) |
-                      ((val & 0xFF0000u) >> 8u) |
-                      ((val & 0xFF000000u) >> 24u);
-            input[8u + i] = rev;
+            nonce_words[i] = ((val & 0xFFu) << 24u) |
+                             ((val & 0xFF00u) << 8u) |
+                             ((val & 0xFF0000u) >> 8u) |
+                             ((val & 0xFF000000u) >> 24u);
         }
 
-        // Hash (Big Endian)
-        let hash_be = hash_squeeze_twice(input);
+        // Absorb phase: sponge state ready for the first squeeze (3 permutations;
+        // the header-only first permutation was precomputed on the CPU).
+        var state = poseidon2_absorb_from_state(header_st, nonce_words);
 
-        // Convert to Little Endian for difficulty check and storage
-        var hash_le: array<u32, 16>;
-        for (var i = 0u; i < 16u; i++) {
-            let val = hash_be[15u - i];
-            // Reverse bytes in u32
-            hash_le[i] = ((val & 0xFFu) << 24u) |
-                         ((val & 0xFF00u) << 8u) |
-                         ((val & 0xFF0000u) >> 8u) |
-                         ((val & 0xFF000000u) >> 24u);
-        }
+        // First squeeze: 4 field elements -> 8 u32s (big-endian byte stream order).
+        let first = field_elements_to_bytes(array<GoldilocksField, 4>(
+            state[0], state[1], state[2], state[3]
+        ));
 
-        // Check target
-        if (is_below_target(hash_le, difficulty_target)) {
-            // Try to claim the solution
-            if (atomicExchange(&results[0], 1u) == 0u) {
-                // We won! Write nonce and hash
-                // results layout: [0]=found, [1..16]=nonce, [17..32]=hash
-                for (var i = 0u; i < 16u; i++) {
-                    atomicStore(&results[1u + i], current_nonce[i]);
-                    atomicStore(&results[17u + i], hash_le[i]);
+        // The most significant 256 bits of the U512 hash come entirely from the
+        // first squeeze: hash_le[15-k] = byteswap(first[k]).
+        // Compare that half against the target's top half first.
+        // cmp: 0 = tie so far, 1 = hash below target, 2 = hash above target.
+        var cmp = 0u;
+        var top_le: array<u32, 8>;
+        for (var k = 0u; k < 8u; k++) {
+            let val = first[k];
+            let w = ((val & 0xFFu) << 24u) |
+                    ((val & 0xFF00u) << 8u) |
+                    ((val & 0xFF0000u) >> 8u) |
+                    ((val & 0xFF000000u) >> 24u);
+            top_le[k] = w;
+            let t = tgt[15u - k];
+            if (cmp == 0u) {
+                if (w < t) {
+                    cmp = 1u;
+                } else if (w > t) {
+                    cmp = 2u;
                 }
             }
-            return; // Exit loop after finding solution
+        }
+
+        // Only a winner or an exact 256-bit tie (probability ~2^-256) needs the
+        // second squeeze; all other nonces skip the 5th permutation entirely.
+        if (cmp != 2u) {
+            // Second squeeze
+            poseidon2_permute(&state);
+            let second = field_elements_to_bytes(array<GoldilocksField, 4>(
+                state[0], state[1], state[2], state[3]
+            ));
+
+            // Assemble the full little-endian hash for storage.
+            var hash_le: array<u32, 16>;
+            for (var k = 0u; k < 8u; k++) {
+                hash_le[15u - k] = top_le[k];
+                let val = second[k];
+                hash_le[7u - k] = ((val & 0xFFu) << 24u) |
+                                  ((val & 0xFF00u) << 8u) |
+                                  ((val & 0xFF0000u) >> 8u) |
+                                  ((val & 0xFF000000u) >> 24u);
+            }
+
+            // On a top-half tie, the lower half decides (hash_le words 7..0).
+            var win = cmp == 1u;
+            if (cmp == 0u) {
+                for (var i = 8u; i < 16u; i++) {
+                    if (hash_le[15u - i] < tgt[15u - i]) {
+                        win = true;
+                        break;
+                    } else if (hash_le[15u - i] > tgt[15u - i]) {
+                        break;
+                    }
+                }
+            }
+
+            // Check target
+            if (win) {
+                // Try to claim the solution
+                if (atomicExchange(&results[0], 1u) == 0u) {
+                    // We won! Write nonce and hash
+                    // results layout: [0]=found, [1..16]=nonce, [17..32]=hash
+                    for (var i = 0u; i < 16u; i++) {
+                        atomicStore(&results[1u + i], current_nonce[i]);
+                        atomicStore(&results[17u + i], hash_le[i]);
+                    }
+                }
+                return; // Exit loop after finding solution
+            }
         }
     }
 }

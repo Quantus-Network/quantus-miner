@@ -15,6 +15,31 @@ use std::sync::{
     Arc,
 };
 
+/// Precompute the Poseidon2 sponge state after absorbing the first (header-only)
+/// chunk and applying one permutation. The GPU kernel resumes from this state,
+/// skipping one of the four absorb-phase permutations for every hash.
+///
+/// Returns 12 Goldilocks field elements in canonical form as [lo32, hi32] pairs,
+/// matching the `header_state` buffer layout expected by mining.wgsl.
+pub fn precompute_header_state(header: &[u8; 32]) -> [u32; 24] {
+    use qp_poseidon_core::{Goldilocks, Poseidon2, SPONGE_WIDTH};
+
+    let mut state = [Goldilocks::ZERO; SPONGE_WIDTH];
+    for (i, chunk) in header.chunks_exact(4).enumerate() {
+        let word = u32::from_le_bytes(chunk.try_into().expect("4-byte chunk"));
+        state[i] = Goldilocks::new(word as u64);
+    }
+    Poseidon2::new().permute_mut(&mut state);
+
+    let mut out = [0u32; 24];
+    for (i, elem) in state.iter().enumerate() {
+        let v = elem.as_canonical_u64();
+        out[2 * i] = v as u32;
+        out[2 * i + 1] = (v >> 32) as u32;
+    }
+    out
+}
+
 /// Represents a single GPU device context.
 struct GpuContext {
     device: wgpu::Device,
@@ -56,10 +81,10 @@ impl GpuContext {
     fn create_resources(&self) -> GpuResources {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
 
-        // Header: 8 u32s
+        // Precomputed header state: 24 u32s (12 field elements as lo/hi pairs)
         let header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Header Buffer"),
-            size: 32,
+            label: Some("Header State Buffer"),
+            size: 96,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -548,16 +573,12 @@ impl MinerEngine for GpuEngine {
         let resources = WORKER_RESOURCES
             .with(|resources_cell| resources_cell.borrow().as_ref().unwrap().clone());
 
-        // Pre-convert header and target (only needs to be done once per job)
-        let mut header_u32s = [0u32; 8];
-        for (i, item) in header_u32s.iter_mut().enumerate() {
-            let chunk = &ctx.header[i * 4..(i + 1) * 4];
-            *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
+        // Pre-convert header to the precomputed sponge state (once per job)
+        let header_state = precompute_header_state(&ctx.header);
         gpu_ctx.queue.write_buffer(
             &resources.header_buffer,
             0,
-            bytemuck::cast_slice(&header_u32s),
+            bytemuck::cast_slice(&header_state),
         );
 
         let target_bytes = ctx.target.to_little_endian();

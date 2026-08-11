@@ -1,3 +1,4 @@
+use crate::precompute_header_state;
 use pow_core::{hash_from_nonce, JobContext};
 use primitive_types::U512;
 use rand::Rng;
@@ -28,15 +29,11 @@ pub async fn test_end_to_end_mining(
 
     // 4. Run GPU Mining for this specific nonce
 
-    // Header Buffer
-    let mut header_u32s = [0u32; 8];
-    for (i, item) in header_u32s.iter_mut().enumerate() {
-        let chunk = &ctx.header[i * 4..(i + 1) * 4];
-        *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
+    // Header State Buffer (precomputed on CPU: first absorb+permute skipped on GPU)
+    let header_state = precompute_header_state(&ctx.header);
     let header_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Header Buffer"),
-        contents: bytemuck::cast_slice(&header_u32s),
+        label: Some("Header State Buffer"),
+        contents: bytemuck::cast_slice(&header_state),
         usage: wgpu::BufferUsages::STORAGE,
     });
 
@@ -82,11 +79,11 @@ pub async fn test_end_to_end_mining(
     let zeros = vec![0u8; results_size];
     queue.write_buffer(&results_buffer, 0, &zeros);
 
-    // Dispatch config buffer: [total_threads, nonces_per_thread, total_nonces, cancel_check_interval]
-    let dispatch_config_data: [u32; 4] = [256, 1, 256, 10000];
+    // Dispatch config buffer: [total_threads, nonces_per_thread, total_nonces]
+    let dispatch_config_data: [u32; 3] = [256, 1, 256];
     let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Dispatch Config Buffer"),
-        size: 16,
+        size: 12,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -94,20 +91,6 @@ pub async fn test_end_to_end_mining(
         &dispatch_config_buffer,
         0,
         bytemuck::cast_slice(&dispatch_config_data),
-    );
-
-    // Cancel flag buffer: 0 = running, 1 = cancel requested
-    let cancel_flag_data: [u32; 1] = [0];
-    let cancel_flag_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Cancel Flag Buffer"),
-        size: 4,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(
-        &cancel_flag_buffer,
-        0,
-        bytemuck::cast_slice(&cancel_flag_data),
     );
 
     // Load Shader
@@ -150,10 +133,6 @@ pub async fn test_end_to_end_mining(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: dispatch_config_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: cancel_flag_buffer.as_entire_binding(),
             },
         ],
     });
