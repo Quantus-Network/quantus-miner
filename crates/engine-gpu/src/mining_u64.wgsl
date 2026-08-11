@@ -179,6 +179,20 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let base_index = thread_id * nonces_per_thread;
 
+    // Hoist uniform storage reads out of the nonce loop
+    var mid: array<u64, 12>;
+    for (var i = 0u; i < 12u; i++) {
+        mid[i] = (u64(midstate[2u * i + 1u]) << 32u) | u64(midstate[2u * i]);
+    }
+    var tgt: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        tgt[i] = difficulty_target[i];
+    }
+    var nonce_base: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        nonce_base[i] = start_nonce[i];
+    }
+
     for (var j = 0u; j < nonces_per_thread; j = j + 1u) {
         let logical_index = base_index + j;
         if (logical_index >= total_nonces) {
@@ -191,25 +205,25 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // The host guarantees a batch never carries into the high nonce half
         // (limbs 8..15), so only the low 256 bits are incremented here.
         var current_nonce: array<u32, 16>;
-        let val0 = start_nonce[0];
+        let val0 = nonce_base[0];
         let sum0 = val0 + logical_index;
         current_nonce[0] = sum0;
         var carry = select(0u, 1u, sum0 < val0);
         for (var i = 1u; i < 8u; i++) {
-            let val = start_nonce[i];
+            let val = nonce_base[i];
             let sum = val + carry;
             current_nonce[i] = sum;
             carry = select(0u, 1u, sum < val);
         }
         for (var i = 8u; i < 16u; i++) {
-            current_nonce[i] = start_nonce[i];
+            current_nonce[i] = nonce_base[i];
         }
 
         // Resume the sponge from the precomputed midstate: absorb the low
         // nonce half, pad, squeeze twice (3 permutations instead of 5).
         var st: array<u64, 12>;
         for (var i = 0u; i < 12u; i++) {
-            st[i] = (u64(midstate[2u * i + 1u]) << 32u) | u64(midstate[2u * i]);
+            st[i] = mid[i];
         }
         for (var i = 0u; i < 8u; i++) {
             st[i] = gf64_add(st[i], u64(bswap32(current_nonce[7u - i])));
@@ -221,17 +235,18 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // First squeeze yields the most significant 256 bits of the hash, which
         // decide hash-vs-target on their own unless they exactly equal the
-        // target's high half. Only candidates pay for the second squeeze.
-        var hash_le: array<u32, 16>;
+        // target's high half. Only candidates pay for the second squeeze, and
+        // byte-swapped hash words are produced on demand during the compare.
+        var first: array<u32, 8>;
         for (var i = 0u; i < 4u; i++) {
             let c = gf64_canon(st[i]);
-            hash_le[15u - 2u * i] = bswap32(u32(c & EPS64));
-            hash_le[14u - 2u * i] = bswap32(u32(c >> 32u));
+            first[2u * i] = u32(c & EPS64);
+            first[2u * i + 1u] = u32(c >> 32u);
         }
         var cmp = 0u;
         for (var i = 0u; i < 8u; i++) {
-            let h = hash_le[15u - i];
-            let t = difficulty_target[15u - i];
+            let h = bswap32(first[i]);
+            let t = tgt[15u - i];
             if (h != t) {
                 cmp = select(2u, 1u, h > t);
                 break;
@@ -241,6 +256,10 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             continue;
         }
 
+        var hash_le: array<u32, 16>;
+        for (var i = 0u; i < 8u; i++) {
+            hash_le[15u - i] = bswap32(first[i]);
+        }
         permute64(&st);
         for (var i = 0u; i < 4u; i++) {
             let c = gf64_canon(st[i]);
@@ -251,7 +270,7 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (!below) {
             for (var i = 0u; i < 8u; i++) {
                 let h = hash_le[7u - i];
-                let t = difficulty_target[7u - i];
+                let t = tgt[7u - i];
                 if (h != t) {
                     below = h < t;
                     break;
