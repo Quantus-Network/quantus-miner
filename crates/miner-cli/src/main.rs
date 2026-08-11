@@ -244,10 +244,7 @@ fn resolve_auth_token(
     )
 }
 
-fn resolve_tls_cert_sha256(
-    value: Option<String>,
-    file: Option<PathBuf>,
-) -> Result<String, String> {
+fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> Result<String, String> {
     resolve_required_secret(
         value,
         file,
@@ -274,9 +271,8 @@ fn resolve_required_secret(
         return Ok(value);
     }
     if let Some(path) = file {
-        let contents = std::fs::read_to_string(&path).map_err(|e| {
-            format!("failed to read {file_flag} {}: {}", path.display(), e)
-        })?;
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {file_flag} {}: {}", path.display(), e))?;
         let value = contents.trim().to_string();
         if value.is_empty() {
             return Err(format!("{file_flag} {} is empty", path.display()));

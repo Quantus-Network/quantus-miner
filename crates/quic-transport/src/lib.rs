@@ -24,8 +24,9 @@ pub async fn connect(
     auth_token: &str,
     tls_cert_sha256_hex: &str,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let expected = normalize_fingerprint(tls_cert_sha256_hex)
-        .ok_or_else(|| anyhow::anyhow!("invalid TLS cert SHA-256 fingerprint (expected 64 hex chars)"))?;
+    let expected = normalize_fingerprint(tls_cert_sha256_hex).ok_or_else(|| {
+        anyhow::anyhow!("invalid TLS cert SHA-256 fingerprint (expected 64 hex chars)")
+    })?;
 
     let mut crypto = rustls::ClientConfig::builder()
         .with_safe_defaults()

@@ -151,9 +151,7 @@ async fn main() -> anyhow::Result<()> {
                     || args.tls_cert_sha256.is_some()
                     || args.tls_cert_sha256_file.is_some()
                 {
-                    log::warn!(
-                        "Ignoring auth/TLS pin flags in standalone mode (no --node-addr)"
-                    );
+                    log::warn!("Ignoring auth/TLS pin flags in standalone mode (no --node-addr)");
                 }
                 log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
                 tokio::spawn(upstream::run_standalone(
@@ -183,10 +181,7 @@ fn resolve_auth_token(
     )
 }
 
-fn resolve_tls_cert_sha256(
-    value: Option<String>,
-    file: Option<PathBuf>,
-) -> anyhow::Result<String> {
+fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> anyhow::Result<String> {
     resolve_required_secret(
         value,
         file,
@@ -211,9 +206,8 @@ fn resolve_required_secret(
         return Ok(value);
     }
     if let Some(path) = file {
-        let contents = std::fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("failed to read {file_flag} {}: {}", path.display(), e)
-        })?;
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read {file_flag} {}: {}", path.display(), e))?;
         let value = contents.trim().to_string();
         anyhow::ensure!(!value.is_empty(), "{file_flag} {} is empty", path.display());
         return Ok(value);
