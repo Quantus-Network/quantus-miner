@@ -18,6 +18,7 @@ use crate::state::{FoundBlock, Job, PoolState};
 pub async fn run_node_client(
     state: Arc<PoolState>,
     node_addr: SocketAddr,
+    auth_token: String,
     mut solutions: Receiver<FoundBlock>,
 ) {
     let mut reconnect_delay = Duration::from_secs(1);
@@ -31,7 +32,7 @@ pub async fn run_node_client(
 
     loop {
         log::info!("Connecting to node at {}...", node_addr);
-        match quic_transport::connect(node_addr).await {
+        match quic_transport::connect(node_addr, &auth_token).await {
             Ok((connection, mut send, mut recv)) => {
                 log::info!("Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);

@@ -26,6 +26,7 @@ use pow_core::format_hashrate;
 /// Uses a persistent worker pool to avoid thread creation overhead between jobs.
 pub async fn connect_and_mine(
     node_addr: SocketAddr,
+    auth_token: &str,
     cpu_engine: Option<Arc<dyn MinerEngine>>,
     gpu_engine: Option<Arc<dyn MinerEngine>>,
     cpu_workers: usize,
@@ -40,7 +41,7 @@ pub async fn connect_and_mine(
     loop {
         log::info!("⛏️ Connecting to node at {}...", node_addr);
 
-        match establish_connection(node_addr).await {
+        match establish_connection(node_addr, auth_token).await {
             Ok((connection, send, recv)) => {
                 log::info!("⛏️ Connected to node at {}", node_addr);
                 reconnect_delay = Duration::from_secs(1);
@@ -65,8 +66,9 @@ pub async fn connect_and_mine(
 /// Establish a QUIC connection to the node (shared transport crate).
 async fn establish_connection(
     addr: SocketAddr,
+    auth_token: &str,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let result = quic_transport::connect(addr).await?;
+    let result = quic_transport::connect(addr, auth_token).await?;
     log::info!(
         "⛏️ QUIC connection and bidirectional stream established to {}",
         addr
@@ -281,7 +283,7 @@ async fn handle_connection(
                     Ok(MinerMessage::JobResult(_)) => {
                         log::warn!("Received unexpected JobResult from node");
                     }
-                    Ok(MinerMessage::Ready) => {
+                    Ok(MinerMessage::Ready { .. }) => {
                         log::warn!("Received unexpected Ready from node");
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {

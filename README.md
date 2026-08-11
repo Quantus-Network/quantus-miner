@@ -17,17 +17,22 @@ The binary will be available at `target/release/quantus-miner`.
 ## Running
 
 ```bash
-# CPU-only mining (default: auto-detected CPU cores)
-./target/release/quantus-miner serve --cpu-workers 4
+# Copy the token from the node's logs or its miner-auth-token file, then:
+./target/release/quantus-miner serve \
+  --node-addr 127.0.0.1:9833 \
+  --auth-token <TOKEN> \
+  --cpu-workers 4
 
-# GPU-only mining 
-./target/release/quantus-miner serve --gpu-devices 1
+# Or point at the node's token file directly:
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --gpu-devices 1
 
 # Hybrid CPU+GPU mining
-./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
-
-# Custom port and metrics
-./target/release/quantus-miner serve --cpu-workers 2 --port 8000 --metrics-port 9900
+./target/release/quantus-miner serve \
+  --auth-token <TOKEN> \
+  --cpu-workers 4 \
+  --gpu-devices 1
 ```
 
 ## Configuration
@@ -35,6 +40,8 @@ The binary will be available at `target/release/quantus-miner`.
 | Argument | Environment Variable | Description | Default |
 |----------|---------------------|-------------|---------|
 | `--node-addr <ADDR>` | `MINER_NODE_ADDR` | Node address to connect to | `127.0.0.1:9833` |
+| `--auth-token <TOKEN>` | `MINER_AUTH_TOKEN` | Shared secret from the node's logs / `miner-auth-token` file | required |
+| `--auth-token-file <PATH>` | `MINER_AUTH_TOKEN_FILE` | Read the shared secret from a file (alternative to `--auth-token`) | — |
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
 | `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 |

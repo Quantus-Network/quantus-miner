@@ -3,6 +3,7 @@ use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
 use miner_service::{run, ServiceConfig};
 use primitive_types::U512;
 use rand::RngCore;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -19,6 +20,15 @@ enum Command {
         /// Address of the node to connect to
         #[arg(long, env = "MINER_NODE_ADDR", default_value = "127.0.0.1:9833")]
         node_addr: std::net::SocketAddr,
+
+        /// Shared auth token from the node's logs / miner-auth-token file.
+        #[arg(long, env = "MINER_AUTH_TOKEN", conflicts_with = "auth_token_file")]
+        auth_token: Option<String>,
+
+        /// Path to a file containing the shared auth token (trimmed).
+        /// Convenient when sharing the node's miner-auth-token file.
+        #[arg(long, env = "MINER_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
+        auth_token_file: Option<PathBuf>,
 
         /// Number of CPU worker threads to use for mining (default: auto-detect)
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
@@ -109,13 +119,17 @@ async fn main() {
 
     let Some(command) = args.command else {
         eprintln!("Error: No command provided. Use 'serve' to start mining (defaults to local node at 127.0.0.1:9833).");
-        eprintln!("Example: quantus-miner serve --node-addr 127.0.0.1:9833");
+        eprintln!(
+            "Example: quantus-miner serve --node-addr 127.0.0.1:9833 --auth-token <TOKEN>"
+        );
         std::process::exit(1);
     };
 
     match command {
         Command::Serve {
             node_addr,
+            auth_token,
+            auth_token_file,
             cpu_workers,
             gpu_devices,
             gpu_batch_size,
@@ -126,6 +140,14 @@ async fn main() {
             verbose,
         } => {
             init_logger(verbose);
+
+            let auth_token = match resolve_auth_token(auth_token, auth_token_file) {
+                Ok(token) => token,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
 
             log::info!("Starting external miner service...");
 
@@ -141,6 +163,7 @@ async fn main() {
 
             let config = ServiceConfig {
                 node_addr,
+                auth_token,
                 cpu_workers,
                 gpu_devices,
                 gpu_batch_size,
@@ -176,6 +199,38 @@ async fn main() {
             .await;
         }
     }
+}
+
+fn resolve_auth_token(
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+) -> Result<String, String> {
+    if let Some(token) = auth_token {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err("--auth-token is empty".into());
+        }
+        return Ok(token);
+    }
+    if let Some(path) = auth_token_file {
+        let contents = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "failed to read --auth-token-file {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        let token = contents.trim().to_string();
+        if token.is_empty() {
+            return Err(format!("--auth-token-file {} is empty", path.display()));
+        }
+        return Ok(token);
+    }
+    Err(
+        "miner auth token required: pass --auth-token <TOKEN> or --auth-token-file <PATH> \
+         (copy from the node's logs or its miner-auth-token file)"
+            .into(),
+    )
 }
 
 fn init_logger(verbose: bool) {

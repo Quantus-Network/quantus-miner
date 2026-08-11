@@ -12,9 +12,10 @@ use quinn::{ClientConfig, Endpoint};
 use rustls::client::ServerCertVerified;
 
 /// Establish a QUIC connection to the node's external-miner endpoint, open
-/// the bidirectional stream, and send the initial `Ready` message.
+/// the bidirectional stream, and send the initial `Ready { token }` message.
 pub async fn connect(
     addr: SocketAddr,
+    auth_token: &str,
 ) -> anyhow::Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
     let mut crypto = rustls::ClientConfig::builder()
         .with_safe_defaults()
@@ -33,7 +34,13 @@ pub async fn connect(
 
     let connection = endpoint.connect(addr, "localhost")?.await?;
     let (mut send, recv) = connection.open_bi().await?;
-    write_message(&mut send, &MinerMessage::Ready).await?;
+    write_message(
+        &mut send,
+        &MinerMessage::Ready {
+            token: auth_token.to_string(),
+        },
+    )
+    .await?;
     Ok((connection, send, recv))
 }
 

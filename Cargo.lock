@@ -2278,8 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "quantus-miner-api"
-version = "0.2.0"
-source = "git+https://github.com/Quantus-Network/chain.git?tag=v0.7.1-q-day-2#5ea94cb1e5347b12d091b6fa9f9234ceb897ec42"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

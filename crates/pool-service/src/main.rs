@@ -32,6 +32,15 @@ struct Args {
     #[arg(long, env = "POOL_NODE_ADDR")]
     node_addr: Option<SocketAddr>,
 
+    /// Shared auth token from the node's logs / miner-auth-token file.
+    /// Required when `--node-addr` is set.
+    #[arg(long, env = "POOL_AUTH_TOKEN", conflicts_with = "auth_token_file")]
+    auth_token: Option<String>,
+
+    /// Path to a file containing the shared auth token (trimmed).
+    #[arg(long, env = "POOL_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
+    auth_token_file: Option<PathBuf>,
+
     /// Share difficulty: expected number of hashes per captcha solve.
     /// Measured browser WASM rate ≈ 120 kH/s on an M-series laptop, so
     /// 50000 ≈ 0.4 s desktop / ~2 s phone. Raise for stronger rate limiting.
@@ -107,10 +116,21 @@ async fn main() -> anyhow::Result<()> {
         let state = state.clone();
         match args.node_addr {
             Some(addr) => {
+                let auth_token = resolve_auth_token(args.auth_token, args.auth_token_file)?;
                 log::info!("Upstream: quantus-node at {}", addr);
-                tokio::spawn(upstream::run_node_client(state, addr, solution_rx));
+                tokio::spawn(upstream::run_node_client(
+                    state,
+                    addr,
+                    auth_token,
+                    solution_rx,
+                ));
             }
             None => {
+                if args.auth_token.is_some() || args.auth_token_file.is_some() {
+                    log::warn!(
+                        "Ignoring auth token flags in standalone mode (no --node-addr)"
+                    );
+                }
                 log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
                 tokio::spawn(upstream::run_standalone(
                     state,
@@ -123,4 +143,31 @@ async fn main() -> anyhow::Result<()> {
 
     http::serve(state, limiter, args.http_addr, args.serve_dir).await;
     Ok(())
+}
+
+fn resolve_auth_token(
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+) -> anyhow::Result<String> {
+    if let Some(token) = auth_token {
+        let token = token.trim().to_string();
+        anyhow::ensure!(!token.is_empty(), "--auth-token is empty");
+        return Ok(token);
+    }
+    if let Some(path) = auth_token_file {
+        let contents = std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("failed to read --auth-token-file {}: {}", path.display(), e)
+        })?;
+        let token = contents.trim().to_string();
+        anyhow::ensure!(
+            !token.is_empty(),
+            "--auth-token-file {} is empty",
+            path.display()
+        );
+        return Ok(token);
+    }
+    anyhow::bail!(
+        "when --node-addr is set, pass --auth-token <TOKEN> or --auth-token-file <PATH> \
+         (copy from the node's logs or its miner-auth-token file)"
+    );
 }
