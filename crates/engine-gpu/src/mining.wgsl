@@ -191,7 +191,9 @@ const MDS_MATRIX_DIAG_12: array<array<u32, 2>, 12> = array<array<u32, 2>, 12>(
 
 // Storage buffers
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
-@group(0) @binding(1) var<storage, read> header: array<u32, 8>;     // 32 bytes
+// Sponge state after absorbing header + high nonce half (12 felts as LE u32 pairs),
+// precomputed on the host per batch. See pow_core::mining_midstate.
+@group(0) @binding(1) var<storage, read> midstate: array<u32, 24>;
 @group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>; // 64 bytes
 @group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;    // 64 bytes (U512 target)
 @group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 3>; // [total_threads, nonces_per_thread, total_nonces]
@@ -787,17 +789,8 @@ fn hash_squeeze_twice(input: array<u32, 24>) -> array<u32, 16> {
     return poseidon2_hash_squeeze_twice(input);
 }
 
-// Check if hash < target (U512 comparison)
-fn is_below_target(hash: array<u32, 16>, difficulty_tgt: array<u32, 16>) -> bool {
-    // Compare from most significant to least significant
-    for (var i = 0u; i < 16u; i++) {
-        if (hash[15u - i] < difficulty_tgt[15u - i]) {
-            return true;
-        } else if (hash[15u - i] > difficulty_tgt[15u - i]) {
-            return false;
-        }
-    }
-    return false; // Equal, not below
+fn bswap32(v: u32) -> u32 {
+    return ((v & 0xFFu) << 24u) | ((v & 0xFF00u) << 8u) | ((v >> 8u) & 0xFF00u) | (v >> 24u);
 }
 
 // Main mining kernel
@@ -834,61 +827,90 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             return;
         }
 
-        // current_nonce = start_nonce + logical_index
+        // current_nonce = start_nonce + logical_index. The host guarantees a batch
+        // never carries into the high nonce half (limbs 8..15).
         var current_nonce: array<u32, 16>;
         var carry: u32 = 0u;
 
-        // Add logical_index into the low limb and propagate carry through the U512 nonce
         let val0 = start_nonce[0];
         let sum0 = val0 + logical_index;
         current_nonce[0] = sum0;
         carry = select(0u, 1u, sum0 < val0);
 
-        // Propagate carry through remaining limbs
-        for (var i = 1u; i < 16u; i++) {
+        for (var i = 1u; i < 8u; i++) {
             let val = start_nonce[i];
             let sum = val + carry;
             current_nonce[i] = sum;
             carry = select(0u, 1u, sum < val);
         }
-
-        // Construct input (96 bytes = 24 u32s)
-        // Header (32 bytes = 8 u32s) followed by Nonce (64 bytes = 16 u32s)
-        var input: array<u32, 24>;
-        for (var i = 0u; i < 8u; i++) {
-            input[i] = header[i];
+        for (var i = 8u; i < 16u; i++) {
+            current_nonce[i] = start_nonce[i];
         }
-        // Nonce needs to be Big Endian in the byte stream for hashing.
-        // current_nonce is Little Endian words.
-        for (var i = 0u; i < 16u; i++) {
-            let val = current_nonce[15u - i];
-            // Reverse bytes
+
+        // Resume the sponge from the precomputed midstate: absorb the low nonce
+        // half (as Big Endian words), pad, squeeze twice (3 permutations instead of 5).
+        var state: array<GoldilocksField, 12>;
+        for (var i = 0u; i < 12u; i++) {
+            state[i] = gf_from_limbs(midstate[2u * i], midstate[2u * i + 1u]);
+        }
+        for (var i = 0u; i < 8u; i++) {
+            let val = current_nonce[7u - i];
             let rev = ((val & 0xFFu) << 24u) |
                       ((val & 0xFF00u) << 8u) |
                       ((val & 0xFF0000u) >> 8u) |
                       ((val & 0xFF000000u) >> 24u);
-            input[8u + i] = rev;
+            state[i] = gf_add(state[i], gf_from_u32(rev));
         }
+        poseidon2_permute(&state);
+        state[0] = gf_add(state[0], gf_one());
+        state[1] = gf_add(state[1], gf_one());
+        poseidon2_permute(&state);
 
-        // Hash (Big Endian)
-        let hash_be = hash_squeeze_twice(input);
-
-        // Convert to Little Endian for difficulty check and storage
+        // First squeeze yields the most significant 256 bits of the hash, which
+        // decide hash-vs-target on their own unless they exactly equal the
+        // target's high half. Only candidates pay for the second squeeze.
+        let first_output = field_elements_to_bytes(array<GoldilocksField, 4>(
+            state[0], state[1], state[2], state[3]
+        ));
         var hash_le: array<u32, 16>;
-        for (var i = 0u; i < 16u; i++) {
-            let val = hash_be[15u - i];
-            // Reverse bytes in u32
-            hash_le[i] = ((val & 0xFFu) << 24u) |
-                         ((val & 0xFF00u) << 8u) |
-                         ((val & 0xFF0000u) >> 8u) |
-                         ((val & 0xFF000000u) >> 24u);
+        for (var i = 0u; i < 8u; i++) {
+            hash_le[15u - i] = bswap32(first_output[i]);
+        }
+        var cmp = 0u;
+        for (var i = 0u; i < 8u; i++) {
+            let h = hash_le[15u - i];
+            let t = difficulty_target[15u - i];
+            if (h != t) {
+                cmp = select(2u, 1u, h > t);
+                break;
+            }
+        }
+        if (cmp == 1u) {
+            continue;
         }
 
-        // Check target
-        if (is_below_target(hash_le, difficulty_target)) {
+        poseidon2_permute(&state);
+        let second_output = field_elements_to_bytes(array<GoldilocksField, 4>(
+            state[0], state[1], state[2], state[3]
+        ));
+        for (var i = 0u; i < 8u; i++) {
+            hash_le[i] = bswap32(second_output[7u - i]);
+        }
+        var below = cmp == 2u;
+        if (!below) {
+            for (var i = 0u; i < 8u; i++) {
+                let h = hash_le[7u - i];
+                let t = difficulty_target[7u - i];
+                if (h != t) {
+                    below = h < t;
+                    break;
+                }
+            }
+        }
+
+        if (below) {
             // Try to claim the solution
             if (atomicExchange(&results[0], 1u) == 0u) {
-                // We won! Write nonce and hash
                 // results layout: [0]=found, [1..16]=nonce, [17..32]=hash
                 for (var i = 0u; i < 16u; i++) {
                     atomicStore(&results[1u + i], current_nonce[i]);

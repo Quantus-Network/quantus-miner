@@ -27,7 +27,7 @@ struct GpuContext {
 
 #[derive(Clone)]
 struct GpuResources {
-    header_buffer: wgpu::Buffer,
+    midstate_buffer: wgpu::Buffer,
     target_buffer: wgpu::Buffer,
     start_nonce_buffer: wgpu::Buffer,
     results_buffer: wgpu::Buffer,
@@ -37,29 +37,34 @@ struct GpuResources {
 }
 
 pub struct GpuEngine {
+    engine_id: usize,
     contexts: Vec<Arc<GpuContext>>,
     device_counter: AtomicUsize,
     batch_size: u32,
     throttle_ms: u64,
 }
 
-// Thread-local storage for consistent GPU device assignment per worker thread
+static ENGINE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+// Thread-local storage for consistent GPU device assignment per worker thread.
+// Entries are tagged with the owning engine's id so resources created for one
+// GpuEngine (and its devices) are never used with another (issue seen in benches
+// where multiple engines exist in one process).
 thread_local! {
-    static ASSIGNED_GPU_DEVICE: RefCell<Option<usize>> = const { RefCell::new(None) };
-    static WORKER_RESOURCES: RefCell<Option<GpuResources>> = const { RefCell::new(None) };
-    /// Set to true when this worker's GPU device is lost/unresponsive.
-    /// Once set, the worker will immediately return Cancelled on any search attempt.
-    static DEVICE_LOST: RefCell<bool> = const { RefCell::new(false) };
+    static ASSIGNED_GPU_DEVICE: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
+    static WORKER_RESOURCES: RefCell<Option<(usize, GpuResources)>> = const { RefCell::new(None) };
+    /// Engine id whose GPU device was lost/unresponsive for this worker thread.
+    static DEVICE_LOST: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 
 impl GpuContext {
     fn create_resources(&self) -> GpuResources {
         let bind_group_layout = self.pipeline.get_bind_group_layout(0);
 
-        // Header: 8 u32s
-        let header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Header Buffer"),
-            size: 32,
+        // Midstate: 12 felts as LE u32 pairs
+        let midstate_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Midstate Buffer"),
+            size: 96,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -116,7 +121,7 @@ impl GpuContext {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: header_buffer.as_entire_binding(),
+                    resource: midstate_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -134,7 +139,7 @@ impl GpuContext {
         });
 
         GpuResources {
-            header_buffer,
+            midstate_buffer,
             target_buffer,
             start_nonce_buffer,
             results_buffer,
@@ -332,11 +337,19 @@ impl GpuEngine {
             );
             log::debug!(target: "gpu_engine", "Adapter {i} raw info: {info:?}");
 
+            // Prefer the native-u64 shader where supported (Apple/NVIDIA/modern AMD):
+            // Goldilocks arithmetic on u64 is far cheaper than 32-bit limb emulation.
+            let use_u64 = adapter.features().contains(wgpu::Features::SHADER_INT64);
+
             // Try to initialize this adapter with a proper timeout.
             // If the driver hangs, we'll skip this adapter after the timeout.
             let device_future = adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("Mining Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: if use_u64 {
+                    wgpu::Features::SHADER_INT64
+                } else {
+                    wgpu::Features::empty()
+                },
                 required_limits: wgpu::Limits::default(),
                 memory_hints: Default::default(),
                 ..Default::default()
@@ -379,7 +392,17 @@ impl GpuEngine {
             // Shader and pipeline creation are synchronous - can't timeout, but usually fast
             let pipeline_start = std::time::Instant::now();
 
-            let shader_source = include_str!("mining.wgsl");
+            let shader_source = if use_u64 {
+                include_str!("mining_u64.wgsl")
+            } else {
+                include_str!("mining.wgsl")
+            };
+            log::info!(
+                target: "gpu_engine",
+                "GPU device {i} ({}) using {} shader",
+                info.name,
+                if use_u64 { "native-u64" } else { "32-bit" }
+            );
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Mining Shader"),
                 source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -451,6 +474,7 @@ impl GpuEngine {
         );
 
         Ok(Self {
+            engine_id: ENGINE_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
             contexts,
             device_counter: AtomicUsize::new(0),
             batch_size,
@@ -496,8 +520,8 @@ impl MinerEngine for GpuEngine {
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
-        // Check if this worker's GPU device was previously lost
-        let device_is_lost = DEVICE_LOST.with(|lost| *lost.borrow());
+        // Check if this worker's GPU device was previously lost (for this engine)
+        let device_is_lost = DEVICE_LOST.with(|lost| *lost.borrow() == Some(self.engine_id));
         if device_is_lost {
             // Device was lost in a previous call - signal worker should exit
             return EngineStatus::DeviceLost { hash_count: 0 };
@@ -516,50 +540,42 @@ impl MinerEngine for GpuEngine {
         // Use thread-local assignment for consistent worker-to-GPU mapping
         let device_index = ASSIGNED_GPU_DEVICE.with(|assigned| {
             let mut assigned_ref = assigned.borrow_mut();
-            if let Some(index) = *assigned_ref {
-                index
-            } else {
-                let index = if self.contexts.len() == 1 {
-                    0
-                } else {
-                    self.device_counter.fetch_add(1, Ordering::SeqCst) % self.contexts.len()
-                };
-                *assigned_ref = Some(index);
-                log::info!(
-                    target: "gpu_engine",
-                    "Worker thread assigned to GPU device {} (of {} total devices)",
-                    index,
-                    self.contexts.len()
-                );
-                index
+            match *assigned_ref {
+                Some((engine_id, index)) if engine_id == self.engine_id => index,
+                _ => {
+                    let index = if self.contexts.len() == 1 {
+                        0
+                    } else {
+                        self.device_counter.fetch_add(1, Ordering::SeqCst) % self.contexts.len()
+                    };
+                    *assigned_ref = Some((self.engine_id, index));
+                    log::info!(
+                        target: "gpu_engine",
+                        "Worker thread assigned to GPU device {} (of {} total devices)",
+                        index,
+                        self.contexts.len()
+                    );
+                    index
+                }
             }
         });
 
         let gpu_ctx = &self.contexts[device_index];
 
-        // Ensure resources are initialized for this thread
-        WORKER_RESOURCES.with(|resources_cell| {
+        // Ensure resources are initialized for this thread and belong to this engine
+        let resources = WORKER_RESOURCES.with(|resources_cell| {
             let mut resources = resources_cell.borrow_mut();
-            if resources.is_none() {
-                *resources = Some(gpu_ctx.create_resources());
+            match &*resources {
+                Some((engine_id, res)) if *engine_id == self.engine_id => res.clone(),
+                _ => {
+                    let res = gpu_ctx.create_resources();
+                    *resources = Some((self.engine_id, res.clone()));
+                    res
+                }
             }
         });
 
-        let resources = WORKER_RESOURCES
-            .with(|resources_cell| resources_cell.borrow().as_ref().unwrap().clone());
-
-        // Pre-convert header and target (only needs to be done once per job)
-        let mut header_u32s = [0u32; 8];
-        for (i, item) in header_u32s.iter_mut().enumerate() {
-            let chunk = &ctx.header[i * 4..(i + 1) * 4];
-            *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        gpu_ctx.queue.write_buffer(
-            &resources.header_buffer,
-            0,
-            bytemuck::cast_slice(&header_u32s),
-        );
-
+        // Pre-convert target (only needs to be done once per job)
         let target_bytes = ctx.target.to_little_endian();
         let mut target_u32s = [0u32; 16];
         for i in 0..16 {
@@ -606,22 +622,27 @@ impl MinerEngine for GpuEngine {
                 };
             }
 
-            // Calculate batch range
+            // Calculate batch range. The batch is additionally clamped so nonce
+            // increments never carry into the high 256 bits, which the midstate
+            // precompute (and the kernels) rely on.
             let remaining = range
                 .end
                 .saturating_sub(current_start)
                 .saturating_add(U512::one());
+            let headroom =
+                (U512::one() << 256) - (current_start & ((U512::one() << 256) - U512::one()));
+            let cap = remaining.min(headroom);
             let batch_size_u512 = U512::from(self.batch_size);
-            let this_batch_size: u32 = if remaining > batch_size_u512 {
+            let this_batch_size: u32 = if cap > batch_size_u512 {
                 self.batch_size
             } else {
-                // remaining fits in u32 since it's <= batch_size which is u32
-                remaining.low_u32()
+                // cap fits in u32 since it's <= batch_size which is u32
+                cap.low_u32()
             };
 
             // Run single batch
             let batch_result =
-                run_single_batch(gpu_ctx, &resources, current_start, this_batch_size);
+                run_single_batch(gpu_ctx, &resources, ctx, current_start, this_batch_size);
 
             match batch_result {
                 BatchResult::Found {
@@ -656,7 +677,7 @@ impl MinerEngine for GpuEngine {
                 BatchResult::DeviceLost => {
                     // GPU device is lost/unresponsive - mark as permanently dead
                     // and clear resources to prevent "buffer already mapped" panics
-                    DEVICE_LOST.with(|lost| *lost.borrow_mut() = true);
+                    DEVICE_LOST.with(|lost| *lost.borrow_mut() = Some(self.engine_id));
                     WORKER_RESOURCES.with(|res| *res.borrow_mut() = None);
 
                     log::error!(
@@ -745,6 +766,7 @@ enum BatchResult {
 fn run_single_batch(
     gpu_ctx: &GpuContext,
     resources: &GpuResources,
+    ctx: &JobContext,
     batch_start: U512,
     batch_size: u32,
 ) -> BatchResult {
@@ -776,6 +798,20 @@ fn run_single_batch(
     gpu_ctx
         .queue
         .write_buffer(&resources.start_nonce_buffer, 0, &start_nonce_bytes);
+
+    // Precompute the sponge midstate for this batch (header + high nonce half)
+    let nonce_be = batch_start.to_big_endian();
+    let midstate = pow_core::mining_midstate(ctx.header, nonce_be[..32].try_into().unwrap());
+    let mut midstate_u32s = [0u32; 24];
+    for (i, felt) in midstate.iter().enumerate() {
+        midstate_u32s[2 * i] = *felt as u32;
+        midstate_u32s[2 * i + 1] = (*felt >> 32) as u32;
+    }
+    gpu_ctx.queue.write_buffer(
+        &resources.midstate_buffer,
+        0,
+        bytemuck::cast_slice(&midstate_u32s),
+    );
 
     // Reset results buffer
     const RESULTS_SIZE: usize = (1 + 16 + 16) * 4;

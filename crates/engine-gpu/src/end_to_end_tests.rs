@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 pub async fn test_end_to_end_mining(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Running End-to-End Mining Test...");
 
@@ -28,15 +29,17 @@ pub async fn test_end_to_end_mining(
 
     // 4. Run GPU Mining for this specific nonce
 
-    // Header Buffer
-    let mut header_u32s = [0u32; 8];
-    for (i, item) in header_u32s.iter_mut().enumerate() {
-        let chunk = &ctx.header[i * 4..(i + 1) * 4];
-        *item = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    // Midstate Buffer (header + high nonce half absorbed on CPU)
+    let nonce_be = nonce_val.to_big_endian();
+    let midstate = pow_core::mining_midstate(ctx.header, nonce_be[..32].try_into().unwrap());
+    let mut midstate_u32s = [0u32; 24];
+    for (i, felt) in midstate.iter().enumerate() {
+        midstate_u32s[2 * i] = *felt as u32;
+        midstate_u32s[2 * i + 1] = (*felt >> 32) as u32;
     }
-    let header_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Header Buffer"),
-        contents: bytemuck::cast_slice(&header_u32s),
+    let midstate_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Midstate Buffer"),
+        contents: bytemuck::cast_slice(&midstate_u32s),
         usage: wgpu::BufferUsages::STORAGE,
     });
 
@@ -82,11 +85,11 @@ pub async fn test_end_to_end_mining(
     let zeros = vec![0u8; results_size];
     queue.write_buffer(&results_buffer, 0, &zeros);
 
-    // Dispatch config buffer: [total_threads, nonces_per_thread, total_nonces, cancel_check_interval]
-    let dispatch_config_data: [u32; 4] = [256, 1, 256, 10000];
+    // Dispatch config buffer: [total_threads, nonces_per_thread, total_nonces]
+    let dispatch_config_data: [u32; 3] = [256, 1, 256];
     let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Dispatch Config Buffer"),
-        size: 16,
+        size: 12,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -96,25 +99,9 @@ pub async fn test_end_to_end_mining(
         bytemuck::cast_slice(&dispatch_config_data),
     );
 
-    // Cancel flag buffer: 0 = running, 1 = cancel requested
-    let cancel_flag_data: [u32; 1] = [0];
-    let cancel_flag_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Cancel Flag Buffer"),
-        size: 4,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(
-        &cancel_flag_buffer,
-        0,
-        bytemuck::cast_slice(&cancel_flag_data),
-    );
-
-    // Load Shader
-    let shader_source = include_str!("mining.wgsl");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Mining Shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -137,7 +124,7 @@ pub async fn test_end_to_end_mining(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: header_buffer.as_entire_binding(),
+                resource: midstate_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -150,10 +137,6 @@ pub async fn test_end_to_end_mining(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: dispatch_config_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: cancel_flag_buffer.as_entire_binding(),
             },
         ],
     });

@@ -3,174 +3,139 @@ mod tests;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run().await
-}
-
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup GPU device and queue
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL, // Force Metal on Apple
+        backends: wgpu::Backends::PRIMARY,
         ..Default::default()
     });
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
         .await
-        .unwrap();
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await?;
+        .expect("no GPU adapter");
 
-    println!("Running Poseidon2 GPU Component Tests...\n");
+    let mut failures = 0usize;
 
-    // Run all component tests
-    if let Err(e) = tests::test_gf_from_const(&device, &queue).await {
-        eprintln!("❌ gf_from_const tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_gf_mul(&device, &queue).await {
-        eprintln!("❌ gf_mul tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_sbox(&device, &queue).await {
-        eprintln!("❌ S-box tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_mds_matrix(&device, &queue).await {
-        eprintln!("❌ MDS matrix tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_internal_linear_layer(&device, &queue).await {
-        eprintln!("❌ Internal linear layer tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_external_linear_layer(&device, &queue).await {
-        eprintln!("❌ External linear layer tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_initial_external_rounds(&device, &queue).await {
-        eprintln!("❌ Initial external rounds tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_terminal_external_rounds(&device, &queue).await {
-        eprintln!("❌ Terminal external rounds tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_constants_verification(&device, &queue).await {
-        eprintln!("❌ Constants verification test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_internal_constants_verification(&device, &queue).await {
-        eprintln!("❌ Internal constants verification test failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_internal_rounds_only(&device, &queue).await {
-        eprintln!("❌ Internal rounds only test failed: {}", e);
-    }
-
-    if let Err(e) =
-        tests::test_poseidon2_terminal_external_constants_verification(&device, &queue).await
     {
-        eprintln!(
-            "❌ Terminal external constants verification test failed: {}",
-            e
-        );
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await?;
+        failures += run_suite(
+            &device,
+            &queue,
+            include_str!("mining.wgsl"),
+            "32-bit (mining.wgsl)",
+        )
+        .await;
     }
 
-    if let Err(e) = tests::test_poseidon2_permutation(&device, &queue).await {
-        eprintln!("❌ Poseidon2 permutation tests failed: {}", e);
+    if adapter.features().contains(wgpu::Features::SHADER_INT64) {
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("u64 Test Device"),
+                required_features: wgpu::Features::SHADER_INT64,
+                ..Default::default()
+            })
+            .await?;
+        failures += run_suite(
+            &device,
+            &queue,
+            include_str!("mining_u64.wgsl"),
+            "native-u64 (mining_u64.wgsl)",
+        )
+        .await;
+    } else {
+        println!("\nSHADER_INT64 not supported on this adapter; skipping mining_u64.wgsl suite");
     }
 
-    if let Err(e) = tests::test_bytes_to_field_elements(&device, &queue).await {
-        eprintln!("❌ Bytes to field elements tests failed: {}", e);
+    if failures > 0 {
+        return Err(format!("{failures} test group(s) failed").into());
     }
-
-    if let Err(e) = tests::test_field_elements_to_bytes(&device, &queue).await {
-        eprintln!("❌ Field elements to bytes tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_poseidon2_squeeze_twice(&device, &queue).await {
-        eprintln!("❌ Poseidon2 squeeze-twice tests failed: {}", e);
-    }
-
-    if let Err(e) = tests::test_hash_squeeze_twice(&device, &queue).await {
-        eprintln!("❌ Hash squeeze twice tests failed: {}", e);
-    }
-
-    if let Err(e) = end_to_end_tests::test_end_to_end_mining(&device, &queue).await {
-        eprintln!("❌ End-to-end mining test failed: {}", e);
-    }
-
     println!("\nAll tests completed!");
-    if let Err(e) = end_to_end_tests::test_end_to_end_mining(&device, &queue).await {
-        eprintln!("❌ End-to-end mining test failed: {}", e);
-    }
-
-    println!("\nAll tests completed!");
-
-    // generate_correct_wgsl_constants();
     Ok(())
 }
 
-#[allow(dead_code)]
-fn generate_correct_wgsl_constants() {
-    use qp_poseidon_constants::*;
-
-    println!("🔧 Generating correct WGSL constants...");
-
-    println!("// Initial external round constants (4 rounds x 12 elements)");
-    println!("const INITIAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
-
-    for (round_idx, round) in POSEIDON2_INITIAL_EXTERNAL_CONSTANTS_RAW.iter().enumerate() {
-        println!("    array<array<u32, 2>, 12>(");
-        for (elem_idx, &value) in round.iter().enumerate() {
-            let low = value as u32;
-            let high = (value >> 32) as u32;
-            if elem_idx == 11 {
-                println!("        array<u32, 2>({}u, {}u)", low, high);
-            } else {
-                println!("        array<u32, 2>({}u, {}u),", low, high);
+async fn run_suite(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    shader_src: &str,
+    label: &str,
+) -> usize {
+    println!("\n==== Running Poseidon2 GPU tests against {label} ====\n");
+    let mut failures = 0usize;
+    macro_rules! run {
+        ($name:literal, $fut:expr) => {
+            if let Err(e) = $fut.await {
+                eprintln!("❌ {} failed: {}", $name, e);
+                failures += 1;
             }
-        }
-        if round_idx == 3 {
-            println!("    )");
-        } else {
-            println!("    ),");
-        }
+        };
     }
-    println!(");");
 
-    println!("\n// Terminal external round constants (4 rounds x 12 elements)");
-    println!("const TERMINAL_EXTERNAL_CONSTANTS: array<array<array<u32, 2>, 12>, 4> = array<array<array<u32, 2>, 12>, 4>(");
+    run!(
+        "gf_from_const",
+        tests::test_gf_from_const(device, queue, shader_src)
+    );
+    run!("gf_mul", tests::test_gf_mul(device, queue, shader_src));
+    run!("sbox", tests::test_sbox(device, queue, shader_src));
+    run!(
+        "mds matrix",
+        tests::test_mds_matrix(device, queue, shader_src)
+    );
+    run!(
+        "internal linear layer",
+        tests::test_internal_linear_layer(device, queue, shader_src)
+    );
+    run!(
+        "external linear layer",
+        tests::test_external_linear_layer(device, queue, shader_src)
+    );
+    run!(
+        "initial external rounds",
+        tests::test_poseidon2_initial_external_rounds(device, queue, shader_src)
+    );
+    run!(
+        "terminal external rounds",
+        tests::test_poseidon2_terminal_external_rounds(device, queue, shader_src)
+    );
+    run!(
+        "constants verification",
+        tests::test_poseidon2_constants_verification(device, queue, shader_src)
+    );
+    run!(
+        "internal constants verification",
+        tests::test_poseidon2_internal_constants_verification(device, queue, shader_src)
+    );
+    run!(
+        "internal rounds only",
+        tests::test_poseidon2_internal_rounds_only(device, queue, shader_src)
+    );
+    run!(
+        "terminal external constants verification",
+        tests::test_poseidon2_terminal_external_constants_verification(device, queue, shader_src)
+    );
+    run!(
+        "poseidon2 permutation",
+        tests::test_poseidon2_permutation(device, queue, shader_src)
+    );
+    run!(
+        "bytes to field elements",
+        tests::test_bytes_to_field_elements(device, queue, shader_src)
+    );
+    run!(
+        "field elements to bytes",
+        tests::test_field_elements_to_bytes(device, queue, shader_src)
+    );
+    run!(
+        "poseidon2 squeeze-twice",
+        tests::test_poseidon2_squeeze_twice(device, queue, shader_src)
+    );
+    run!(
+        "hash squeeze twice",
+        tests::test_hash_squeeze_twice(device, queue, shader_src)
+    );
+    run!(
+        "end-to-end mining",
+        end_to_end_tests::test_end_to_end_mining(device, queue, shader_src)
+    );
 
-    for (round_idx, round) in POSEIDON2_TERMINAL_EXTERNAL_CONSTANTS_RAW.iter().enumerate() {
-        println!("    array<array<u32, 2>, 12>(");
-        for (elem_idx, &value) in round.iter().enumerate() {
-            let low = value as u32;
-            let high = (value >> 32) as u32;
-            if elem_idx == 11 {
-                println!("        array<u32, 2>({}u, {}u)", low, high);
-            } else {
-                println!("        array<u32, 2>({}u, {}u),", low, high);
-            }
-        }
-        if round_idx == 3 {
-            println!("    )");
-        } else {
-            println!("    ),");
-        }
-    }
-    println!(");");
-
-    println!("\n// Internal round constants (22 values)");
-    println!("const INTERNAL_CONSTANTS: array<array<u32, 2>, 22> = array<array<u32, 2>, 22>(");
-    for (idx, &value) in POSEIDON2_INTERNAL_CONSTANTS_RAW.iter().enumerate() {
-        let low = value as u32;
-        let high = (value >> 32) as u32;
-        if idx == 21 {
-            println!("    array<u32, 2>({}u, {}u)", low, high);
-        } else {
-            println!("    array<u32, 2>({}u, {}u),", low, high);
-        }
-    }
-    println!(");");
+    failures
 }

@@ -1166,6 +1166,7 @@ fn generate_true_internal_only_test_vectors() -> Vec<InternalRoundsTestCase> {
 pub async fn test_poseidon2_permutation(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_poseidon2_test_vectors();
     let total_tests = test_vectors.len();
@@ -1202,7 +1203,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1370,6 +1371,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_initial_external_rounds(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test just the initial 4 external rounds
     let test_vectors = generate_gf_from_const_test_vectors();
@@ -1415,7 +1417,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1630,6 +1632,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_terminal_external_rounds(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test just the terminal 4 external rounds
     let _total_tests = 2;
@@ -1674,7 +1677,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1888,6 +1891,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_gf_from_const(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test the gf_from_const function that converts constant arrays to GoldilocksField
     let test_vectors = generate_gf_from_const_test_vectors();
@@ -1908,7 +1912,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     output_fields[index] = gf_from_const(input_constants[index]);
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2023,6 +2027,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_constants_verification(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
@@ -2049,7 +2054,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2160,6 +2165,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_internal_rounds_only(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test ONLY the internal rounds (22 rounds) without initial/terminal external rounds
     let test_vectors = generate_true_internal_only_test_vectors();
@@ -2209,7 +2215,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-            include_str!("mining.wgsl")
+            shader_src
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2343,6 +2349,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_internal_constants_verification(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
@@ -2364,7 +2371,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2462,6 +2469,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_terminal_external_rounds_issue(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Testing terminal external rounds issue for sequential input...");
 
@@ -2502,7 +2510,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2630,6 +2638,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_terminal_external_constants_verification(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut passed_tests = 0;
     let mut failed_tests = Vec::new();
@@ -2656,7 +2665,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2764,6 +2773,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_gf_mul(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_gf_mul_test_vectors();
     let total_tests = test_vectors.len();
@@ -2786,7 +2796,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     output[i] = gf_mul(input_a[i], input_b[i]);
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2947,6 +2957,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_mds_matrix(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_mds_test_vectors();
     let total_tests = test_vectors.len();
@@ -2955,7 +2966,7 @@ pub async fn test_mds_matrix(
     let mut failure_details = Vec::new();
 
     // Read the mining shader source and create a test wrapper
-    let mining_shader_source = include_str!("mining.wgsl");
+    let mining_shader_source = shader_src;
     let shader_source = format!(
         "
 {}
@@ -3215,6 +3226,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_internal_linear_layer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_internal_linear_layer_test_vectors();
     let total_tests = test_vectors.len();
@@ -3223,7 +3235,7 @@ pub async fn test_internal_linear_layer(
     let mut failure_details = Vec::new();
 
     // Read the mining shader source and create a test wrapper
-    let mining_shader_source = include_str!("mining.wgsl");
+    let mining_shader_source = shader_src;
     let shader_source = format!(
         "
 {}
@@ -3448,6 +3460,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_external_linear_layer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_external_linear_layer_test_vectors();
     let total_tests = test_vectors.len();
@@ -3485,7 +3498,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3625,6 +3638,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_sbox(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_sbox_test_vectors();
     let total_tests = test_vectors.len();
@@ -3662,7 +3676,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     output_data[index] = result;
 }}
 ",
-            include_str!("mining.wgsl"),
+            shader_src,
             batch.len()
         );
 
@@ -3807,6 +3821,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_poseidon2_squeeze_twice(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_poseidon2_squeeze_twice_test_vectors();
     let total_tests = test_vectors.len();
@@ -3842,7 +3857,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3985,6 +4000,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_bytes_to_field_elements(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_bytes_to_field_test_vectors();
     let total_tests = test_vectors.len();
@@ -4020,7 +4036,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4168,6 +4184,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_field_elements_to_bytes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_field_to_bytes_test_vectors();
     let total_tests = test_vectors.len();
@@ -4203,7 +4220,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4336,6 +4353,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
 pub async fn test_hash_squeeze_twice(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    shader_src: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let test_vectors = generate_hash_squeeze_twice_test_vectors();
     let total_tests = test_vectors.len();
@@ -4371,7 +4389,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     }}
 }}
 ",
-        include_str!("mining.wgsl")
+        shader_src
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

@@ -1,6 +1,27 @@
 use primitive_types::U512;
+use qp_poseidon_core::{Goldilocks, Poseidon2};
 
+pub use qp_poseidon_core::SPONGE_WIDTH;
 pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
+
+/// Sponge state (canonical u64 felts) after absorbing the 32-byte header and the
+/// high 32 bytes of the big-endian nonce — the first two of the five Poseidon2
+/// permutations of `get_nonce_hash`. This state is identical for every nonce in a
+/// batch as long as incrementing the nonce never carries into its high 256 bits,
+/// so GPU kernels can resume the sponge from here and skip 2 of 5 permutations.
+pub fn mining_midstate(header: [u8; 32], nonce_high_be: [u8; 32]) -> [u64; SPONGE_WIDTH] {
+    let poseidon2 = Poseidon2::new();
+    let mut state = [Goldilocks::ZERO; SPONGE_WIDTH];
+    for (i, chunk) in header.chunks_exact(4).enumerate() {
+        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+    }
+    poseidon2.permute_mut(&mut state);
+    for (i, chunk) in nonce_high_be.chunks_exact(4).enumerate() {
+        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+    }
+    poseidon2.permute_mut(&mut state);
+    state.map(|g| g.as_canonical_u64())
+}
 
 /// Format a U512 in a human-readable way (scientific notation for large numbers).
 pub fn format_u512(n: U512) -> String {
@@ -220,6 +241,39 @@ mod tests {
 
         // With impossible difficulty, should not find solution
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_midstate_resumes_to_full_hash() {
+        let header = [7u8; 32];
+        let nonce = (U512::from(0xdeadbeefcafeu64) << 300) | U512::from(0x1234567890abcdefu64);
+        let nonce_be = nonce.to_big_endian();
+
+        let mut state =
+            mining_midstate(header, nonce_be[..32].try_into().unwrap()).map(Goldilocks::from_u64);
+        let poseidon2 = Poseidon2::new();
+        for (i, chunk) in nonce_be[32..].chunks_exact(4).enumerate() {
+            state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+        }
+        poseidon2.permute_mut(&mut state);
+        state[0] += Goldilocks::ONE;
+        state[1] += Goldilocks::ONE;
+        poseidon2.permute_mut(&mut state);
+
+        let mut hash = [0u8; 64];
+        for i in 0..4 {
+            hash[i * 8..(i + 1) * 8].copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
+        }
+        poseidon2.permute_mut(&mut state);
+        for i in 0..4 {
+            hash[32 + i * 8..32 + (i + 1) * 8]
+                .copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
+        }
+
+        assert_eq!(
+            U512::from_big_endian(&hash),
+            qpow_math::get_nonce_hash(header, nonce_be)
+        );
     }
 
     #[test]
