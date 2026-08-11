@@ -17,23 +17,23 @@ The binary will be available at `target/release/quantus-miner`.
 ## Running
 
 ```bash
-# Copy auth token + TLS cert fingerprint from the node logs / chain config dir:
+# Prefer the node's chain config files (auth token is not logged by the node):
 ./target/release/quantus-miner serve \
   --node-addr 127.0.0.1:9833 \
-  --auth-token <TOKEN> \
-  --tls-cert-sha256 <FINGERPRINT> \
-  --cpu-workers 4
-
-# Or point at the node's files directly:
-./target/release/quantus-miner serve \
   --auth-token-file /path/to/miner-auth-token \
   --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --cpu-workers 4
+
+# Or pass values directly (fingerprint is also in node logs):
+./target/release/quantus-miner serve \
+  --auth-token <TOKEN> \
+  --tls-cert-sha256 <FINGERPRINT> \
   --gpu-devices 1
 
 # Hybrid CPU+GPU mining
 ./target/release/quantus-miner serve \
-  --auth-token <TOKEN> \
-  --tls-cert-sha256 <FINGERPRINT> \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --cpu-workers 4 \
   --gpu-devices 1
 ```
