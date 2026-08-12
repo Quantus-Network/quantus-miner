@@ -143,13 +143,16 @@ impl MinerEngine for FastCpuEngine {
         range: Range,
         cancel: &dyn CancelCheck,
     ) -> EngineStatus {
-        use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
+        use pow_core::{step_nonce, MidstateContext};
 
         if range.start > range.end {
             return EngineStatus::Exhausted { hash_count: 0 };
         }
 
         let mut current = range.start;
+        let mut nonce_be = current.to_big_endian();
+        let mut nonce_high: [u8; 32] = nonce_be[..32].try_into().unwrap();
+        let mut mctx = MidstateContext::new(ctx.header, ctx.target, nonce_high);
         let mut hash_count: u64 = 0;
         // Use decrementing counter to avoid modulo division in hot loop
         // Initialize to 0 so we check cancellation immediately on first iteration
@@ -165,15 +168,14 @@ impl MinerEngine for FastCpuEngine {
             }
             until_check -= 1;
 
-            let hash = hash_from_nonce(ctx, current);
+            let found = mctx.check_nonce_low(nonce_be[32..].try_into().unwrap());
             hash_count = hash_count.saturating_add(1);
 
-            if is_valid_hash(ctx, hash) {
-                let work = current.to_big_endian();
+            if let Some(hash) = found {
                 return EngineStatus::Found {
                     candidate: Candidate {
                         nonce: current,
-                        work,
+                        work: nonce_be,
                         hash,
                     },
                     hash_count,
@@ -186,6 +188,14 @@ impl MinerEngine for FastCpuEngine {
             }
 
             current = step_nonce(current);
+            nonce_be = current.to_big_endian();
+            // The midstate covers the nonce's high 256 bits; rebuild it when
+            // an increment carries into them (practically never, but must be exact).
+            let new_high: [u8; 32] = nonce_be[..32].try_into().unwrap();
+            if new_high != nonce_high {
+                nonce_high = new_high;
+                mctx = MidstateContext::new(ctx.header, ctx.target, nonce_high);
+            }
         }
 
         EngineStatus::Exhausted { hash_count }

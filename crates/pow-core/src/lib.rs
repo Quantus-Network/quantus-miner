@@ -23,6 +23,89 @@ pub fn mining_midstate(header: [u8; 32], nonce_high_be: [u8; 32]) -> [u64; SPONG
     state.map(|g| g.as_canonical_u64())
 }
 
+/// Write the first 4 felts of the state as 32 little-endian-per-felt bytes,
+/// matching the squeeze side of `hash_squeeze_twice`.
+fn write_squeeze(state: &[Goldilocks; SPONGE_WIDTH], out: &mut [u8]) {
+    for (i, chunk) in out.chunks_exact_mut(8).enumerate() {
+        chunk.copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
+    }
+}
+
+/// CPU mining context: precomputed sponge midstate plus the comparison target
+/// split for early rejection.
+///
+/// `get_nonce_hash` runs 5 permutations per nonce: absorb header (1), absorb
+/// nonce-high (2), absorb nonce-low (3), padding block (4), second squeeze (5).
+/// Permutations 1-2 are constant while the nonce's high 256 bits are unchanged,
+/// so they are precomputed once here. Permutation 5 only affects the low half
+/// of the big-endian U512 hash, so when the first squeeze already exceeds the
+/// target's high half the nonce is rejected after permutation 4 — the common
+/// case is 2 permutations per nonce instead of 5. Returned hashes remain
+/// byte-identical to `get_nonce_hash`.
+pub struct MidstateContext {
+    poseidon2: Poseidon2,
+    midstate: [u64; SPONGE_WIDTH],
+    target: U512,
+    /// High 32 bytes of the big-endian target; compared against the first squeeze.
+    target_high: [u8; 32],
+}
+
+impl MidstateContext {
+    pub fn new(header: [u8; 32], target: U512, nonce_high_be: [u8; 32]) -> Self {
+        let target_be = target.to_big_endian();
+        let mut target_high = [0u8; 32];
+        target_high.copy_from_slice(&target_be[..32]);
+        Self {
+            poseidon2: Poseidon2::new(),
+            midstate: mining_midstate(header, nonce_high_be),
+            target,
+            target_high,
+        }
+    }
+
+    /// Sponge state just before the first squeeze: resume from the midstate,
+    /// absorb the low 32 bytes of the nonce, then the padding block
+    /// (terminator felt and finalization marker land on state[0]/state[1]).
+    fn squeeze_state(&self, nonce_low_be: [u8; 32]) -> [Goldilocks; SPONGE_WIDTH] {
+        let mut state = self.midstate.map(Goldilocks::from_u64);
+        for (i, chunk) in nonce_low_be.chunks_exact(4).enumerate() {
+            state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+        }
+        self.poseidon2.permute_mut(&mut state);
+        state[0] += Goldilocks::ONE;
+        state[1] += Goldilocks::ONE;
+        self.poseidon2.permute_mut(&mut state);
+        state
+    }
+
+    /// Full 64-byte nonce hash as a U512; identical to `qpow_math::get_nonce_hash`.
+    pub fn hash_nonce_low(&self, nonce_low_be: [u8; 32]) -> U512 {
+        let mut state = self.squeeze_state(nonce_low_be);
+        let mut hash = [0u8; 64];
+        write_squeeze(&state, &mut hash[..32]);
+        self.poseidon2.permute_mut(&mut state);
+        write_squeeze(&state, &mut hash[32..]);
+        U512::from_big_endian(&hash)
+    }
+
+    /// Return the full hash when this nonce meets the target, else `None`.
+    /// The second squeeze permutation runs only when the first squeeze
+    /// (the high half of the BE hash) cannot settle the comparison alone.
+    pub fn check_nonce_low(&self, nonce_low_be: [u8; 32]) -> Option<U512> {
+        let mut state = self.squeeze_state(nonce_low_be);
+        let mut hash = [0u8; 64];
+        write_squeeze(&state, &mut hash[..32]);
+        // Big-endian comparison: a greater high half means the hash is out.
+        if hash[..32] > self.target_high[..] {
+            return None;
+        }
+        self.poseidon2.permute_mut(&mut state);
+        write_squeeze(&state, &mut hash[32..]);
+        let h = U512::from_big_endian(&hash);
+        (h < self.target).then_some(h)
+    }
+}
+
 /// Format a U512 in a human-readable way (scientific notation for large numbers).
 pub fn format_u512(n: U512) -> String {
     if n.is_zero() {
@@ -241,6 +324,71 @@ mod tests {
 
         // With impossible difficulty, should not find solution
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_midstate_context_matches_get_nonce_hash() {
+        // Cross-check the fast path against the reference over a spread of
+        // headers and nonces (including carries into the high 256 bits).
+        let headers = [[0u8; 32], [1u8; 32], [0xffu8; 32], [0x2au8; 32]];
+        let nonces = [
+            U512::zero(),
+            U512::from(1u64),
+            U512::from(123u64),
+            U512::from(u64::MAX),
+            (U512::from(0xdeadbeefu64) << 256) | U512::from(0x1234567890abcdefu64),
+            U512::MAX,
+        ];
+        for header in headers {
+            for nonce in nonces {
+                let nonce_be = nonce.to_big_endian();
+                let ctx =
+                    MidstateContext::new(header, U512::MAX, nonce_be[..32].try_into().unwrap());
+                let fast = ctx.hash_nonce_low(nonce_be[32..].try_into().unwrap());
+                let reference = get_nonce_hash(header, nonce_be);
+                assert_eq!(fast, reference, "hash mismatch for nonce {nonce}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_nonce_low_matches_full_compare() {
+        // Fuzz-style cross-check: the early-reject path must agree with
+        // hashing the full 64 bytes and comparing against the target.
+        let difficulties = [
+            U512::from(1u64), // always valid
+            U512::from(2u64), // ~50% valid
+            U512::from(1_000_000u64),
+            U512::MAX, // never valid (target = 1)
+        ];
+        for header_seed in 0..4u8 {
+            let header = [header_seed; 32];
+            for &difficulty in &difficulties {
+                let target = U512::MAX / difficulty;
+                let ctx = MidstateContext::new(header, target, [0u8; 32]);
+                let mut found = 0u64;
+                for n in 0..500u64 {
+                    let nonce_be = U512::from(n).to_big_endian();
+                    let result = ctx.check_nonce_low(nonce_be[32..].try_into().unwrap());
+                    let reference = get_nonce_hash(header, nonce_be);
+                    assert_eq!(
+                        result.is_some(),
+                        reference < target,
+                        "validity mismatch for header {header_seed}, nonce {n}, difficulty {difficulty}"
+                    );
+                    if let Some(h) = result {
+                        assert_eq!(h, reference, "hash mismatch for nonce {n}");
+                        found += 1;
+                    }
+                }
+                if difficulty == U512::one() {
+                    assert_eq!(found, 500, "difficulty 1 must accept every nonce");
+                }
+                if difficulty == U512::MAX {
+                    assert_eq!(found, 0, "target 1 must reject every nonce");
+                }
+            }
+        }
     }
 
     #[test]
