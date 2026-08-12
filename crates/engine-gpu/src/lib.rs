@@ -505,10 +505,19 @@ impl GpuEngine {
     }
 
     /// Explicitly clear thread-local GPU resources.
-    /// Call this before thread exit to avoid TLS destruction order issues with wgpu.
+    /// Call this before dropping a `GpuEngine` (or before thread exit) so
+    /// buffers are destroyed while the device is still alive — otherwise the
+    /// next engine on this thread can reuse dead buffer IDs and panic with
+    /// `Buffer[…] does not exist`.
     pub fn clear_worker_resources() {
         WORKER_RESOURCES.with(|resources| {
             *resources.borrow_mut() = None;
+        });
+        ASSIGNED_GPU_DEVICE.with(|assigned| {
+            *assigned.borrow_mut() = None;
+        });
+        DEVICE_LOST.with(|lost| {
+            *lost.borrow_mut() = None;
         });
     }
 }
