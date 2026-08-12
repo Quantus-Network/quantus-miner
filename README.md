@@ -145,46 +145,6 @@ The miner uses a QUIC-based protocol for communication with the node:
 
 For full protocol specification, see the node's `MINING.md`.
 
-## Docker
-
-Mount the node's auth/TLS files (or pass env vars). The miner listens for
-metrics on `--metrics-port`; it connects *out* to the node (no need to publish 9833 on the miner).
-
-```bash
-# Quick start (host paths to the node's chain config files)
-docker pull ghcr.io/quantus-network/quantus-miner:latest
-docker run -d -p 9900:9900 \
-  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
-  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
-  ghcr.io/quantus-network/quantus-miner:latest \
-  serve \
-  --node-addr host.docker.internal:9833 \
-  --auth-token-file /secrets/miner-auth-token \
-  --tls-cert-sha256-file /secrets/miner-tls-cert-sha256 \
-  --cpu-workers 4 --metrics-port 9900
-
-# Or via environment variables
-docker run -d -p 9900:9900 \
-  -e MINER_NODE_ADDR=host.docker.internal:9833 \
-  -e MINER_AUTH_TOKEN_FILE=/secrets/miner-auth-token \
-  -e MINER_TLS_CERT_SHA256_FILE=/secrets/miner-tls-cert-sha256 \
-  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
-  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
-  ghcr.io/quantus-network/quantus-miner:latest \
-  serve --cpu-workers 4 --metrics-port 9900
-
-# Build from source
-docker build -t quantus-miner .
-docker run -d -p 9900:9900 \
-  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
-  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
-  quantus-miner serve \
-  --node-addr host.docker.internal:9833 \
-  --auth-token-file /secrets/miner-auth-token \
-  --tls-cert-sha256-file /secrets/miner-tls-cert-sha256 \
-  --cpu-workers 4
-```
-
 ## Benchmarking
 
 ```bash
