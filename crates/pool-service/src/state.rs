@@ -170,6 +170,14 @@ impl PoolState {
         self.current_job.lock().unwrap().clone()
     }
 
+    /// Drop the current job (e.g. upstream disconnected). New sessions will
+    /// see `no_job_available` until the next `set_job`.
+    pub fn clear_job(&self) {
+        if self.current_job.lock().unwrap().take().is_some() {
+            log::info!("Cleared current job (upstream unavailable)");
+        }
+    }
+
     /// Issue a new captcha session with a disjoint nonce range.
     pub fn issue_session(&self) -> Result<Session, &'static str> {
         let job = self.current_job().ok_or("no_job_available")?;

@@ -150,33 +150,56 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Job source.
-    {
-        let state = state.clone();
-        match node_upstream {
-            Some((addr, auth_token, tls_cert_sha256)) => {
-                log::info!("Upstream: quantus-node at {}", addr);
-                tokio::spawn(upstream::run_node_client(
-                    state,
+    // Job source. Node mode reconnects across transient disconnects (node
+    // restart); only a PermanentConnectError ends the task — then we tear
+    // down HTTP so the process does not look healthy on a bad token/pin.
+    match node_upstream {
+        Some((addr, auth_token, tls_cert_sha256)) => {
+            log::info!("Upstream: quantus-node at {}", addr);
+            let state_for_upstream = state.clone();
+            let upstream = tokio::spawn(async move {
+                upstream::run_node_client(
+                    state_for_upstream,
                     addr,
                     auth_token,
                     tls_cert_sha256,
                     solution_rx,
-                ));
-            }
-            None => {
-                log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
-                tokio::spawn(upstream::run_standalone(
-                    state,
-                    Duration::from_secs(args.standalone_job_secs),
-                    solution_rx,
-                ));
+                )
+                .await
+            });
+
+            tokio::select! {
+                biased;
+                result = upstream => {
+                    match result {
+                        Ok(Ok(())) => anyhow::bail!(
+                            "upstream task exited unexpectedly (should reconnect forever)"
+                        ),
+                        Ok(Err(e)) => {
+                            log::error!("Upstream permanent failure; shutting down: {e}");
+                            Err(e.into())
+                        }
+                        Err(e) => Err(anyhow::anyhow!("upstream task panicked: {e}")),
+                    }
+                }
+                _ = http::serve(state, limiter, args.http_addr, args.serve_dir) => Ok(()),
             }
         }
+        None => {
+            log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
+            let state_for_upstream = state.clone();
+            tokio::spawn(async move {
+                upstream::run_standalone(
+                    state_for_upstream,
+                    Duration::from_secs(args.standalone_job_secs),
+                    solution_rx,
+                )
+                .await
+            });
+            http::serve(state, limiter, args.http_addr, args.serve_dir).await;
+            Ok(())
+        }
     }
-
-    http::serve(state, limiter, args.http_addr, args.serve_dir).await;
-    Ok(())
 }
 
 fn resolve_auth_token(
