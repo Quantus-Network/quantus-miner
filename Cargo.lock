@@ -636,7 +636,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1276,7 +1276,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2279,7 +2279,8 @@ dependencies = [
 [[package]]
 name = "quantus-miner-api"
 version = "0.3.0"
-source = "git+https://github.com/Quantus-Network/chain.git?branch=illuzen%2Fquic-auth#015267a0877eb6e69bf9ce1ac0de8983f026453a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "725bbf1de0bc7d2ace83f8e49ea754be5f45b84bc9471ddd3f417a9e2bb20553"
 dependencies = [
  "serde",
  "serde_json",
@@ -3757,7 +3758,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
