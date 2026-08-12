@@ -39,10 +39,8 @@ pub fn validate_auth_config(auth_token: &str, tls_cert_sha256_hex: &str) -> anyh
 /// Parse a 64-hex (optional whitespace/`:` separators) SHA-256 fingerprint.
 pub fn parse_fingerprint(tls_cert_sha256_hex: &str) -> anyhow::Result<[u8; 32]> {
     normalize_fingerprint(tls_cert_sha256_hex).ok_or_else(|| {
-        PermanentConnectError(
-            "invalid TLS cert SHA-256 fingerprint (expected 64 hex chars)".into(),
-        )
-        .into()
+        PermanentConnectError("invalid TLS cert SHA-256 fingerprint (expected 64 hex chars)".into())
+            .into()
     })
 }
 
@@ -193,7 +191,10 @@ mod tests {
     #[test]
     fn rejects_short_fingerprint() {
         let err = validate_auth_config("token", "nope").unwrap_err();
-        assert!(err.downcast_ref::<PermanentConnectError>().is_some(), "{err}");
+        assert!(
+            err.downcast_ref::<PermanentConnectError>().is_some(),
+            "{err}"
+        );
     }
 
     #[test]
@@ -208,7 +209,10 @@ mod tests {
         // Escape-heavy token: raw length under a naive cap can still blow the frame.
         let token = "\"".repeat(600);
         let err = validate_auth_config(&token, &fp).unwrap_err();
-        assert!(err.downcast_ref::<PermanentConnectError>().is_some(), "{err}");
+        assert!(
+            err.downcast_ref::<PermanentConnectError>().is_some(),
+            "{err}"
+        );
         assert!(err.to_string().contains("Ready frame"), "{err}");
     }
 }

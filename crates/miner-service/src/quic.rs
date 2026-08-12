@@ -53,7 +53,9 @@ pub async fn connect_and_mine(
                 {
                     // Cancel any running job when connection drops
                     worker_pool.cancel();
-                    if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                    if e.downcast_ref::<quic_transport::PermanentConnectError>()
+                        .is_some()
+                    {
                         log::error!("⛏️ Permanent connection error (not retrying): {e}");
                         return Err(e);
                     }
@@ -67,7 +69,9 @@ pub async fn connect_and_mine(
                 }
             }
             Err(e) => {
-                if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                if e.downcast_ref::<quic_transport::PermanentConnectError>()
+                    .is_some()
+                {
                     log::error!("⛏️ Permanent connection error (not retrying): {e}");
                     return Err(e);
                 }

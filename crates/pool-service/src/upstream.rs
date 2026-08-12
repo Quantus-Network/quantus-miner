@@ -107,7 +107,9 @@ pub async fn run_node_client(
                 }
             }
             Err(e) => {
-                if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                if e.downcast_ref::<quic_transport::PermanentConnectError>()
+                    .is_some()
+                {
                     log::error!("Permanent connection error (not retrying): {e}");
                     return;
                 }
