@@ -34,6 +34,7 @@ gpu-interop = []
 
 [dependencies]
 primitive-types = { workspace = true }
+qp-poseidon-core = { workspace = true }
 qpow-math = { workspace = true }
 
 [dev-dependencies]

@@ -6,6 +6,14 @@ use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
+/// Drop thread-local wgpu buffers before `GpuEngine` is dropped. Criterion
+/// creates a fresh engine per group; without this, TLS buffers outlive the
+/// device and the next group panics (`Buffer[…] does not exist`).
+fn teardown_gpu(engine: GpuEngine) {
+    GpuEngine::clear_worker_resources();
+    drop(engine);
+}
+
 fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
     let cpu_engine = FastCpuEngine::new(10_000);
     let gpu_engine = GpuEngine::try_new(10_000_000, 0, false).expect("Failed to init GPU");
@@ -55,6 +63,7 @@ fn bench_cpu_vs_gpu_small(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
@@ -106,6 +115,7 @@ fn bench_cpu_vs_gpu_medium(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
@@ -157,6 +167,7 @@ fn bench_cpu_vs_gpu_large(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 fn bench_solution_finding(c: &mut Criterion) {
@@ -208,6 +219,7 @@ fn bench_solution_finding(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 fn bench_throughput_per_second(c: &mut Criterion) {
@@ -259,6 +271,7 @@ fn bench_throughput_per_second(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 fn bench_gpu_batch_efficiency(c: &mut Criterion) {
@@ -335,6 +348,7 @@ fn bench_gpu_batch_efficiency(c: &mut Criterion) {
     });
 
     group.finish();
+    teardown_gpu(gpu_engine);
 }
 
 criterion_group!(

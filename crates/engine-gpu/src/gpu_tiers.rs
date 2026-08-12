@@ -423,6 +423,31 @@ const QUALCOMM_TIERS: &[GpuTier] = &[
 ];
 
 const APPLE_TIERS: &[GpuTier] = &[
+    // M5 series
+    GpuTier {
+        pattern: r"m5 ultra",
+        name: "Apple M5 Ultra",
+        workgroup_divisor: 4,
+        min_workgroups: 1600,
+    },
+    GpuTier {
+        pattern: r"m5 max",
+        name: "Apple M5 Max",
+        workgroup_divisor: 4,
+        min_workgroups: 800,
+    },
+    GpuTier {
+        pattern: r"m5 pro",
+        name: "Apple M5 Pro",
+        workgroup_divisor: 4,
+        min_workgroups: 400,
+    },
+    GpuTier {
+        pattern: r"\bm5\b",
+        name: "Apple M5",
+        workgroup_divisor: 4,
+        min_workgroups: 200,
+    },
     // M4 series
     GpuTier {
         pattern: r"m4 ultra",

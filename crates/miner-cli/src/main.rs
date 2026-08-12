@@ -29,11 +29,11 @@ enum Command {
         gpu_devices: Option<usize>,
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
-        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE, value_parser = clap::value_parser!(u32).range(1..))]
         gpu_batch_size: u32,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
-        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
+        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE, value_parser = clap::value_parser!(u64).range(1..))]
         cpu_batch_size: u64,
 
         /// Port for Prometheus metrics HTTP endpoint (default: 9900)
@@ -74,11 +74,11 @@ enum Command {
         gpu_devices: Option<usize>,
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
-        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE)]
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE, value_parser = clap::value_parser!(u32).range(1..))]
         gpu_batch_size: u32,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
-        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE)]
+        #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE, value_parser = clap::value_parser!(u64).range(1..))]
         cpu_batch_size: u64,
 
         /// Benchmark duration in seconds (default: 10)
@@ -225,7 +225,13 @@ async fn run_benchmark(
         num_cpus::get()
     );
     println!("GPU Devices: {}", effective_gpu_devices);
-    println!("Duration: {} seconds", duration);
+    if effective_cpu_workers > 0 {
+        println!("CPU batch size: {cpu_batch_size} hashes");
+    }
+    if effective_gpu_devices > 0 {
+        println!("GPU batch size: {gpu_batch_size} nonces");
+    }
+    println!("Duration: {duration} seconds");
     println!();
 
     if total_workers == 0 {
@@ -257,8 +263,11 @@ async fn run_benchmark(
     let mut handles = Vec::new();
     let total_hashes = Arc::new(std::sync::Mutex::new(0u64));
 
-    let cpu_chunk = 10_000u64;
-    let gpu_chunk = 1_000_000u64;
+    // Floor range widths at the old constants: engines still batch at the flag's
+    // size internally, but tiny flags don't turn per-call harness overhead into
+    // the measured quantity.
+    let cpu_chunk = cpu_batch_size.max(10_000);
+    let gpu_chunk = (gpu_batch_size as u64).max(1_000_000);
 
     for worker_id in 0..total_workers {
         let (engine, nonces_per_batch) = if worker_id < effective_cpu_workers {
@@ -274,21 +283,23 @@ async fn run_benchmark(
 
         let handle = thread::spawn(move || {
             let stride = U512::from(1_000_000_000_000u64);
-            let worker_start = U512::from(worker_id as u64).saturating_mul(stride);
-            let worker_range = EngineRange {
-                start: worker_start,
-                end: worker_start
-                    .saturating_add(U512::from(nonces_per_batch))
-                    .saturating_sub(U512::from(1u64)),
-            };
+            let mut current = U512::from(worker_id as u64).saturating_mul(stride);
+            let step = U512::from(nonces_per_batch);
 
             loop {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
 
+                let worker_range = EngineRange {
+                    start: current,
+                    end: current
+                        .saturating_add(step)
+                        .saturating_sub(U512::from(1u64)),
+                };
+
                 let cancel_check = AtomicBoolCancelCheck(&cancel);
-                let result = engine.search_range(&ctx, worker_range.clone(), &cancel_check);
+                let result = engine.search_range(&ctx, worker_range, &cancel_check);
 
                 match result {
                     engine_cpu::EngineStatus::Found { hash_count, .. }
@@ -300,10 +311,11 @@ async fn run_benchmark(
                     engine_cpu::EngineStatus::Running { .. } => {}
                 }
 
-                // Exit if device is lost
                 if matches!(result, engine_cpu::EngineStatus::DeviceLost { .. }) {
                     break;
                 }
+
+                current = current.saturating_add(step);
 
                 if start.elapsed() >= Duration::from_secs(duration) {
                     break;
