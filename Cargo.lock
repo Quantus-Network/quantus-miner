@@ -2279,6 +2279,7 @@ dependencies = [
 [[package]]
 name = "quantus-miner-api"
 version = "0.3.0"
+source = "git+https://github.com/Quantus-Network/chain.git?branch=illuzen%2Fquic-auth#015267a0877eb6e69bf9ce1ac0de8983f026453a"
 dependencies = [
  "serde",
  "serde_json",
