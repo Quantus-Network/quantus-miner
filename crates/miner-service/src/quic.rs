@@ -112,7 +112,6 @@ async fn handle_connection(
     // - internal_job_id: Our internal numeric ID from WorkerPool - used to detect stale results
     let mut node_job_id: Option<String> = None;
     let mut internal_job_id: u64 = 0;
-    let mut job_params: Option<([u8; 32], U512)> = None;
     let mut job_start_time: Option<Instant> = None;
     let mut cpu_hashes: u64 = 0;
     let mut gpu_hashes: u64 = 0;
@@ -158,24 +157,6 @@ async fn handle_connection(
 
             // Only send result for the FIRST solution found for THIS job
             if let Some(candidate) = worker_result.candidate {
-                // Re-verify on CPU before submitting: one hash per found seal.
-                // A failure here means the GPU/engine produced a wrong seal;
-                // never send it to the node, and make the defect loud.
-                if let Some((header, difficulty)) = job_params {
-                    let (valid, cpu_hash) =
-                        pow_core::is_valid_nonce(header, candidate.work, difficulty);
-                    if !valid {
-                        log::error!(
-                            "🚨 Engine returned an invalid seal for the current job: nonce {} \
-                             engine hash {:x} cpu hash {cpu_hash:x} (worker {}). NOT submitting. \
-                             Please report this bug.",
-                            candidate.nonce,
-                            candidate.hash,
-                            worker_result.thread_id
-                        );
-                        continue;
-                    }
-                }
                 if !result_sent_for_current_job {
                     if let Some(ref job_id) = node_job_id {
                         let total_hashes = cpu_hashes + gpu_hashes;
@@ -289,7 +270,6 @@ async fn handle_connection(
                         gpu_hashes = 0;
                         job_start_time = Some(Instant::now());
                         node_job_id = Some(request.job_id.clone());
-                        job_params = Some((header_hash, difficulty));
                         result_sent_for_current_job = false;
 
                         log::debug!("Starting job {}", request.job_id);
