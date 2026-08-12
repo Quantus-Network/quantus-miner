@@ -32,7 +32,11 @@ pub async fn connect(
         .with_safe_defaults()
         .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier { expected }))
         .with_no_client_auth();
-    crypto.alpn_protocols = vec![b"quantus-miner".to_vec()];
+    // Versioned with the wire protocol (node side: MINER_ALPN). `/2` = the
+    // authenticated `Ready { token }` protocol; a mismatched node/miner pair
+    // fails at the TLS handshake with "no application protocol" instead of an
+    // opaque auth/deserialize error.
+    crypto.alpn_protocols = vec![b"quantus-miner/2".to_vec()];
 
     let mut client_config = ClientConfig::new(Arc::new(crypto));
     let mut transport_config = quinn::TransportConfig::default();
