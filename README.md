@@ -16,22 +16,30 @@ The binary will be available at `target/release/quantus-miner`.
 
 ## Running
 
+The node requires a shared auth token and TLS cert pin. Both live under the
+node's chain config dir (`<base-path>/chains/<chain>/`):
+
+- `miner-auth-token` — shared secret (**not** logged by the node; read this file)
+- `miner-tls-cert-sha256` — SHA-256 of the miner TLS cert (also printed in node logs)
+
 ```bash
-# Prefer the node's chain config files (auth token is not logged by the node):
+# Preferred: mount/read the node's chain config files
 ./target/release/quantus-miner serve \
   --node-addr 127.0.0.1:9833 \
   --auth-token-file /path/to/miner-auth-token \
   --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --cpu-workers 4
 
-# Or pass values directly (fingerprint is also in node logs):
+# Or pass values directly (token from miner-auth-token; fingerprint also in node logs)
 ./target/release/quantus-miner serve \
+  --node-addr 127.0.0.1:9833 \
   --auth-token <TOKEN> \
   --tls-cert-sha256 <FINGERPRINT> \
   --gpu-devices 1
 
 # Hybrid CPU+GPU mining
 ./target/release/quantus-miner serve \
+  --node-addr 127.0.0.1:9833 \
   --auth-token-file /path/to/miner-auth-token \
   --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --cpu-workers 4 \
@@ -43,9 +51,9 @@ The binary will be available at `target/release/quantus-miner`.
 | Argument | Environment Variable | Description | Default |
 |----------|---------------------|-------------|---------|
 | `--node-addr <ADDR>` | `MINER_NODE_ADDR` | Node address to connect to | `127.0.0.1:9833` |
-| `--auth-token <TOKEN>` | `MINER_AUTH_TOKEN` | Shared secret from the node's logs / `miner-auth-token` file | required |
-| `--auth-token-file <PATH>` | `MINER_AUTH_TOKEN_FILE` | Read the shared secret from a file (alternative to `--auth-token`) | — |
-| `--tls-cert-sha256 <HEX>` | `MINER_TLS_CERT_SHA256` | SHA-256 of the node's miner TLS cert (from logs / `miner-tls-cert-sha256`) | required |
+| `--auth-token <TOKEN>` | `MINER_AUTH_TOKEN` | Shared secret from the node's `miner-auth-token` file (not logged) | required |
+| `--auth-token-file <PATH>` | `MINER_AUTH_TOKEN_FILE` | Read the shared secret from a file (preferred) | — |
+| `--tls-cert-sha256 <HEX>` | `MINER_TLS_CERT_SHA256` | SHA-256 of the node's miner TLS cert (`miner-tls-cert-sha256` / node logs) | required |
 | `--tls-cert-sha256-file <PATH>` | `MINER_TLS_CERT_SHA256_FILE` | Read the TLS cert fingerprint from a file | — |
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
@@ -82,27 +90,46 @@ cargo build -p miner-cli --release
 
 ## Examples
 
+All `serve` examples need the auth token and TLS pin (files or inline values).
+
 ```bash
 # CPU mining with 8 workers
-./target/release/quantus-miner serve --cpu-workers 8
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --cpu-workers 8
 
 # Pure GPU mining
-./target/release/quantus-miner serve --gpu-devices 1
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --gpu-devices 1
 
 # GPU mining with throttle (reduce GPU utilization)
-./target/release/quantus-miner serve --gpu-devices 1 --gpu-throttle-ms 50
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --gpu-devices 1 --gpu-throttle-ms 50
 
 # Hybrid mining: 4 CPU + 1 GPU workers
-./target/release/quantus-miner serve --cpu-workers 4 --gpu-devices 1
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --cpu-workers 4 --gpu-devices 1
 
 # With verbose logging
-RUST_LOG=debug ./target/release/quantus-miner serve --cpu-workers 2 --gpu-devices 1
+RUST_LOG=debug ./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --cpu-workers 2 --gpu-devices 1
 
 # Production setup with metrics
 ./target/release/quantus-miner serve \
+  --node-addr 127.0.0.1:9833 \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --cpu-workers 6 \
   --gpu-devices 1 \
-  --port 9833 \
   --metrics-port 9900
 ```
 
@@ -110,24 +137,52 @@ RUST_LOG=debug ./target/release/quantus-miner serve --cpu-workers 2 --gpu-device
 
 The miner uses a QUIC-based protocol for communication with the node:
 
-- **Transport**: QUIC with TLS 1.3 (self-signed certificates)
+- **Transport**: QUIC with TLS 1.3 (self-signed certificate, pinned by SHA-256)
+- **Auth**: `Ready { token }` must match the node's `miner-auth-token`
+- **ALPN**: `quantus-miner/2`
 - **Port**: 9833 (default)
-- **Messages**: `NewJob` (from node) and `JobResult` (from miner)
+- **Messages**: `Ready` (miner→node), `NewJob` (node→miner), `JobResult` (miner→node)
 
-For full protocol specification, see `EXTERNAL_MINER_PROTOCOL.md`.
+For full protocol specification, see the node's `MINING.md`.
 
 ## Docker
 
+Mount the node's auth/TLS files (or pass env vars). The miner listens for
+metrics on `--metrics-port`; it connects *out* to the node (no need to publish 9833 on the miner).
+
 ```bash
-# Quick start
+# Quick start (host paths to the node's chain config files)
 docker pull ghcr.io/quantus-network/quantus-miner:latest
-docker run -d -p 9833:9833 -p 9900:9900 \
+docker run -d -p 9900:9900 \
+  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
+  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
   ghcr.io/quantus-network/quantus-miner:latest \
+  serve \
+  --node-addr host.docker.internal:9833 \
+  --auth-token-file /secrets/miner-auth-token \
+  --tls-cert-sha256-file /secrets/miner-tls-cert-sha256 \
   --cpu-workers 4 --metrics-port 9900
+
+# Or via environment variables
+docker run -d -p 9900:9900 \
+  -e MINER_NODE_ADDR=host.docker.internal:9833 \
+  -e MINER_AUTH_TOKEN_FILE=/secrets/miner-auth-token \
+  -e MINER_TLS_CERT_SHA256_FILE=/secrets/miner-tls-cert-sha256 \
+  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
+  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
+  ghcr.io/quantus-network/quantus-miner:latest \
+  serve --cpu-workers 4 --metrics-port 9900
 
 # Build from source
 docker build -t quantus-miner .
-docker run -d -p 9833:9833 quantus-miner serve --cpu-workers 4
+docker run -d -p 9900:9900 \
+  -v /path/to/miner-auth-token:/secrets/miner-auth-token:ro \
+  -v /path/to/miner-tls-cert-sha256:/secrets/miner-tls-cert-sha256:ro \
+  quantus-miner serve \
+  --node-addr host.docker.internal:9833 \
+  --auth-token-file /secrets/miner-auth-token \
+  --tls-cert-sha256-file /secrets/miner-tls-cert-sha256 \
+  --cpu-workers 4
 ```
 
 ## Benchmarking
