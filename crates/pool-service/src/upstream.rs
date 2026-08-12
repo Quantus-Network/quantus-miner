@@ -36,7 +36,7 @@ pub async fn run_node_client(
         match quic_transport::connect(node_addr, &auth_token, &tls_cert_sha256).await {
             Ok((connection, mut send, mut recv)) => {
                 log::info!("Connected to node at {}", node_addr);
-                reconnect_delay = Duration::from_secs(1);
+                let mut authenticated = false;
 
                 loop {
                     // Retry any unsubmitted block before doing anything else.
@@ -60,7 +60,15 @@ pub async fn run_node_client(
                         biased;
 
                         reason = connection.closed() => {
-                            log::warn!("Node connection closed: {}", reason);
+                            let msg = reason.to_string();
+                            if !authenticated && msg.to_ascii_lowercase().contains("auth") {
+                                log::error!(
+                                    "Permanent auth rejection from node ({msg}); not retrying. \
+                                     Check --auth-token / miner-auth-token"
+                                );
+                                return;
+                            }
+                            log::warn!("Node connection closed: {}", msg);
                             break;
                         }
 
@@ -76,6 +84,7 @@ pub async fn run_node_client(
                         msg = read_message(&mut recv) => {
                             match msg {
                                 Ok(MinerMessage::NewJob(request)) => {
+                                    authenticated = true;
                                     match parse_job(&request.job_id, &request.mining_hash, &request.difficulty) {
                                         Ok(job) => state.set_job(job),
                                         Err(e) => log::warn!("Ignoring malformed job from node: {}", e),
@@ -92,8 +101,16 @@ pub async fn run_node_client(
                         }
                     }
                 }
+
+                if authenticated {
+                    reconnect_delay = Duration::from_secs(1);
+                }
             }
             Err(e) => {
+                if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                    log::error!("Permanent connection error (not retrying): {e}");
+                    return;
+                }
                 log::warn!("Failed to connect to node: {}", e);
             }
         }

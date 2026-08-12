@@ -21,17 +21,19 @@ enum Command {
         #[arg(long, env = "MINER_NODE_ADDR", default_value = "127.0.0.1:9833")]
         node_addr: std::net::SocketAddr,
 
-        /// Shared auth token from the node's logs / miner-auth-token file.
+        /// Shared auth token from the node's `miner-auth-token` file
+        /// (`<base-path>/chains/<chain>/miner-auth-token`). Prefer `--auth-token-file`.
         #[arg(long, env = "MINER_AUTH_TOKEN", conflicts_with = "auth_token_file")]
         auth_token: Option<String>,
 
-        /// Path to a file containing the shared auth token (trimmed).
-        /// Convenient when sharing the node's miner-auth-token file.
+        /// Path to the node's `miner-auth-token` file (trimmed). Preferred over
+        /// `--auth-token` so the secret is not placed on the command line.
         #[arg(long, env = "MINER_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
         auth_token_file: Option<PathBuf>,
 
-        /// SHA-256 fingerprint of the node's miner TLS certificate (hex).
-        /// Copy from the node logs or its miner-tls-cert-sha256 file.
+        /// SHA-256 fingerprint of the node's miner TLS certificate (64 hex chars).
+        /// Prefer `--tls-cert-sha256-file` pointing at `miner-tls-cert-sha256`
+        /// (the node also logs this fingerprint).
         #[arg(
             long,
             env = "MINER_TLS_CERT_SHA256",
@@ -39,7 +41,7 @@ enum Command {
         )]
         tls_cert_sha256: Option<String>,
 
-        /// Path to a file containing the node's miner TLS cert SHA-256 fingerprint.
+        /// Path to the node's `miner-tls-cert-sha256` file.
         #[arg(
             long,
             env = "MINER_TLS_CERT_SHA256_FILE",
@@ -138,7 +140,8 @@ async fn main() {
         eprintln!("Error: No command provided. Use 'serve' to start mining (defaults to local node at 127.0.0.1:9833).");
         eprintln!(
             "Example: quantus-miner serve --node-addr 127.0.0.1:9833 \
-             --auth-token <TOKEN> --tls-cert-sha256 <FINGERPRINT>"
+             --auth-token-file /path/to/miner-auth-token \
+             --tls-cert-sha256-file /path/to/miner-tls-cert-sha256"
         );
         std::process::exit(1);
     };
@@ -176,6 +179,11 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+            // Fail closed on permanent misconfig before metrics/workers start.
+            if let Err(e) = quic_transport::validate_auth_config(&auth_token, &tls_cert_sha256) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
 
             log::info!("Starting external miner service...");
 
@@ -239,8 +247,8 @@ fn resolve_auth_token(
         auth_token_file,
         "--auth-token",
         "--auth-token-file",
-        "miner auth token required: pass --auth-token <TOKEN> or --auth-token-file <PATH> \
-         (copy from the node's logs or its miner-auth-token file)",
+        "miner auth token required: pass --auth-token-file <PATH> to the node's \
+         miner-auth-token file (or --auth-token <TOKEN>)",
     )
 }
 
@@ -250,9 +258,8 @@ fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> Resu
         file,
         "--tls-cert-sha256",
         "--tls-cert-sha256-file",
-        "TLS cert fingerprint required: pass --tls-cert-sha256 <HEX> or \
-         --tls-cert-sha256-file <PATH> (copy from the node's logs or its \
-         miner-tls-cert-sha256 file)",
+        "TLS cert fingerprint required: pass --tls-cert-sha256-file <PATH> to the node's \
+         miner-tls-cert-sha256 file (or --tls-cert-sha256 <HEX>; also printed in node logs)",
     )
 }
 

@@ -45,15 +45,32 @@ pub async fn connect_and_mine(
         match establish_connection(node_addr, auth_token, tls_cert_sha256).await {
             Ok((connection, send, recv)) => {
                 log::info!("⛏️ Connected to node at {}", node_addr);
-                reconnect_delay = Duration::from_secs(1);
 
-                if let Err(e) = handle_connection(connection, send, recv, &worker_pool).await {
-                    log::info!("⛏️ Connection lost: {}", e);
+                let mut authenticated = false;
+                if let Err(e) =
+                    handle_connection(connection, send, recv, &worker_pool, &mut authenticated)
+                        .await
+                {
                     // Cancel any running job when connection drops
                     worker_pool.cancel();
+                    if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                        log::error!("⛏️ Permanent connection error (not retrying): {e}");
+                        return Err(e);
+                    }
+                    log::info!("⛏️ Connection lost: {}", e);
+                }
+                // Only clear backoff after the node accepted auth (first NewJob).
+                // connect() already treats explicit "auth failed" as permanent;
+                // this covers any other post-Ready close that looked like success.
+                if authenticated {
+                    reconnect_delay = Duration::from_secs(1);
                 }
             }
             Err(e) => {
+                if e.downcast_ref::<quic_transport::PermanentConnectError>().is_some() {
+                    log::error!("⛏️ Permanent connection error (not retrying): {e}");
+                    return Err(e);
+                }
                 log::warn!("⛏️ Failed to connect to node: {}", e);
             }
         }
@@ -96,11 +113,15 @@ async fn send_message_checked(
 }
 
 /// Handle an established connection, receiving jobs and sending results.
+///
+/// Sets `authenticated` when the first `NewJob` arrives (proof the node
+/// accepted our Ready token).
 async fn handle_connection(
     connection: quinn::Connection,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     worker_pool: &WorkerPool,
+    authenticated: &mut bool,
 ) -> anyhow::Result<()> {
     use crossbeam_channel::RecvTimeoutError;
 
@@ -200,12 +221,20 @@ async fn handle_connection(
             biased;
 
             reason = connection.closed() => {
-                return Err(anyhow::anyhow!("Connection closed: {}", reason));
+                let msg = reason.to_string();
+                if !*authenticated && msg.to_ascii_lowercase().contains("auth") {
+                    return Err(quic_transport::PermanentConnectError(format!(
+                        "node rejected miner auth ({msg}); check --auth-token / miner-auth-token"
+                    ))
+                    .into());
+                }
+                return Err(anyhow::anyhow!("Connection closed: {}", msg));
             }
 
             msg_result = read_message(&mut recv) => {
                 match msg_result {
                     Ok(MinerMessage::NewJob(request)) => {
+                        *authenticated = true;
                         log::info!(
                             "⛏️ Received job: id={}, hash=0x{}",
                             request.job_id,

@@ -32,17 +32,17 @@ struct Args {
     #[arg(long, env = "POOL_NODE_ADDR")]
     node_addr: Option<SocketAddr>,
 
-    /// Shared auth token from the node's logs / miner-auth-token file.
-    /// Required when `--node-addr` is set.
+    /// Shared auth token from the node's `miner-auth-token` file.
+    /// Required when `--node-addr` is set. Prefer `--auth-token-file`.
     #[arg(long, env = "POOL_AUTH_TOKEN", conflicts_with = "auth_token_file")]
     auth_token: Option<String>,
 
-    /// Path to a file containing the shared auth token (trimmed).
+    /// Path to the node's `miner-auth-token` file (trimmed).
     #[arg(long, env = "POOL_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
     auth_token_file: Option<PathBuf>,
 
-    /// SHA-256 fingerprint of the node's miner TLS certificate (hex).
-    /// Required when `--node-addr` is set.
+    /// SHA-256 fingerprint of the node's miner TLS certificate (64 hex chars).
+    /// Required when `--node-addr` is set. Prefer `--tls-cert-sha256-file`.
     #[arg(
         long,
         env = "POOL_TLS_CERT_SHA256",
@@ -50,7 +50,7 @@ struct Args {
     )]
     tls_cert_sha256: Option<String>,
 
-    /// Path to a file containing the node's miner TLS cert SHA-256 fingerprint.
+    /// Path to the node's `miner-tls-cert-sha256` file.
     #[arg(
         long,
         env = "POOL_TLS_CERT_SHA256_FILE",
@@ -99,6 +99,28 @@ async fn main() -> anyhow::Result<()> {
         log::warn!("Using default site secret; set --site-secret in production");
     }
 
+    // Resolve + validate node auth before starting HTTP / upstream tasks so a
+    // bad fingerprint or oversized token exits instead of retrying forever.
+    let node_upstream = match args.node_addr {
+        Some(addr) => {
+            let auth_token = resolve_auth_token(args.auth_token, args.auth_token_file)?;
+            let tls_cert_sha256 =
+                resolve_tls_cert_sha256(args.tls_cert_sha256, args.tls_cert_sha256_file)?;
+            quic_transport::validate_auth_config(&auth_token, &tls_cert_sha256)?;
+            Some((addr, auth_token, tls_cert_sha256))
+        }
+        None => {
+            if args.auth_token.is_some()
+                || args.auth_token_file.is_some()
+                || args.tls_cert_sha256.is_some()
+                || args.tls_cert_sha256_file.is_some()
+            {
+                log::warn!("Ignoring auth/TLS pin flags in standalone mode (no --node-addr)");
+            }
+            None
+        }
+    };
+
     let (solution_tx, solution_rx) = tokio::sync::mpsc::channel(16);
     let state = state::PoolState::new(
         U512::from(args.share_difficulty),
@@ -131,11 +153,8 @@ async fn main() -> anyhow::Result<()> {
     // Job source.
     {
         let state = state.clone();
-        match args.node_addr {
-            Some(addr) => {
-                let auth_token = resolve_auth_token(args.auth_token, args.auth_token_file)?;
-                let tls_cert_sha256 =
-                    resolve_tls_cert_sha256(args.tls_cert_sha256, args.tls_cert_sha256_file)?;
+        match node_upstream {
+            Some((addr, auth_token, tls_cert_sha256)) => {
                 log::info!("Upstream: quantus-node at {}", addr);
                 tokio::spawn(upstream::run_node_client(
                     state,
@@ -146,13 +165,6 @@ async fn main() -> anyhow::Result<()> {
                 ));
             }
             None => {
-                if args.auth_token.is_some()
-                    || args.auth_token_file.is_some()
-                    || args.tls_cert_sha256.is_some()
-                    || args.tls_cert_sha256_file.is_some()
-                {
-                    log::warn!("Ignoring auth/TLS pin flags in standalone mode (no --node-addr)");
-                }
                 log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
                 tokio::spawn(upstream::run_standalone(
                     state,
@@ -176,8 +188,8 @@ fn resolve_auth_token(
         auth_token_file,
         "--auth-token",
         "--auth-token-file",
-        "when --node-addr is set, pass --auth-token <TOKEN> or --auth-token-file <PATH> \
-         (copy from the node's logs or its miner-auth-token file)",
+        "when --node-addr is set, pass --auth-token-file <PATH> to the node's \
+         miner-auth-token file (or --auth-token <TOKEN>)",
     )
 }
 
@@ -187,9 +199,8 @@ fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> anyh
         file,
         "--tls-cert-sha256",
         "--tls-cert-sha256-file",
-        "when --node-addr is set, pass --tls-cert-sha256 <HEX> or \
-         --tls-cert-sha256-file <PATH> (copy from the node's logs or its \
-         miner-tls-cert-sha256 file)",
+        "when --node-addr is set, pass --tls-cert-sha256-file <PATH> to the node's \
+         miner-tls-cert-sha256 file (or --tls-cert-sha256 <HEX>; also printed in node logs)",
     )
 }
 

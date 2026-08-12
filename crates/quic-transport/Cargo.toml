@@ -10,4 +10,6 @@ anyhow = { workspace = true }
 quantus-miner-api = { workspace = true }
 quinn = "0.10"
 rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration", "quic"] }
+serde_json = { workspace = true }
 sha2 = "0.10"
+tokio = { workspace = true, features = ["macros", "time"] }
