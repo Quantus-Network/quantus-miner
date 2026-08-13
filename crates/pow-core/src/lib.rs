@@ -1,8 +1,23 @@
 use primitive_types::U512;
-use qp_poseidon_core::{Goldilocks, Poseidon2};
+use qp_poseidon_core::serialization::digest_to_bytes;
+use qp_poseidon_core::{Goldilocks, Poseidon2, POSEIDON2_OUTPUT};
 
 pub use qp_poseidon_core::SPONGE_WIDTH;
 pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
+
+/// Absorb 32 bytes into the sponge rate as 8 little-endian u32 felts, matching
+/// `bytes_to_felts_iter`'s 4-bytes-per-felt encoding.
+fn absorb_32(state: &mut [Goldilocks; SPONGE_WIDTH], bytes: &[u8; 32]) {
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+    }
+}
+
+/// First 4 felts of the state as 32 bytes, matching the squeeze side of
+/// `hash_squeeze_twice`.
+fn squeeze_bytes(state: &[Goldilocks; SPONGE_WIDTH]) -> [u8; 32] {
+    digest_to_bytes(state[..POSEIDON2_OUTPUT].try_into().unwrap())
+}
 
 /// Sponge state (canonical u64 felts) after absorbing the 32-byte header and the
 /// high 32 bytes of the big-endian nonce — the first two of the five Poseidon2
@@ -12,23 +27,11 @@ pub use qpow_math::{get_nonce_hash, is_valid_nonce, mine_range};
 pub fn mining_midstate(header: [u8; 32], nonce_high_be: [u8; 32]) -> [u64; SPONGE_WIDTH] {
     let poseidon2 = Poseidon2::new();
     let mut state = [Goldilocks::ZERO; SPONGE_WIDTH];
-    for (i, chunk) in header.chunks_exact(4).enumerate() {
-        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
-    }
+    absorb_32(&mut state, &header);
     poseidon2.permute_mut(&mut state);
-    for (i, chunk) in nonce_high_be.chunks_exact(4).enumerate() {
-        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
-    }
+    absorb_32(&mut state, &nonce_high_be);
     poseidon2.permute_mut(&mut state);
     state.map(|g| g.as_canonical_u64())
-}
-
-/// Write the first 4 felts of the state as 32 little-endian-per-felt bytes,
-/// matching the squeeze side of `hash_squeeze_twice`.
-fn write_squeeze(state: &[Goldilocks; SPONGE_WIDTH], out: &mut [u8]) {
-    for (i, chunk) in out.chunks_exact_mut(8).enumerate() {
-        chunk.copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
-    }
 }
 
 /// CPU mining context: precomputed sponge midstate plus the comparison target
@@ -68,9 +71,7 @@ impl MidstateContext {
     /// (terminator felt and finalization marker land on state[0]/state[1]).
     fn squeeze_state(&self, nonce_low_be: [u8; 32]) -> [Goldilocks; SPONGE_WIDTH] {
         let mut state = self.midstate.map(Goldilocks::from_u64);
-        for (i, chunk) in nonce_low_be.chunks_exact(4).enumerate() {
-            state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
-        }
+        absorb_32(&mut state, &nonce_low_be);
         self.poseidon2.permute_mut(&mut state);
         state[0] += Goldilocks::ONE;
         state[1] += Goldilocks::ONE;
@@ -78,14 +79,19 @@ impl MidstateContext {
         state
     }
 
+    /// Run the second squeeze permutation, fill the low half, return the hash.
+    fn second_squeeze(&self, state: &mut [Goldilocks; SPONGE_WIDTH], hash: &mut [u8; 64]) -> U512 {
+        self.poseidon2.permute_mut(state);
+        hash[32..].copy_from_slice(&squeeze_bytes(state));
+        U512::from_big_endian(hash)
+    }
+
     /// Full 64-byte nonce hash as a U512; identical to `qpow_math::get_nonce_hash`.
     pub fn hash_nonce_low(&self, nonce_low_be: [u8; 32]) -> U512 {
         let mut state = self.squeeze_state(nonce_low_be);
         let mut hash = [0u8; 64];
-        write_squeeze(&state, &mut hash[..32]);
-        self.poseidon2.permute_mut(&mut state);
-        write_squeeze(&state, &mut hash[32..]);
-        U512::from_big_endian(&hash)
+        hash[..32].copy_from_slice(&squeeze_bytes(&state));
+        self.second_squeeze(&mut state, &mut hash)
     }
 
     /// Return the full hash when this nonce meets the target, else `None`.
@@ -94,14 +100,12 @@ impl MidstateContext {
     pub fn check_nonce_low(&self, nonce_low_be: [u8; 32]) -> Option<U512> {
         let mut state = self.squeeze_state(nonce_low_be);
         let mut hash = [0u8; 64];
-        write_squeeze(&state, &mut hash[..32]);
+        hash[..32].copy_from_slice(&squeeze_bytes(&state));
         // Big-endian comparison: a greater high half means the hash is out.
         if hash[..32] > self.target_high[..] {
             return None;
         }
-        self.poseidon2.permute_mut(&mut state);
-        write_squeeze(&state, &mut hash[32..]);
-        let h = U512::from_big_endian(&hash);
+        let h = self.second_squeeze(&mut state, &mut hash);
         (h < self.target).then_some(h)
     }
 }
@@ -175,11 +179,6 @@ pub fn step_nonce(nonce: U512) -> U512 {
 pub fn hash_from_nonce(ctx: &JobContext, nonce: U512) -> U512 {
     let nonce_bytes = nonce.to_big_endian();
     qpow_math::get_nonce_hash(ctx.header, nonce_bytes)
-}
-
-/// Check if hash meets difficulty target
-pub fn is_valid_hash(ctx: &JobContext, hash: U512) -> bool {
-    hash < ctx.target
 }
 
 /// Mine a range of nonces starting from start_nonce
@@ -329,8 +328,16 @@ mod tests {
     #[test]
     fn test_midstate_context_matches_get_nonce_hash() {
         // Cross-check the fast path against the reference over a spread of
-        // headers and nonces (including carries into the high 256 bits).
-        let headers = [[0u8; 32], [1u8; 32], [0xffu8; 32], [0x2au8; 32]];
+        // headers and nonces (including nonces with non-zero high halves; the
+        // carry *transition* itself is exercised in engine-cpu). The non-uniform
+        // header pins byte order and felt indexing in the absorb, which uniform
+        // [N; 32] headers cannot distinguish.
+        let headers = [
+            [0u8; 32],
+            [1u8; 32],
+            [0xffu8; 32],
+            core::array::from_fn(|i| (i as u8) ^ 0x5a),
+        ];
         let nonces = [
             U512::zero(),
             U512::from(1u64),
@@ -392,36 +399,24 @@ mod tests {
     }
 
     #[test]
-    fn test_midstate_resumes_to_full_hash() {
-        let header = [7u8; 32];
-        let nonce = (U512::from(0xdeadbeefcafeu64) << 300) | U512::from(0x1234567890abcdefu64);
-        let nonce_be = nonce.to_big_endian();
-
-        let mut state =
-            mining_midstate(header, nonce_be[..32].try_into().unwrap()).map(Goldilocks::from_u64);
-        let poseidon2 = Poseidon2::new();
-        for (i, chunk) in nonce_be[32..].chunks_exact(4).enumerate() {
-            state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+    fn test_check_nonce_low_boundary_targets() {
+        // Targets derived from a real hash, so target_high == hash_high by
+        // construction — the only case where the second squeeze decides.
+        // Pins the strict inequalities on both compares and the target split.
+        let header = [9u8; 32];
+        for n in 0..64u64 {
+            let nonce_be = U512::from(n).to_big_endian();
+            let hi = nonce_be[..32].try_into().unwrap();
+            let lo = nonce_be[32..].try_into().unwrap();
+            let h = get_nonce_hash(header, nonce_be);
+            for target in [h - U512::one(), h, h + U512::one()] {
+                let got = MidstateContext::new(header, target, hi).check_nonce_low(lo);
+                assert_eq!(got.is_some(), h < target, "nonce {n} target {target:x}");
+                if let Some(v) = got {
+                    assert_eq!(v, h);
+                }
+            }
         }
-        poseidon2.permute_mut(&mut state);
-        state[0] += Goldilocks::ONE;
-        state[1] += Goldilocks::ONE;
-        poseidon2.permute_mut(&mut state);
-
-        let mut hash = [0u8; 64];
-        for i in 0..4 {
-            hash[i * 8..(i + 1) * 8].copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
-        }
-        poseidon2.permute_mut(&mut state);
-        for i in 0..4 {
-            hash[32 + i * 8..32 + (i + 1) * 8]
-                .copy_from_slice(&state[i].as_canonical_u64().to_le_bytes());
-        }
-
-        assert_eq!(
-            U512::from_big_endian(&hash),
-            qpow_math::get_nonce_hash(header, nonce_be)
-        );
     }
 
     #[test]

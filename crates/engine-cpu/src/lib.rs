@@ -237,6 +237,43 @@ mod tests {
     }
 
     #[test]
+    fn finds_solution_across_nonce_high_carry() {
+        // A range straddling 2^256 forces the nonce increment to carry into
+        // the high 256 bits, so Found is only reachable if the midstate is
+        // rebuilt. The target admits the post-carry nonce alone, which also
+        // verifies the Found arm's nonce/work/hash.
+        let boundary = U512::one() << 256;
+        let engine = FastCpuEngine::new(1000);
+        let cancel = AtomicBool::new(false);
+        let cancel_check = AtomicBoolCancelCheck(&cancel);
+        for seed in 0..40u8 {
+            let header = [seed; 32];
+            let before = pow_core::get_nonce_hash(header, (boundary - U512::one()).to_big_endian());
+            let after = pow_core::get_nonce_hash(header, boundary.to_big_endian());
+            if after >= before {
+                continue; // only the post-carry nonce may win
+            }
+            let ctx = JobContext {
+                header,
+                difficulty: U512::one(),
+                target: after + U512::one(),
+            };
+            let range = Range {
+                start: boundary - U512::one(),
+                end: boundary + U512::from(4u64),
+            };
+            match engine.search_range(&ctx, range, &cancel_check) {
+                EngineStatus::Found { candidate, .. } => {
+                    assert_eq!(candidate.nonce, boundary);
+                    assert_eq!(candidate.hash, after);
+                    assert_eq!(candidate.work, boundary.to_big_endian());
+                }
+                other => panic!("seed {seed}: expected Found at the carry, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn engine_respects_immediate_cancellation() {
         let header = [1u8; 32];
         let difficulty = U512::from(1u64);
