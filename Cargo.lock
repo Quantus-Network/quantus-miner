@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "engine-cpu"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "criterion",
  "hex",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "engine-gpu"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "log",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "miner-cli"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "clap",
  "engine-cpu",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "miner-service"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "miner-telemetry"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "pool-service"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "pow-core"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "hex",
  "primitive-types 0.13.1",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "quic-transport"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "quantus-miner-api",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "solver-wasm"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "primitive-types 0.13.1",
  "qpow-math",
