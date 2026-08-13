@@ -15,11 +15,18 @@ use crate::state::{FoundBlock, Job, PoolState};
 
 /// Connect to a node as an external miner and keep the pool's job current.
 /// Solutions arriving on `solutions` are pushed upstream as JobResults.
+///
+/// Transient disconnects (node restart, network blip) clear the current job
+/// and reconnect with backoff — the pool process stays up. Only
+/// [`quic_transport::PermanentConnectError`] (bad pin / rejected auth) returns
+/// `Err` so `main` can shut down the HTTP side.
 pub async fn run_node_client(
     state: Arc<PoolState>,
     node_addr: SocketAddr,
+    auth_token: String,
+    tls_cert_sha256: String,
     mut solutions: Receiver<FoundBlock>,
-) {
+) -> Result<(), quic_transport::PermanentConnectError> {
     let mut reconnect_delay = Duration::from_secs(1);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
@@ -31,10 +38,10 @@ pub async fn run_node_client(
 
     loop {
         log::info!("Connecting to node at {}...", node_addr);
-        match quic_transport::connect(node_addr).await {
+        match quic_transport::connect(node_addr, &auth_token, &tls_cert_sha256).await {
             Ok((connection, mut send, mut recv)) => {
                 log::info!("Connected to node at {}", node_addr);
-                reconnect_delay = Duration::from_secs(1);
+                let mut authenticated = false;
 
                 loop {
                     // Retry any unsubmitted block before doing anything else.
@@ -58,7 +65,14 @@ pub async fn run_node_client(
                         biased;
 
                         reason = connection.closed() => {
-                            log::warn!("Node connection closed: {}", reason);
+                            let msg = reason.to_string();
+                            if !authenticated && msg.to_ascii_lowercase().contains("auth") {
+                                state.clear_job();
+                                return Err(quic_transport::PermanentConnectError(format!(
+                                    "node rejected miner auth ({msg}); check --auth-token / miner-auth-token"
+                                )));
+                            }
+                            log::warn!("Node connection closed: {}", msg);
                             break;
                         }
 
@@ -74,6 +88,7 @@ pub async fn run_node_client(
                         msg = read_message(&mut recv) => {
                             match msg {
                                 Ok(MinerMessage::NewJob(request)) => {
+                                    authenticated = true;
                                     match parse_job(&request.job_id, &request.mining_hash, &request.difficulty) {
                                         Ok(job) => state.set_job(job),
                                         Err(e) => log::warn!("Ignoring malformed job from node: {}", e),
@@ -90,9 +105,21 @@ pub async fn run_node_client(
                         }
                     }
                 }
+
+                // Node gone / stream dropped: stop handing out captchas on a
+                // stale header until we reconnect and get a fresh NewJob.
+                state.clear_job();
+                if authenticated {
+                    reconnect_delay = Duration::from_secs(1);
+                }
             }
             Err(e) => {
+                if let Some(perm) = e.downcast_ref::<quic_transport::PermanentConnectError>() {
+                    state.clear_job();
+                    return Err(quic_transport::PermanentConnectError(perm.0.clone()));
+                }
                 log::warn!("Failed to connect to node: {}", e);
+                state.clear_job();
             }
         }
 

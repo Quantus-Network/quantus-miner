@@ -32,6 +32,32 @@ struct Args {
     #[arg(long, env = "POOL_NODE_ADDR")]
     node_addr: Option<SocketAddr>,
 
+    /// Shared auth token from the node's `miner-auth-token` file.
+    /// Required when `--node-addr` is set. Prefer `--auth-token-file`.
+    #[arg(long, env = "POOL_AUTH_TOKEN", conflicts_with = "auth_token_file")]
+    auth_token: Option<String>,
+
+    /// Path to the node's `miner-auth-token` file (trimmed).
+    #[arg(long, env = "POOL_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
+    auth_token_file: Option<PathBuf>,
+
+    /// SHA-256 fingerprint of the node's miner TLS certificate (64 hex chars).
+    /// Required when `--node-addr` is set. Prefer `--tls-cert-sha256-file`.
+    #[arg(
+        long,
+        env = "POOL_TLS_CERT_SHA256",
+        conflicts_with = "tls_cert_sha256_file"
+    )]
+    tls_cert_sha256: Option<String>,
+
+    /// Path to the node's `miner-tls-cert-sha256` file.
+    #[arg(
+        long,
+        env = "POOL_TLS_CERT_SHA256_FILE",
+        conflicts_with = "tls_cert_sha256"
+    )]
+    tls_cert_sha256_file: Option<PathBuf>,
+
     /// Share difficulty: expected number of hashes per captcha solve.
     /// Measured browser WASM rate ≈ 120 kH/s on an M-series laptop, so
     /// 50000 ≈ 0.4 s desktop / ~2 s phone. Raise for stronger rate limiting.
@@ -73,6 +99,28 @@ async fn main() -> anyhow::Result<()> {
         log::warn!("Using default site secret; set --site-secret in production");
     }
 
+    // Resolve + validate node auth before starting HTTP / upstream tasks so a
+    // bad fingerprint or oversized token exits instead of retrying forever.
+    let node_upstream = match args.node_addr {
+        Some(addr) => {
+            let auth_token = resolve_auth_token(args.auth_token, args.auth_token_file)?;
+            let tls_cert_sha256 =
+                resolve_tls_cert_sha256(args.tls_cert_sha256, args.tls_cert_sha256_file)?;
+            quic_transport::validate_auth_config(&auth_token, &tls_cert_sha256)?;
+            Some((addr, auth_token, tls_cert_sha256))
+        }
+        None => {
+            if args.auth_token.is_some()
+                || args.auth_token_file.is_some()
+                || args.tls_cert_sha256.is_some()
+                || args.tls_cert_sha256_file.is_some()
+            {
+                log::warn!("Ignoring auth/TLS pin flags in standalone mode (no --node-addr)");
+            }
+            None
+        }
+    };
+
     let (solution_tx, solution_rx) = tokio::sync::mpsc::channel(16);
     let state = state::PoolState::new(
         U512::from(args.share_difficulty),
@@ -102,25 +150,101 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Job source.
-    {
-        let state = state.clone();
-        match args.node_addr {
-            Some(addr) => {
-                log::info!("Upstream: quantus-node at {}", addr);
-                tokio::spawn(upstream::run_node_client(state, addr, solution_rx));
-            }
-            None => {
-                log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
-                tokio::spawn(upstream::run_standalone(
-                    state,
-                    Duration::from_secs(args.standalone_job_secs),
+    // Job source. Node mode reconnects across transient disconnects (node
+    // restart); only a PermanentConnectError ends the task — then we tear
+    // down HTTP so the process does not look healthy on a bad token/pin.
+    match node_upstream {
+        Some((addr, auth_token, tls_cert_sha256)) => {
+            log::info!("Upstream: quantus-node at {}", addr);
+            let state_for_upstream = state.clone();
+            let upstream = tokio::spawn(async move {
+                upstream::run_node_client(
+                    state_for_upstream,
+                    addr,
+                    auth_token,
+                    tls_cert_sha256,
                     solution_rx,
-                ));
+                )
+                .await
+            });
+
+            tokio::select! {
+                biased;
+                result = upstream => {
+                    match result {
+                        Ok(Ok(())) => anyhow::bail!(
+                            "upstream task exited unexpectedly (should reconnect forever)"
+                        ),
+                        Ok(Err(e)) => {
+                            log::error!("Upstream permanent failure; shutting down: {e}");
+                            Err(e.into())
+                        }
+                        Err(e) => Err(anyhow::anyhow!("upstream task panicked: {e}")),
+                    }
+                }
+                _ = http::serve(state, limiter, args.http_addr, args.serve_dir) => Ok(()),
             }
         }
+        None => {
+            log::warn!("No --node-addr given: running STANDALONE with synthetic jobs");
+            let state_for_upstream = state.clone();
+            tokio::spawn(async move {
+                upstream::run_standalone(
+                    state_for_upstream,
+                    Duration::from_secs(args.standalone_job_secs),
+                    solution_rx,
+                )
+                .await
+            });
+            http::serve(state, limiter, args.http_addr, args.serve_dir).await;
+            Ok(())
+        }
     }
+}
 
-    http::serve(state, limiter, args.http_addr, args.serve_dir).await;
-    Ok(())
+fn resolve_auth_token(
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+) -> anyhow::Result<String> {
+    resolve_required_secret(
+        auth_token,
+        auth_token_file,
+        "--auth-token",
+        "--auth-token-file",
+        "when --node-addr is set, pass --auth-token-file <PATH> to the node's \
+         miner-auth-token file (or --auth-token <TOKEN>)",
+    )
+}
+
+fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> anyhow::Result<String> {
+    resolve_required_secret(
+        value,
+        file,
+        "--tls-cert-sha256",
+        "--tls-cert-sha256-file",
+        "when --node-addr is set, pass --tls-cert-sha256-file <PATH> to the node's \
+         miner-tls-cert-sha256 file (or --tls-cert-sha256 <HEX>; also printed in node logs)",
+    )
+}
+
+fn resolve_required_secret(
+    value: Option<String>,
+    file: Option<PathBuf>,
+    value_flag: &str,
+    file_flag: &str,
+    missing_msg: &str,
+) -> anyhow::Result<String> {
+    if let Some(value) = value {
+        let value = value.trim().to_string();
+        anyhow::ensure!(!value.is_empty(), "{value_flag} is empty");
+        return Ok(value);
+    }
+    if let Some(path) = file {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read {file_flag} {}: {}", path.display(), e))?;
+        let value = contents.trim().to_string();
+        anyhow::ensure!(!value.is_empty(), "{file_flag} {} is empty", path.display());
+        return Ok(value);
+    }
+    anyhow::bail!("{missing_msg}");
 }

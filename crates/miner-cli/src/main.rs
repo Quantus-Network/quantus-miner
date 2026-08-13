@@ -3,6 +3,7 @@ use engine_cpu::{AtomicBoolCancelCheck, EngineRange, MinerEngine};
 use miner_service::{run, ServiceConfig};
 use primitive_types::U512;
 use rand::RngCore;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -19,6 +20,34 @@ enum Command {
         /// Address of the node to connect to
         #[arg(long, env = "MINER_NODE_ADDR", default_value = "127.0.0.1:9833")]
         node_addr: std::net::SocketAddr,
+
+        /// Shared auth token from the node's `miner-auth-token` file
+        /// (`<base-path>/chains/<chain>/miner-auth-token`). Prefer `--auth-token-file`.
+        #[arg(long, env = "MINER_AUTH_TOKEN", conflicts_with = "auth_token_file")]
+        auth_token: Option<String>,
+
+        /// Path to the node's `miner-auth-token` file (trimmed). Preferred over
+        /// `--auth-token` so the secret is not placed on the command line.
+        #[arg(long, env = "MINER_AUTH_TOKEN_FILE", conflicts_with = "auth_token")]
+        auth_token_file: Option<PathBuf>,
+
+        /// SHA-256 fingerprint of the node's miner TLS certificate (64 hex chars).
+        /// Prefer `--tls-cert-sha256-file` pointing at `miner-tls-cert-sha256`
+        /// (the node also logs this fingerprint).
+        #[arg(
+            long,
+            env = "MINER_TLS_CERT_SHA256",
+            conflicts_with = "tls_cert_sha256_file"
+        )]
+        tls_cert_sha256: Option<String>,
+
+        /// Path to the node's `miner-tls-cert-sha256` file.
+        #[arg(
+            long,
+            env = "MINER_TLS_CERT_SHA256_FILE",
+            conflicts_with = "tls_cert_sha256"
+        )]
+        tls_cert_sha256_file: Option<PathBuf>,
 
         /// Number of CPU worker threads to use for mining (default: auto-detect)
         #[arg(long = "cpu-workers", env = "MINER_CPU_WORKERS")]
@@ -109,13 +138,21 @@ async fn main() {
 
     let Some(command) = args.command else {
         eprintln!("Error: No command provided. Use 'serve' to start mining (defaults to local node at 127.0.0.1:9833).");
-        eprintln!("Example: quantus-miner serve --node-addr 127.0.0.1:9833");
+        eprintln!(
+            "Example: quantus-miner serve --node-addr 127.0.0.1:9833 \
+             --auth-token-file /path/to/miner-auth-token \
+             --tls-cert-sha256-file /path/to/miner-tls-cert-sha256"
+        );
         std::process::exit(1);
     };
 
     match command {
         Command::Serve {
             node_addr,
+            auth_token,
+            auth_token_file,
+            tls_cert_sha256,
+            tls_cert_sha256_file,
             cpu_workers,
             gpu_devices,
             gpu_batch_size,
@@ -126,6 +163,27 @@ async fn main() {
             verbose,
         } => {
             init_logger(verbose);
+
+            let auth_token = match resolve_auth_token(auth_token, auth_token_file) {
+                Ok(token) => token,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let tls_cert_sha256 =
+                match resolve_tls_cert_sha256(tls_cert_sha256, tls_cert_sha256_file) {
+                    Ok(fp) => fp,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+            // Fail closed on permanent misconfig before metrics/workers start.
+            if let Err(e) = quic_transport::validate_auth_config(&auth_token, &tls_cert_sha256) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
 
             log::info!("Starting external miner service...");
 
@@ -141,6 +199,8 @@ async fn main() {
 
             let config = ServiceConfig {
                 node_addr,
+                auth_token,
+                tls_cert_sha256,
                 cpu_workers,
                 gpu_devices,
                 gpu_batch_size,
@@ -176,6 +236,57 @@ async fn main() {
             .await;
         }
     }
+}
+
+fn resolve_auth_token(
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+) -> Result<String, String> {
+    resolve_required_secret(
+        auth_token,
+        auth_token_file,
+        "--auth-token",
+        "--auth-token-file",
+        "miner auth token required: pass --auth-token-file <PATH> to the node's \
+         miner-auth-token file (or --auth-token <TOKEN>)",
+    )
+}
+
+fn resolve_tls_cert_sha256(value: Option<String>, file: Option<PathBuf>) -> Result<String, String> {
+    resolve_required_secret(
+        value,
+        file,
+        "--tls-cert-sha256",
+        "--tls-cert-sha256-file",
+        "TLS cert fingerprint required: pass --tls-cert-sha256-file <PATH> to the node's \
+         miner-tls-cert-sha256 file (or --tls-cert-sha256 <HEX>; also printed in node logs)",
+    )
+}
+
+fn resolve_required_secret(
+    value: Option<String>,
+    file: Option<PathBuf>,
+    value_flag: &str,
+    file_flag: &str,
+    missing_msg: &str,
+) -> Result<String, String> {
+    if let Some(value) = value {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            return Err(format!("{value_flag} is empty"));
+        }
+        return Ok(value);
+    }
+    if let Some(path) = file {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {file_flag} {}: {}", path.display(), e))?;
+        let value = contents.trim().to_string();
+        if value.is_empty() {
+            return Err(format!("{file_flag} {} is empty", path.display()));
+        }
+        return Ok(value);
+    }
+    Err(missing_msg.into())
 }
 
 fn init_logger(verbose: bool) {

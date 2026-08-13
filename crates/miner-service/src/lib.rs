@@ -23,6 +23,10 @@ use std::thread;
 pub struct ServiceConfig {
     /// Address of the node to connect to (e.g., "127.0.0.1:9833").
     pub node_addr: std::net::SocketAddr,
+    /// Shared secret that must match the node's miner auth token.
+    pub auth_token: String,
+    /// SHA-256 fingerprint (hex) of the node's miner TLS certificate DER.
+    pub tls_cert_sha256: String,
     /// Number of CPU worker threads to use for mining (None = auto-detect)
     pub cpu_workers: Option<usize>,
     /// Number of GPU devices to use for mining (None = auto-detect)
@@ -582,6 +586,8 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     log::info!("🌐 Connecting to node at {node_addr}");
     quic::connect_and_mine(
         config.node_addr,
+        &config.auth_token,
+        &config.tls_cert_sha256,
         cpu_engine,
         gpu_engine,
         cpu_workers,
