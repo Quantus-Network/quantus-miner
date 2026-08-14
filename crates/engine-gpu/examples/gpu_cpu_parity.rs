@@ -87,10 +87,27 @@ fn u512_to_u32s_le(v: U512) -> [u32; 16] {
     out
 }
 
+/// Which shader variant a bulk chunk runs on.
+#[derive(Clone, Copy)]
+enum BulkVariant {
+    U32,
+    U64,
+}
+
+impl BulkVariant {
+    fn name(self) -> &'static str {
+        match self {
+            BulkVariant::U32 => "32-bit",
+            BulkVariant::U64 => "native-u64",
+        }
+    }
+}
+
 struct BulkRunner {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
+    pipeline_u32: wgpu::ComputePipeline,
+    pipeline_u64: Option<wgpu::ComputePipeline>,
     midstate: wgpu::Buffer,
     start_nonce: wgpu::Buffer,
     cfg: wgpu::Buffer,
@@ -108,11 +125,11 @@ impl BulkRunner {
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .expect("no adapter");
-        let use_u64 = adapter.features().contains(wgpu::Features::SHADER_INT64);
+        let has_u64 = adapter.features().contains(wgpu::Features::SHADER_INT64);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                required_features: if use_u64 {
+                required_features: if has_u64 {
                     wgpu::Features::SHADER_INT64
                 } else {
                     wgpu::Features::empty()
@@ -121,27 +138,32 @@ impl BulkRunner {
             })
             .await
             .unwrap();
-        let base = if use_u64 {
-            include_str!("../src/mining_u64.wgsl")
-        } else {
-            include_str!("../src/mining.wgsl")
+        let mk_pipeline = |base: &str| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(format!("{base}\n{BULK_KERNEL}").into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &shader,
+                entry_point: Some("bulk_hash"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         };
+        // Always build the 32-bit fallback; add the native-u64 variant when supported
+        // so one run exercises both shader variants.
+        let pipeline_u32 = mk_pipeline(include_str!("../src/mining.wgsl"));
+        let pipeline_u64 = has_u64.then(|| mk_pipeline(include_str!("../src/mining_u64.wgsl")));
         println!(
-            "bulk: using {} shader",
-            if use_u64 { "native-u64" } else { "32-bit" }
+            "bulk: 32-bit shader enabled, native-u64 shader {}",
+            if pipeline_u64.is_some() {
+                "enabled"
+            } else {
+                "unavailable"
+            }
         );
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(format!("{base}\n{BULK_KERNEL}").into()),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &shader,
-            entry_point: Some("bulk_hash"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let mk = |size: u64, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -153,7 +175,8 @@ impl BulkRunner {
         use wgpu::BufferUsages as U;
         let out_size = chunk as u64 * 64;
         BulkRunner {
-            pipeline,
+            pipeline_u32,
+            pipeline_u64,
             midstate: mk(96, U::STORAGE | U::COPY_DST),
             start_nonce: mk(64, U::STORAGE | U::COPY_DST),
             cfg: mk(12, U::STORAGE | U::COPY_DST),
@@ -164,7 +187,24 @@ impl BulkRunner {
         }
     }
 
-    fn run_chunk(&self, header: [u8; 32], start: U512, count: u32) -> Vec<u32> {
+    fn has_u64(&self) -> bool {
+        self.pipeline_u64.is_some()
+    }
+
+    fn run_chunk(
+        &self,
+        header: [u8; 32],
+        start: U512,
+        count: u32,
+        variant: BulkVariant,
+    ) -> Vec<u32> {
+        let pipeline = match variant {
+            BulkVariant::U32 => &self.pipeline_u32,
+            BulkVariant::U64 => self
+                .pipeline_u64
+                .as_ref()
+                .expect("native-u64 variant requested but unsupported"),
+        };
         let nonce_be = start.to_big_endian();
         let mid = pow_core::mining_midstate(header, nonce_be[..32].try_into().unwrap());
         let mut mid_u32 = [0u32; 24];
@@ -182,7 +222,7 @@ impl BulkRunner {
         self.queue
             .write_buffer(&self.cfg, 0, bytemuck::cast_slice(&[count, 1u32, count]));
 
-        let layout = self.pipeline.get_bind_group_layout(0);
+        let layout = pipeline.get_bind_group_layout(0);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &layout,
@@ -214,7 +254,7 @@ impl BulkRunner {
                 label: None,
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.pipeline);
+            cpass.set_pipeline(pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.dispatch_workgroups(count.div_ceil(256), 1, 1);
         }
@@ -248,10 +288,12 @@ fn run_bulk_phase(rng: &mut ChaCha8Rng, total: u64, seed: u64) {
         .map(|n| n.get())
         .unwrap_or(4);
     let mut verified = 0u64;
+    let mut verified_u64 = 0u64;
     let mut chunk_idx = 0u64;
 
     while verified < total {
-        let count = chunk.min((total - verified) as u32);
+        // Clamp in u64 first: `(total - verified) as u32` truncates and can wrap to 0
+        let count = (total - verified).min(u64::from(chunk)) as u32;
         let mut header = [0u8; 32];
         rng.fill_bytes(&mut header);
         let mut start_bytes = [0u8; 64];
@@ -261,7 +303,13 @@ fn run_bulk_phase(rng: &mut ChaCha8Rng, total: u64, seed: u64) {
         start_bytes[32] = 0;
         let start = U512::from_big_endian(&start_bytes);
 
-        let gpu_hashes = runner.run_chunk(header, start, count);
+        // Alternate shader variants per chunk so both are exercised in one run
+        let variant = if runner.has_u64() && !chunk_idx.is_multiple_of(2) {
+            BulkVariant::U64
+        } else {
+            BulkVariant::U32
+        };
+        let gpu_hashes = runner.run_chunk(header, start, count, variant);
 
         std::thread::scope(|s| {
             let gpu = &gpu_hashes;
@@ -277,7 +325,8 @@ fn run_bulk_phase(rng: &mut ChaCha8Rng, total: u64, seed: u64) {
                         let got = U512::from_little_endian(bytemuck::cast_slice(words));
                         assert_eq!(
                             got, expected,
-                            "seed {seed} bulk chunk {chunk_idx} index {i}: GPU hash != CPU hash for nonce {nonce}"
+                            "seed {seed} bulk chunk {chunk_idx} ({}) index {i}: GPU hash != CPU hash for nonce {nonce}",
+                            variant.name()
                         );
                     }
                 });
@@ -285,12 +334,18 @@ fn run_bulk_phase(rng: &mut ChaCha8Rng, total: u64, seed: u64) {
         });
 
         verified += count as u64;
+        if let BulkVariant::U64 = variant {
+            verified_u64 += count as u64;
+        }
         chunk_idx += 1;
         if chunk_idx.is_multiple_of(4) {
             println!("  bulk: {verified}/{total} hashes verified");
         }
     }
-    println!("BULK OK: {verified} full hashes verified vs CPU (seed {seed})");
+    println!(
+        "BULK OK: {verified} full hashes verified vs CPU (seed {seed}): {} 32-bit, {verified_u64} native-u64",
+        verified - verified_u64
+    );
 }
 
 fn pollster_block<F: std::future::Future>(fut: F) -> F::Output {
