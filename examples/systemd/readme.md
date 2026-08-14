@@ -18,6 +18,18 @@ Prerequisites
 - The quantus-miner binary installed at /usr/local/bin/quantus-miner (or adjust ExecStart).
 - A service account (recommended):
   - sudo useradd --system --no-create-home --shell /usr/sbin/nologin quantus
+- The node's miner auth token and TLS cert fingerprint (required since the node
+  authenticates miners). The node creates both on first start with
+  --miner-listen-port and logs their paths (default:
+  `<base-path>/chains/<chain>/miner-auth-token` and
+  `<base-path>/chains/<chain>/miner-tls-cert-sha256`). Copy them where the
+  service can read them — the unit sets ProtectHome=true, so paths under /home
+  or /root are not readable:
+  - sudo install -d -m 0755 /etc/quantus-miner
+  - sudo install -m 0640 -o root -g quantus \
+      "<base-path>/chains/<chain>/miner-auth-token" /etc/quantus-miner/miner-auth-token
+  - sudo install -m 0644 \
+      "<base-path>/chains/<chain>/miner-tls-cert-sha256" /etc/quantus-miner/miner-tls-cert-sha256
 
 Install (unit)
 1) Copy the service file
@@ -26,21 +38,22 @@ Install (unit)
 2) Create a writable working directory (managed by systemd via StateDirectory)
    sudo install -d -o quantus -g quantus /var/lib/quantus-miner
 
-3) (Optional) Provide environment variables
+3) Provide environment variables (auth vars are REQUIRED)
    - Debian/Ubuntu:   sudoedit /etc/default/quantus-miner
    - RHEL/CentOS/Fed: sudoedit /etc/sysconfig/quantus-miner
 
-   Common variables (examples):
-   MINER_ENGINE=cpu
-   MINER_PORT=9833
-   MINER_METRICS_PORT=9900         # enable Prometheus exporter
-   MINER_WORKERS=4                 # leave unset to use default (50% of effective CPUs)
-   MINER_PROGRESS_CHUNK_MS=2000
-   # Throttling engine (cpu-chain-manipulator) knobs:
-   # MINER_MANIP_SOLVED_BLOCKS=0
-   # MINER_MANIP_BASE_DELAY_NS=500000
-   # MINER_MANIP_STEP_BATCH=10000
-   # MINER_MANIP_THROTTLE_CAP=0
+   Common variables (examples). Note: systemd EnvironmentFile= does not strip
+   inline comments — keep each assignment on its own line with nothing after
+   the value.
+   MINER_NODE_ADDR=127.0.0.1:9833
+   # Required: node auth token + TLS cert pin (see Prerequisites)
+   MINER_AUTH_TOKEN_FILE=/etc/quantus-miner/miner-auth-token
+   MINER_TLS_CERT_SHA256_FILE=/etc/quantus-miner/miner-tls-cert-sha256
+   # CPU worker threads; leave unset to auto-detect (~50% of available CPUs)
+   MINER_CPU_WORKERS=4
+   MINER_GPU_DEVICES=0
+   # Prometheus exporter port (the exporter is always on; this only changes the port)
+   MINER_METRICS_PORT=9900
    # Extra CLI flags (kept stable ExecStart):
    # EXTRA_MINER_FLAGS="--some-future-flag value"
 
@@ -65,31 +78,44 @@ Dedicated hardware (miner only)
   sudo systemctl restart quantus-miner
 
 Configuration reference (environment variables)
-- MINER_ENGINE
-  - cpu (default), cpu-chain-manipulator
-  - gpu for high-performance GPU mining
-- MINER_PORT
-  - HTTP API port (default 9833)
+- MINER_NODE_ADDR
+  - Address of the node's miner QUIC endpoint (default 127.0.0.1:9833).
+- MINER_AUTH_TOKEN_FILE (required, or MINER_AUTH_TOKEN inline)
+  - Path to a copy of the node's miner-auth-token file. The file variant is
+    preferred so the secret stays off the command line and out of `systemctl show`.
+- MINER_TLS_CERT_SHA256_FILE (required, or MINER_TLS_CERT_SHA256 inline)
+  - Path to a copy of the node's miner-tls-cert-sha256 file (the fingerprint is
+    also printed in the node's startup logs).
+- MINER_CPU_WORKERS
+  - CPU worker threads. If unset, auto-detected.
+- MINER_GPU_DEVICES
+  - Number of GPU devices to use. If unset, auto-detected.
+- MINER_GPU_BATCH_SIZE / MINER_CPU_BATCH_SIZE
+  - Nonces/hashes per cancellation check (defaults 1000000 / 10000).
+- MINER_GPU_THROTTLE_MS
+  - Delay between GPU batches in milliseconds (default 0 = no throttle).
 - MINER_METRICS_PORT
-  - Enable Prometheus exporter when set (e.g., 9900). If unset, metrics exporter is disabled.
-- MINER_WORKERS
-  - Worker threads (logical CPUs). If unset, defaults to ~50% of effective CPUs (clamped to [1, effective-1]).
-- MINER_PROGRESS_CHUNK_MS
-  - Target milliseconds for per-thread progress updates (default 2000ms).
-- Throttling engine (cpu-chain-manipulator) knobs
-  - MINER_MANIP_SOLVED_BLOCKS, MINER_MANIP_BASE_DELAY_NS, MINER_MANIP_STEP_BATCH, MINER_MANIP_THROTTLE_CAP
+  - Prometheus exporter port (default 9900). The exporter is ALWAYS on and
+    binds plaintext HTTP on all interfaces (0.0.0.0); this variable only
+    changes the port — there is no disable or loopback-only option. Firewall
+    the port or restrict it to your monitoring network.
+- MINER_ALLOW_INTEGRATED
+  - Allow integrated GPUs even when discrete GPUs are present.
 - EXTRA_MINER_FLAGS
   - Optional extra CLI flags appended to ExecStart.
 
 CPU affinity, cpusets, and workers
-- The miner detects the effective CPU capacity (logical CPUs) visible to the process by preferring cgroup v2 cpuset (cpuset.cpus.effective), falling back to v1, else using all logical CPUs.
-- At startup (debug level), the miner logs the detected cpuset mask (if any).
-- A Prometheus gauge miner_effective_cpus is emitted (when metrics are enabled) with the effective count for dashboards/alerts.
-- If --workers (or MINER_WORKERS) exceeds effective CPUs, it is clamped and a warning is logged.
-- If omitted, the miner defaults to ~50% of effective CPUs (but always at least 1 and less than or equal to effective-1).
+- The miner counts available CPUs via the process CPU affinity mask (num_cpus),
+  so a systemd CPUAffinity= setting (or a cgroup cpuset) is reflected in the count.
+- If MINER_CPU_WORKERS is unset, the miner uses ~50% of the detected CPUs
+  (at least 1) and logs the choice at startup ("Auto-detected N CPU workers").
+- An explicit MINER_CPU_WORKERS value is used as-is — it is NOT clamped to the
+  affinity mask, so an oversized value oversubscribes the pinned CPUs.
+- A Prometheus gauge miner_effective_cpus is emitted with the detected count for dashboards/alerts.
 - When pinning CPUAffinity at the systemd level:
   - Ensure CPUAffinity is a subset of the cgroup cpuset mask.
-  - Consider setting MINER_WORKERS to match the number of CPUs in the affinity mask if you want full utilization, or rely on the default 50% policy.
+  - Set MINER_CPU_WORKERS to the number of CPUs in the affinity mask for full
+    utilization, or leave it unset for the ~50% default.
 
 Security hardening (in the unit)
 - NoNewPrivileges=true
@@ -101,6 +127,9 @@ Security hardening (in the unit)
 - RestrictSUIDSGID=true
 - SystemCallFilter=@system-service
 Adjust or relax as needed for your environment.
+Note: the Prometheus exporter always listens on 0.0.0.0:<MINER_METRICS_PORT>
+(default 9900) — the unit cannot disable it or bind it to loopback. Firewall
+the port if the host is reachable from untrusted networks.
 
 Validation and troubleshooting
 - Check service status and logs:
@@ -110,20 +139,28 @@ Validation and troubleshooting
   taskset -cp "$pid"
 - Verify cpuset mask (cgroup v2):
   cat /sys/fs/cgroup/cpuset.cpus.effective
-- Metrics:
-  - If MINER_METRICS_PORT is set, curl http://127.0.0.1:<port>/metrics
+- Metrics (always on, default port 9900):
+  - curl http://127.0.0.1:${MINER_METRICS_PORT:-9900}/metrics
   - Look for miner_effective_cpus and per-job/thread metrics.
 - Common pitfalls:
   - ExecStart path wrong (ensure /usr/local/bin/quantus-miner exists and is executable).
   - Service user/group missing (create quantus or adjust User/Group).
+  - Miner exits immediately with "miner auth token required" / "TLS cert fingerprint required":
+    set MINER_AUTH_TOKEN_FILE and MINER_TLS_CERT_SHA256_FILE in the env file (see Prerequisites).
+  - Auth/TLS files unreadable: ProtectHome=true blocks /home and /root; copy the
+    files to /etc/quantus-miner/ and make them readable by the quantus user.
+  - Node rejects the miner after the node's base path changed or its credential
+    files (miner-auth-token, miner-tls-cert.der/-key.der) were deleted and
+    regenerated: re-copy both files and restart. (A plain purge-chain does NOT
+    rotate them — it removes only the database, so the same token and cert are
+    reloaded on the next start.)
   - CPUAffinity not a subset of the cgroup cpuset (adjust cpuset or affinity).
-  - MINER_ENGINE set to gpu-* (currently unimplemented, exits with clear error).
   - Insufficient permissions to write WorkingDirectory (systemd StateDirectory creates /var/lib/quantus-miner with correct ownership).
 
 Operational tips
-- For shared machines: prefer 10-shared-hardware.conf and leave MINER_WORKERS unset (defaults to ~50%).
-- For dedicated machines: use 20-dedicated-hardware.conf and set MINER_WORKERS to the number of CPUs in CPUAffinity (or omit CPUAffinity to inherit cpuset).
-- Use RUST_LOG=info,miner=debug temporarily to verify startup detection (cpuset mask, effective CPUs) and to observe mining loop behavior; then turn back down to reduce log volume.
+- For shared machines: prefer 10-shared-hardware.conf and leave MINER_CPU_WORKERS unset (auto-detect).
+- For dedicated machines: use 20-dedicated-hardware.conf and set MINER_CPU_WORKERS to the number of CPUs in CPUAffinity (or omit CPUAffinity to inherit cpuset).
+- Use RUST_LOG=info,miner=debug temporarily to verify startup detection (worker auto-detection, GPU discovery) and to observe mining loop behavior; then turn back down to reduce log volume.
 
 Support
 - Repository: https://github.com/Quantus-Network/quantus-miner
