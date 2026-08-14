@@ -42,14 +42,18 @@ Install (unit)
    - Debian/Ubuntu:   sudoedit /etc/default/quantus-miner
    - RHEL/CentOS/Fed: sudoedit /etc/sysconfig/quantus-miner
 
-   Common variables (examples):
+   Common variables (examples). Note: systemd EnvironmentFile= does not strip
+   inline comments — keep each assignment on its own line with nothing after
+   the value.
    MINER_NODE_ADDR=127.0.0.1:9833
    # Required: node auth token + TLS cert pin (see Prerequisites)
    MINER_AUTH_TOKEN_FILE=/etc/quantus-miner/miner-auth-token
    MINER_TLS_CERT_SHA256_FILE=/etc/quantus-miner/miner-tls-cert-sha256
-   MINER_CPU_WORKERS=4             # leave unset to auto-detect
+   # CPU worker threads; leave unset to auto-detect (~50% of available CPUs)
+   MINER_CPU_WORKERS=4
    MINER_GPU_DEVICES=0
-   MINER_METRICS_PORT=9900         # Prometheus exporter port
+   # Prometheus exporter port
+   MINER_METRICS_PORT=9900
    # Extra CLI flags (kept stable ExecStart):
    # EXTRA_MINER_FLAGS="--some-future-flag value"
 
@@ -98,13 +102,17 @@ Configuration reference (environment variables)
   - Optional extra CLI flags appended to ExecStart.
 
 CPU affinity, cpusets, and workers
-- The miner detects the effective CPU capacity (logical CPUs) visible to the process by preferring cgroup v2 cpuset (cpuset.cpus.effective), falling back to v1, else using all logical CPUs.
-- At startup (debug level), the miner logs the detected cpuset mask (if any).
-- A Prometheus gauge miner_effective_cpus is emitted (when metrics are enabled) with the effective count for dashboards/alerts.
-- If --cpu-workers (or MINER_CPU_WORKERS) exceeds effective CPUs, it is clamped and a warning is logged.
+- The miner counts available CPUs via the process CPU affinity mask (num_cpus),
+  so a systemd CPUAffinity= setting (or a cgroup cpuset) is reflected in the count.
+- If MINER_CPU_WORKERS is unset, the miner uses ~50% of the detected CPUs
+  (at least 1) and logs the choice at startup ("Auto-detected N CPU workers").
+- An explicit MINER_CPU_WORKERS value is used as-is — it is NOT clamped to the
+  affinity mask, so an oversized value oversubscribes the pinned CPUs.
+- A Prometheus gauge miner_effective_cpus is emitted (when metrics are enabled) with the detected count for dashboards/alerts.
 - When pinning CPUAffinity at the systemd level:
   - Ensure CPUAffinity is a subset of the cgroup cpuset mask.
-  - Consider setting MINER_CPU_WORKERS to match the number of CPUs in the affinity mask if you want full utilization, or rely on auto-detection.
+  - Set MINER_CPU_WORKERS to the number of CPUs in the affinity mask for full
+    utilization, or leave it unset for the ~50% default.
 
 Security hardening (in the unit)
 - NoNewPrivileges=true
@@ -143,7 +151,7 @@ Validation and troubleshooting
 Operational tips
 - For shared machines: prefer 10-shared-hardware.conf and leave MINER_CPU_WORKERS unset (auto-detect).
 - For dedicated machines: use 20-dedicated-hardware.conf and set MINER_CPU_WORKERS to the number of CPUs in CPUAffinity (or omit CPUAffinity to inherit cpuset).
-- Use RUST_LOG=info,miner=debug temporarily to verify startup detection (cpuset mask, effective CPUs) and to observe mining loop behavior; then turn back down to reduce log volume.
+- Use RUST_LOG=info,miner=debug temporarily to verify startup detection (worker auto-detection, GPU discovery) and to observe mining loop behavior; then turn back down to reduce log volume.
 
 Support
 - Repository: https://github.com/Quantus-Network/quantus-miner

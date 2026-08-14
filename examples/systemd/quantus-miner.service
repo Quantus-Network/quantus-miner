@@ -28,8 +28,9 @@
 #     miner-auth-token and miner-tls-cert-sha256 files somewhere this service
 #     can read (e.g. /etc/quantus-miner/): ProtectHome=true below blocks
 #     paths under /home and /root, where the node's base path usually lives.
-#   - The service logs the detected cpuset mask (if any) and emits a
-#     miner_effective_cpus metric when metrics are enabled.
+#   - The miner counts CPUs via the process affinity mask (so CPUAffinity=
+#     is respected) and emits a miner_effective_cpus metric when metrics are
+#     enabled.
 
 [Unit]
 Description=Quantus External Miner Service
