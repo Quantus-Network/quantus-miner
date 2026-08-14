@@ -15,12 +15,19 @@
 #
 # Notes:
 #   - The miner CLI supports environment variables for all flags (see README):
-#       MINER_PORT, MINER_METRICS_PORT, MINER_WORKERS, MINER_ENGINE,
-#       MINER_PROGRESS_CHUNK_MS,
-#       MINER_MANIP_SOLVED_BLOCKS, MINER_MANIP_BASE_DELAY_NS,
-#       MINER_MANIP_STEP_BATCH, MINER_MANIP_THROTTLE_CAP.
+#       MINER_NODE_ADDR, MINER_AUTH_TOKEN_FILE (or MINER_AUTH_TOKEN),
+#       MINER_TLS_CERT_SHA256_FILE (or MINER_TLS_CERT_SHA256),
+#       MINER_CPU_WORKERS, MINER_GPU_DEVICES, MINER_GPU_BATCH_SIZE,
+#       MINER_CPU_BATCH_SIZE, MINER_GPU_THROTTLE_MS, MINER_METRICS_PORT,
+#       MINER_ALLOW_INTEGRATED, MINER_VERBOSE.
 #     This unit relies on those env vars (set in /etc/default|/etc/sysconfig) so
 #     ExecStart can remain stable and simple.
+#   - The node requires miner auth: MINER_AUTH_TOKEN_FILE and
+#     MINER_TLS_CERT_SHA256_FILE (or their inline variants) are mandatory —
+#     the miner exits at startup without them. Copy the node's
+#     miner-auth-token and miner-tls-cert-sha256 files somewhere this service
+#     can read (e.g. /etc/quantus-miner/): ProtectHome=true below blocks
+#     paths under /home and /root, where the node's base path usually lives.
 #   - The service logs the detected cpuset mask (if any) and emits a
 #     miner_effective_cpus metric when metrics are enabled.
 
@@ -53,7 +60,9 @@ Environment=RUST_LOG=info
 
 # Launch the miner. All configuration should be passed via environment vars
 # (preferred) or via EXTRA_MINER_FLAGS in the env file for additional arguments.
-ExecStart=/usr/local/bin/quantus-miner $EXTRA_MINER_FLAGS
+# MINER_AUTH_TOKEN_FILE and MINER_TLS_CERT_SHA256_FILE must be set in the env
+# file (see readme.md) or the miner exits immediately.
+ExecStart=/usr/local/bin/quantus-miner serve $EXTRA_MINER_FLAGS
 
 # Graceful shutdown and restart behavior
 Restart=always
