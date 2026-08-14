@@ -52,7 +52,7 @@ Install (unit)
    # CPU worker threads; leave unset to auto-detect (~50% of available CPUs)
    MINER_CPU_WORKERS=4
    MINER_GPU_DEVICES=0
-   # Prometheus exporter port
+   # Prometheus exporter port (the exporter is always on; this only changes the port)
    MINER_METRICS_PORT=9900
    # Extra CLI flags (kept stable ExecStart):
    # EXTRA_MINER_FLAGS="--some-future-flag value"
@@ -95,7 +95,10 @@ Configuration reference (environment variables)
 - MINER_GPU_THROTTLE_MS
   - Delay between GPU batches in milliseconds (default 0 = no throttle).
 - MINER_METRICS_PORT
-  - Prometheus exporter port (default 9900).
+  - Prometheus exporter port (default 9900). The exporter is ALWAYS on and
+    binds plaintext HTTP on all interfaces (0.0.0.0); this variable only
+    changes the port — there is no disable or loopback-only option. Firewall
+    the port or restrict it to your monitoring network.
 - MINER_ALLOW_INTEGRATED
   - Allow integrated GPUs even when discrete GPUs are present.
 - EXTRA_MINER_FLAGS
@@ -108,7 +111,7 @@ CPU affinity, cpusets, and workers
   (at least 1) and logs the choice at startup ("Auto-detected N CPU workers").
 - An explicit MINER_CPU_WORKERS value is used as-is — it is NOT clamped to the
   affinity mask, so an oversized value oversubscribes the pinned CPUs.
-- A Prometheus gauge miner_effective_cpus is emitted (when metrics are enabled) with the detected count for dashboards/alerts.
+- A Prometheus gauge miner_effective_cpus is emitted with the detected count for dashboards/alerts.
 - When pinning CPUAffinity at the systemd level:
   - Ensure CPUAffinity is a subset of the cgroup cpuset mask.
   - Set MINER_CPU_WORKERS to the number of CPUs in the affinity mask for full
@@ -124,6 +127,9 @@ Security hardening (in the unit)
 - RestrictSUIDSGID=true
 - SystemCallFilter=@system-service
 Adjust or relax as needed for your environment.
+Note: the Prometheus exporter always listens on 0.0.0.0:<MINER_METRICS_PORT>
+(default 9900) — the unit cannot disable it or bind it to loopback. Firewall
+the port if the host is reachable from untrusted networks.
 
 Validation and troubleshooting
 - Check service status and logs:
@@ -133,8 +139,8 @@ Validation and troubleshooting
   taskset -cp "$pid"
 - Verify cpuset mask (cgroup v2):
   cat /sys/fs/cgroup/cpuset.cpus.effective
-- Metrics:
-  - If MINER_METRICS_PORT is set, curl http://127.0.0.1:<port>/metrics
+- Metrics (always on, default port 9900):
+  - curl http://127.0.0.1:${MINER_METRICS_PORT:-9900}/metrics
   - Look for miner_effective_cpus and per-job/thread metrics.
 - Common pitfalls:
   - ExecStart path wrong (ensure /usr/local/bin/quantus-miner exists and is executable).
@@ -143,8 +149,11 @@ Validation and troubleshooting
     set MINER_AUTH_TOKEN_FILE and MINER_TLS_CERT_SHA256_FILE in the env file (see Prerequisites).
   - Auth/TLS files unreadable: ProtectHome=true blocks /home and /root; copy the
     files to /etc/quantus-miner/ and make them readable by the quantus user.
-  - Node rejects the miner after a chain purge or base-path change: the node
-    regenerated its token and TLS cert — re-copy both files and restart.
+  - Node rejects the miner after the node's base path changed or its credential
+    files (miner-auth-token, miner-tls-cert.der/-key.der) were deleted and
+    regenerated: re-copy both files and restart. (A plain purge-chain does NOT
+    rotate them — it removes only the database, so the same token and cert are
+    reloaded on the next start.)
   - CPUAffinity not a subset of the cgroup cpuset (adjust cpuset or affinity).
   - Insufficient permissions to write WorkingDirectory (systemd StateDirectory creates /var/lib/quantus-miner with correct ownership).
 

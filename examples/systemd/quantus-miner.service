@@ -29,8 +29,10 @@
 #     can read (e.g. /etc/quantus-miner/): ProtectHome=true below blocks
 #     paths under /home and /root, where the node's base path usually lives.
 #   - The miner counts CPUs via the process affinity mask (so CPUAffinity=
-#     is respected) and emits a miner_effective_cpus metric when metrics are
-#     enabled.
+#     is respected) and emits a miner_effective_cpus metric.
+#   - The Prometheus exporter is ALWAYS on and binds plaintext HTTP on
+#     0.0.0.0:9900 by default; MINER_METRICS_PORT only changes the port.
+#     Firewall the port if the host is reachable from untrusted networks.
 
 [Unit]
 Description=Quantus External Miner Service
