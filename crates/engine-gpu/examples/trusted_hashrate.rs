@@ -46,9 +46,10 @@ impl Runner {
             .await
             .unwrap();
 
+        let kernel = engine_gpu::Kernel::for_adapter(&adapter);
         let desc = wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("../src/mining_u64.wgsl").into()),
+            label: Some(kernel.label()),
+            source: wgpu::ShaderSource::Wgsl(kernel.source().into()),
         };
         let shader = if trusted {
             unsafe {

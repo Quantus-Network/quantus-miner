@@ -13,37 +13,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("no GPU adapter");
 
     let mut failures = 0usize;
+    let has_int64 = adapter.features().contains(wgpu::Features::SHADER_INT64);
 
-    {
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await?;
-        failures += run_suite(
-            &device,
-            &queue,
-            include_str!("mining.wgsl"),
-            "32-bit (mining.wgsl)",
-        )
-        .await;
-    }
-
-    if adapter.features().contains(wgpu::Features::SHADER_INT64) {
+    for kernel in engine_gpu::Kernel::all() {
+        if kernel.needs_int64() && !has_int64 {
+            println!(
+                "\nSHADER_INT64 not supported on this adapter; skipping {}",
+                kernel.label()
+            );
+            continue;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("u64 Test Device"),
-                required_features: wgpu::Features::SHADER_INT64,
+                label: Some(kernel.label()),
+                required_features: if kernel.needs_int64() {
+                    wgpu::Features::SHADER_INT64
+                } else {
+                    wgpu::Features::empty()
+                },
                 ..Default::default()
             })
             .await?;
-        failures += run_suite(
-            &device,
-            &queue,
-            include_str!("mining_u64.wgsl"),
-            "native-u64 (mining_u64.wgsl)",
-        )
-        .await;
-    } else {
-        println!("\nSHADER_INT64 not supported on this adapter; skipping mining_u64.wgsl suite");
+        failures += run_suite(&device, &queue, kernel.source(), kernel.label()).await;
     }
 
     if failures > 0 {

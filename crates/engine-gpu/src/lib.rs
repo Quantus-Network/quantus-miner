@@ -2,9 +2,12 @@
 #![deny(unsafe_code)]
 
 mod gpu_tiers;
+mod kernels;
 
 pub mod end_to_end_tests;
 pub mod tests;
+
+pub use kernels::Kernel;
 
 use engine_cpu::{CancelCheck, Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use pow_core::{format_hashrate, format_u512, JobContext};
@@ -153,10 +156,10 @@ impl GpuContext {
 /// Create the mining shader module without naga's runtime bounds checks and
 /// loop bounding (~9% faster kernels).
 ///
-/// SAFETY: the sources are the static mining shaders compiled into this binary;
+/// SAFETY: the sources are the static mining kernels compiled into this binary;
 /// every buffer access is a constant-bounded loop index into fixed-size
 /// bindings the engine itself allocates, and all loops have static bounds
-/// (verified by the component test suites against both shader variants).
+/// (verified by the component test suites against every kernel path).
 #[allow(unsafe_code)]
 fn create_trusted_shader(device: &wgpu::Device, shader_source: &str) -> wgpu::ShaderModule {
     unsafe {
@@ -357,15 +360,13 @@ impl GpuEngine {
             );
             log::debug!(target: "gpu_engine", "Adapter {i} raw info: {info:?}");
 
-            // Prefer the native-u64 shader where supported (Apple/NVIDIA/modern AMD):
-            // Goldilocks arithmetic on u64 is far cheaper than 32-bit limb emulation.
-            let use_u64 = adapter.features().contains(wgpu::Features::SHADER_INT64);
+            let kernel = Kernel::for_adapter(&adapter);
 
             // Try to initialize this adapter with a proper timeout.
             // If the driver hangs, we'll skip this adapter after the timeout.
             let device_future = adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("Mining Device"),
-                required_features: if use_u64 {
+                required_features: if kernel.needs_int64() {
                     wgpu::Features::SHADER_INT64
                 } else {
                     wgpu::Features::empty()
@@ -412,18 +413,14 @@ impl GpuEngine {
             // Shader and pipeline creation are synchronous - can't timeout, but usually fast
             let pipeline_start = std::time::Instant::now();
 
-            let shader_source = if use_u64 {
-                include_str!("mining_u64.wgsl")
-            } else {
-                include_str!("mining.wgsl")
-            };
             log::info!(
                 target: "gpu_engine",
-                "GPU device {i} ({}) using {} shader",
+                "GPU device {i} ({}) using {} [{}]",
                 info.name,
-                if use_u64 { "native-u64" } else { "32-bit" }
+                kernel.label(),
+                kernel.id()
             );
-            let shader = create_trusted_shader(&device, shader_source);
+            let shader = create_trusted_shader(&device, kernel.source());
 
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Mining Pipeline"),
