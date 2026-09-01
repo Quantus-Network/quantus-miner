@@ -1,4 +1,4 @@
-// Native-u64 Poseidon2 mining kernel (v4.0.0). Default path for non-Apple GPUs.
+// Native-u64 Poseidon2 mining kernel. Default path for non-Apple GPUs.
 // Requires wgpu Features::SHADER_INT64. Bit-exact with mining.wgsl / pow_core.
 
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;

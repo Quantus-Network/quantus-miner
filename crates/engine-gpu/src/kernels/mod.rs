@@ -2,9 +2,9 @@
 //!
 //! Same `mining_main` bindings; must stay bit-exact with `pow_core`.
 //!
-//! - Apple Metal + `SHADER_INT64` → v4.0.1 (`mining_u64_apple.wgsl`)
-//! - other GPUs + `SHADER_INT64` → v4.0.0 (`mining_u64.wgsl`)
-//! - no `SHADER_INT64` → 32-bit fallback (`mining.wgsl`), same as 4.0.0
+//! - Apple Metal + `SHADER_INT64` → Apple Metal u64 (`mining_u64_apple.wgsl`)
+//! - other GPUs + `SHADER_INT64` → native u64 (`mining_u64.wgsl`)
+//! - no `SHADER_INT64` → 32-bit fallback (`mining.wgsl`)
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kernel {
@@ -29,8 +29,8 @@ impl Kernel {
     pub const fn label(self) -> &'static str {
         match self {
             Self::U32 => "32-bit",
-            Self::Default => "native-u64 (4.0.0)",
-            Self::Apple => "native-u64 Apple Metal (4.0.1)",
+            Self::Default => "native-u64",
+            Self::Apple => "native-u64 Apple Metal",
         }
     }
 
