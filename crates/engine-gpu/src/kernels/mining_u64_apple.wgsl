@@ -1,7 +1,5 @@
-// Quantus Mining Shader - native-u64 variant (requires wgpu Features::SHADER_INT64)
-// Implements Poseidon2 hash over the Goldilocks field with plonky2-style lazy reduction:
-// values live in [0, 2^64) and are only canonicalized when squeezed out.
-// Must produce byte-identical results to mining.wgsl / qp-poseidon-core.
+// Native-u64 Poseidon2 mining kernel (v4.0.1). Apple Metal path only.
+// Requires wgpu Features::SHADER_INT64. Bit-exact with mining.wgsl / pow_core.
 
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
 // Sponge state after absorbing header + high nonce half (12 felts as LE u32 pairs),

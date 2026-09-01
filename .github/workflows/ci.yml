@@ -86,6 +86,11 @@ jobs:
       - name: build benchmark binary
         run: cargo build -p miner-cli --release
         timeout-minutes: 60
+      - name: upload linux release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantus-miner-linux-x86_64
+          path: target/release/quantus-miner
       - name: run cpu benchmark
         run: ./target/release/quantus-miner benchmark --cpu-workers 2 --duration 5
         timeout-minutes: 10
