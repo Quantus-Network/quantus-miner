@@ -194,3 +194,42 @@ Image was always `nvidia/opengl:1.2-glvnd-runtime-ubuntu22.04` with `NVIDIA_DRIV
 | RTX 5060 Ti (NL owner, lead) | not recorded | graphics stack was injected on that owner’s 5060 Ti; not re-tested here |
 
 Other attempts never published SSH.
+
+## CUDA kernel optimization (2026-09-04)
+
+Iterated the native CUDA kernel (`crates/engine-cuda/src/kernels/mining.cu`) on a
+rented Clore RTX 3060 Ti (server 103764, GPU-5a345e96, driver 550.144.03, 200 W).
+Binaries were cross-compiled on the local Mac with `cargo-zigbuild` (target
+`x86_64-unknown-linux-gnu.2.35`) and copied over; only binaries and a bench script
+ran on the box. Each step was gated on the KV golden-vector test
+(`cuda_matches_nonce_hash_golden_vectors`, `cuda_search_finds_cpu_verified_solution`),
+which passed for every kept variant. Bench: `--cuda-gpu --gpu-devices 1
+--cpu-workers 0`, 12-15 s, batch 4M.
+
+| Step | Change | MH/s | vs base |
+|---|---|---|---|
+| v0 | baseline | 68.5 | 1.00x |
+| v1 | inline-PTX add/mul + full loop unroll | 76.0 | 1.11x |
+| v2 | wide 96-bit accumulators, one reduction per layer | 93.2 | 1.36x |
+| v3 | fold round constants into the layer add | 96.6 | 1.41x |
+| v4 | volatile results poll instead of atomicAdd | 96.6 | 1.41x |
+| v5 | native `__umul64hi` multiply | 102.0 | 1.49x |
+| v6 | round constants in `__constant__` memory + rolled round loops | 139.3 | 2.03x |
+| **v8** | **v6 + `__launch_bounds__(256, 4)`** | **~140** | **2.04x** |
+
+Winning kernel is v8, now in the tree. The dominant win is v6: moving the
+`RC_*`/`MDS_DIAG` tables into `__constant__` memory and rolling the fully-unrolled
+round loops (`#pragma unroll 1`) cut register pressure enough to raise occupancy,
+jumping 102 -> 139 MH/s. `__launch_bounds__(256, 4)` adds a stable ~0.5%.
+
+Rejected: `unsigned __int128` arithmetic (v7) fails under NVRTC without the
+`--device-int128` flag, which the host does not pass. `__launch_bounds__` min-blocks
+of 3, 5, 6, 8 and `#pragma unroll 2` on the 22 internal rounds were all equal or
+slightly slower than min-blocks 4. Larger batches (4M, 16M) match 1M.
+
+SSH note: the `nvidia/cuda:*-devel` image never exposed sshd on Clore (kex
+connection reset for 10+ min). `cloreai/jupyter:ubuntu24.04-v2` gives working SSH,
+but the container rewrites `/root/.ssh/authorized_keys` and the root password a few
+minutes after boot, locking out new logins. Fix: open one multiplexed SSH master
+(`ControlMaster` + `ControlPersist`) inside the boot window and reuse it; an
+established session survives the reset. Use a short `ControlPath` (e.g. `/tmp/cmN.sock`).
