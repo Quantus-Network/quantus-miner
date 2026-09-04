@@ -30,5 +30,6 @@ quantus-miner-api = { workspace = true }
 # Local crates
 pow-core = { path = "../pow-core" }
 engine-cpu = { path = "../engine-cpu", optional = true }
+engine-cuda = { path = "../engine-cuda" }
 engine-gpu = { path = "../engine-gpu" }
 metrics = { path = "../metrics" }

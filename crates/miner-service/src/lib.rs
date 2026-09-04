@@ -39,6 +39,8 @@ pub struct ServiceConfig {
     pub gpu_throttle_ms: u64,
     /// Allow integrated GPUs even when discrete GPUs are available
     pub allow_integrated: bool,
+    /// Use the native CUDA engine instead of wgpu/Vulkan
+    pub cuda_gpu: bool,
 }
 
 /// Engine type for tracking metrics per compute type.
@@ -462,12 +464,47 @@ fn worker_loop(
         });
     }
 
-    // Clean up GPU resources on thread exit
     if engine_type == EngineType::Gpu {
         engine_gpu::GpuEngine::clear_worker_resources();
+        engine_cuda::CudaEngine::clear_worker_resources();
     }
 
     log::debug!("{type_str} worker {thread_id} exited");
+}
+
+/// Resolve CUDA GPU configuration and initialize the engine.
+pub fn resolve_cuda_configuration(
+    requested_devices: Option<usize>,
+    batch_size: u32,
+    throttle_ms: u64,
+) -> anyhow::Result<(Option<Arc<dyn MinerEngine>>, usize)> {
+    if requested_devices == Some(0) {
+        return Ok((None, 0));
+    }
+
+    let engine = engine_cuda::CudaEngine::try_new(batch_size, throttle_ms)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize CUDA engine: {e}"))?;
+
+    let available = engine.device_count();
+    let count = match requested_devices {
+        Some(n) if n > available => {
+            anyhow::bail!(
+                "Requested {} CUDA devices but only {} available",
+                n,
+                available
+            );
+        }
+        Some(n) => n,
+        None if available == 0 => {
+            anyhow::bail!("No CUDA devices found");
+        }
+        None => {
+            log::info!("Auto-detected {available} CUDA device(s)");
+            available
+        }
+    };
+
+    Ok((Some(Arc::new(engine)), count))
 }
 
 /// Resolve GPU configuration and initialize the engine.
@@ -523,13 +560,20 @@ pub async fn run(config: ServiceConfig) -> anyhow::Result<()> {
     // Detect effective CPU count
     let effective_cpus = num_cpus::get().max(1);
 
-    // Resolve GPU configuration
-    let (gpu_engine, gpu_devices) = resolve_gpu_configuration(
-        config.gpu_devices,
-        config.gpu_batch_size,
-        config.gpu_throttle_ms,
-        config.allow_integrated,
-    )?;
+    let (gpu_engine, gpu_devices) = if config.cuda_gpu {
+        resolve_cuda_configuration(
+            config.gpu_devices,
+            config.gpu_batch_size,
+            config.gpu_throttle_ms,
+        )?
+    } else {
+        resolve_gpu_configuration(
+            config.gpu_devices,
+            config.gpu_batch_size,
+            config.gpu_throttle_ms,
+            config.allow_integrated,
+        )?
+    };
 
     // Resolve CPU workers
     let cpu_workers = config.cpu_workers.unwrap_or_else(|| {

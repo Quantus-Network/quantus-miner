@@ -57,6 +57,7 @@ node's chain config dir (`<base-path>/chains/<chain>/`):
 | `--tls-cert-sha256-file <PATH>` | `MINER_TLS_CERT_SHA256_FILE` | Read the TLS cert fingerprint from a file | — |
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
+| `--cuda-gpu` | `MINER_CUDA_GPU` | Use native CUDA instead of wgpu/Vulkan (NVIDIA) | off |
 | `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 |
 | `--cpu-batch-size <N>` | `MINER_CPU_BATCH_SIZE` | CPU batch size in hashes | 10000 |
 | `--gpu-throttle-ms <MS>` | `MINER_GPU_THROTTLE_MS` | Sleep duration (ms) between GPU batches | 0 |
@@ -64,11 +65,16 @@ node's chain config dir (`<base-path>/chains/<chain>/`):
 
 ## GPU Mining
 
-GPU support uses WGPU for cross-platform acceleration:
+Two GPU paths:
 
-- **macOS**: Metal backend (Apple Silicon & Intel)
-- **Linux**: Vulkan/OpenGL backends
-- **Windows**: DirectX 12/Vulkan backends
+- **wgpu** (default): Metal on macOS, Vulkan/DX12 elsewhere. Needs a graphics driver stack.
+- **CUDA** (`--cuda-gpu`): native NVIDIA compute. Use this on Clore.ai and other CUDA-only boxes.
+
+On NVIDIA Linux boxes that have CUDA but not Vulkan:
+
+```bash
+./target/release/quantus-miner benchmark --cuda-gpu --gpu-devices 1 --cpu-workers 0 --duration 10
+```
 
 ### Setup
 
@@ -99,11 +105,17 @@ All `serve` examples need the auth token and TLS pin (files or inline values).
   --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --cpu-workers 8
 
-# Pure GPU mining
+# Pure GPU mining (wgpu)
 ./target/release/quantus-miner serve \
   --auth-token-file /path/to/miner-auth-token \
   --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
   --gpu-devices 1
+
+# NVIDIA CUDA mining (no Vulkan)
+./target/release/quantus-miner serve \
+  --auth-token-file /path/to/miner-auth-token \
+  --tls-cert-sha256-file /path/to/miner-tls-cert-sha256 \
+  --cuda-gpu --gpu-devices 1 --cpu-workers 0
 
 # GPU mining with throttle (reduce GPU utilization)
 ./target/release/quantus-miner serve \

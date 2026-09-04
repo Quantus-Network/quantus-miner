@@ -31,6 +31,7 @@ pub enum FoundOrigin {
     Cpu,
     GpuG1,
     GpuG2,
+    Cuda,
     Unknown,
 }
 
