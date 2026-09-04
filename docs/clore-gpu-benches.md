@@ -233,3 +233,28 @@ but the container rewrites `/root/.ssh/authorized_keys` and the root password a 
 minutes after boot, locking out new logins. Fix: open one multiplexed SSH master
 (`ControlMaster` + `ControlPersist`) inside the boot window and reuse it; an
 established session survives the reset. Use a short `ControlPath` (e.g. `/tmp/cmN.sock`).
+
+### Cross-check on RTX 3080 (2026-09-04)
+
+Reran the same binaries on a rented Clore RTX 3080 (10 GB, server 106622,
+GPU-f4309ad5, driver 550.142, 260 W, 2115 MHz), 12 s, batch 4M, all KV-passing.
+The 2.04x speedup reproduces, so the win is architectural, not chip-specific.
+
+| Variant | MH/s | vs base |
+|---|---|---|
+| v0 baseline | 114.0 | 1.00x |
+| v1 | 124.0 | 1.09x |
+| v2 | 153.0 | 1.34x |
+| v3 | 158.3 | 1.39x |
+| v4 | 159.0 | 1.39x |
+| v5 | 166.3 | 1.46x |
+| v6 | 232.0 | 2.04x |
+| **v8 (shipped)** | **233.0** | **2.04x** |
+| v9 (launch_bounds min-blocks 6) | 125.0 | 1.10x |
+| v10 (min-blocks 8) | 232.3 | 2.04x |
+| v11 (internal unroll 2) | 232.3 | 2.04x |
+| v12 (min-blocks 3) | 233.3 | 2.05x |
+| v13 (min-blocks 5) | 225.3 | 1.98x |
+
+Same shape as the 3060 Ti: v6's constant-memory tables plus rolled loops are the
+jump, launch bounds is a wash except min-blocks 6 which over-constrains and halves it.
