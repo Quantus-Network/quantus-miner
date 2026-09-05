@@ -1,5 +1,8 @@
 # Clore.ai GPU benches
 
+Same-host WGSL vs CUDA on Vast (Vulkan works there): [vast-gpu-benches.md](./vast-gpu-benches.md).
+On a Vast RTX 3080 Ti, official v4.0.2 WGSL was **106.03 MH/s** and private CUDA `--cuda-gpu` was **273.83 MH/s** (~2.58×).
+
 Quantus miner v4.0.2. GPU-only (`--cpu-workers 0 --gpu-devices 1`). Default bench is 10 s `quantus-miner benchmark`.
 
 - **CUDA** = `--cuda-gpu` (native NVRTC kernel, no Vulkan).
