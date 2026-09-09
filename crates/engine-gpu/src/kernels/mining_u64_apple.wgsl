@@ -74,12 +74,15 @@ struct U128 {
 // 2^64 ≡ EPS64 and 2^96 ≡ -1 (mod P).
 fn gf64_reduce(v: U128) -> u64 {
     let hi_hi = v.hi >> 32u;
-    let hi_lo = v.hi & EPS64;
-    var t0 = v.lo - hi_hi;
-    t0 = t0 - select(0lu, EPS64, v.lo < hi_hi);
-    let t1 = hi_lo * EPS64;
-    let t2 = t0 + t1;
-    return t2 + select(0lu, EPS64, t2 < t0);
+    let folded = (v.hi & EPS64) * EPS64;
+    let sum = v.lo + folded;
+    let result = sum - hi_hi;
+    // Combine the addition carry and subtraction borrow before folding.
+    // Their signed difference is -1, 0 or 1, so only one EPS64 correction
+    // is needed; the high-limb bounds prevent a further wrap correction.
+    let correction = i64(select(0i, 1i, sum < v.lo) - select(0i, 1i, sum < hi_hi));
+    let bits = bitcast<u64>(correction);
+    return result + ((bits << 32u) - bits);
 }
 
 fn mul_wide(a: u64, b: u64) -> U128 {
@@ -91,8 +94,12 @@ fn mul_wide(a: u64, b: u64) -> U128 {
     let lh = a_lo * b_hi;
     let hl = a_hi * b_lo;
     let hh = a_hi * b_hi;
-    let mid = (ll >> 32u) + (lh & EPS64) + (hl & EPS64);
-    return U128((mid << 32u) | (ll & EPS64), hh + (lh >> 32u) + (hl >> 32u) + (mid >> 32u));
+    // Accumulate the middle limb in 32 bits; keep both carry bits explicitly.
+    let mid0 = u32(ll >> 32u) + u32(lh);
+    let c0 = select(0u, 1u, mid0 < u32(lh));
+    let mid = mid0 + u32(hl);
+    let c = c0 + select(0u, 1u, mid < mid0);
+    return U128((u64(mid) << 32u) | u64(u32(ll)), hh + (lh >> 32u) + (hl >> 32u) + u64(c));
 }
 
 // (a*b + addend) mod P for b <= 2^64 - 2^32 (all MDS_DIAG entries): the addend's
@@ -113,8 +120,12 @@ fn gf64_sqr(a: u64) -> u64 {
     let ll = a_lo * a_lo;
     let lh = a_lo * a_hi;
     let hh = a_hi * a_hi;
-    let mid = (ll >> 32u) + ((lh & EPS64) << 1u);
-    return gf64_reduce(U128((mid << 32u) | (ll & EPS64), hh + ((lh >> 32u) << 1u) + (mid >> 32u)));
+    // Accumulate the middle limb in 32 bits; keep both carry bits explicitly.
+    let mid0 = u32(ll >> 32u) + u32(lh);
+    let c0 = select(0u, 1u, mid0 < u32(lh));
+    let mid = mid0 + u32(lh);
+    let c = c0 + select(0u, 1u, mid < mid0);
+    return gf64_reduce(U128((u64(mid) << 32u) | u64(u32(ll)), hh + ((lh >> 32u) << 1u) + u64(c)));
 }
 
 fn gf64_sbox(x: u64) -> u64 {
@@ -146,7 +157,7 @@ fn mds4(x0: u64, x1: u64, x2: u64, x3: u64) -> array<Acc, 4> {
 // External linear layer: 4x4 MDS on each chunk, then circulant sums, plus the
 // next round's constants. Additions are accumulated unreduced (at most 27
 // carries) and folded once per output.
-fn ext_layer64(state: ptr<function, array<u64, 12>>, rc: array<u64, 12>) {
+fn ext_layer64(state: ptr<function, array<u64, 12>>, rc_index: u32) {
     var y: array<Acc, 12>;
     for (var chunk = 0u; chunk < 3u; chunk++) {
         let o = chunk * 4u;
@@ -158,9 +169,9 @@ fn ext_layer64(state: ptr<function, array<u64, 12>>, rc: array<u64, 12>) {
     }
     for (var k = 0u; k < 4u; k++) {
         let s = acc_add2(acc_add2(y[k], y[k + 4u]), y[k + 8u]);
-        (*state)[k] = acc_fold(acc_add(acc_add2(y[k], s), rc[k]));
-        (*state)[k + 4u] = acc_fold(acc_add(acc_add2(y[k + 4u], s), rc[k + 4u]));
-        (*state)[k + 8u] = acc_fold(acc_add(acc_add2(y[k + 8u], s), rc[k + 8u]));
+        (*state)[k] = acc_fold(acc_add(acc_add2(y[k], s), RC_EXT[rc_index][k]));
+        (*state)[k + 4u] = acc_fold(acc_add(acc_add2(y[k + 4u], s), RC_EXT[rc_index][k + 4u]));
+        (*state)[k + 8u] = acc_fold(acc_add(acc_add2(y[k + 8u], s), RC_EXT[rc_index][k + 8u]));
     }
 }
 
@@ -224,7 +235,7 @@ fn permute64(state: ptr<function, array<u64, 12>>) {
             sbox_lanes(state, select(1u, 12u, is_ext));
         }
         if (is_ext) {
-            ext_layer64(state, RC_EXT[select(k, k - 22u, k > 26u)]);
+            ext_layer64(state, select(k, k - 22u, k > 26u));
         } else {
             int_layer64(state, RC_INTERNAL[k - 4u]);
             if (k == 26u) {
@@ -298,59 +309,53 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var i = 0u; i < 8u; i++) {
             st[i] = gf64_add(st[i], u64(bswap32(current_nonce[7u - i])));
         }
-        // Squeeze-and-compare phases share one inlined permutation: phase 0
-        // pads after absorbing, phase 1 yields the most significant 256 bits of
-        // the hash, which decide hash-vs-target on their own unless they exactly
-        // equal the target's high half, and only candidates run phase 2 for the
-        // low half. Byte-swapped hash words are produced on demand.
-        var hash_le: array<u32, 16>;
-        var cmp = 0u;
-        var below = false;
-        for (var phase = 0u; phase < 3u; phase++) {
+        // The overwhelmingly common rejection needs only the first hash word.
+        // Delay materializing the full result until that comparison passes.
+        for (var phase = 0u; phase < 2u; phase++) {
             permute64(&st);
             if (phase == 0u) {
                 st[0] = gf64_add(st[0], 1lu);
                 st[1] = gf64_add(st[1], 1lu);
-                continue;
             }
-            var words: array<u32, 8>;
-            for (var i = 0u; i < 4u; i++) {
-                let c = gf64_canon(st[i]);
-                words[2u * i] = bswap32(u32(c & EPS64));
-                words[2u * i + 1u] = bswap32(u32(c >> 32u));
-            }
-            let base = select(15u, 7u, phase == 2u);
-            for (var i = 0u; i < 8u; i++) {
-                hash_le[base - i] = words[i];
-            }
-            if (phase == 1u) {
-                for (var i = 0u; i < 8u; i++) {
-                    let h = words[i];
-                    let t = tgt[15u - i];
-                    if (h != t) {
-                        cmp = select(2u, 1u, h > t);
-                        break;
-                    }
-                }
-                if (cmp == 1u) {
-                    break;
-                }
-            } else {
-                below = cmp == 2u;
-                if (!below) {
-                    for (var i = 0u; i < 8u; i++) {
-                        let h = words[i];
-                        let t = tgt[7u - i];
-                        if (h != t) {
-                            below = h < t;
-                            break;
-                        }
-                    }
-                }
+        }
+        let first = bswap32(u32(gf64_canon(st[0]) & EPS64));
+        if (first > tgt[15]) {
+            continue;
+        }
+        var hash_le: array<u32, 16>;
+        var cmp = 0u;
+        for (var i = 0u; i < 4u; i++) {
+            let c = gf64_canon(st[i]);
+            hash_le[15u - 2u * i] = bswap32(u32(c & EPS64));
+            hash_le[14u - 2u * i] = bswap32(u32(c >> 32u));
+        }
+        for (var i = 0u; i < 8u; i++) {
+            let h = hash_le[15u - i];
+            let t = tgt[15u - i];
+            if (h != t) {
+                cmp = select(2u, 1u, h > t);
+                break;
             }
         }
         if (cmp == 1u) {
             continue;
+        }
+        permute64(&st);
+        for (var i = 0u; i < 4u; i++) {
+            let c = gf64_canon(st[i]);
+            hash_le[7u - 2u * i] = bswap32(u32(c & EPS64));
+            hash_le[6u - 2u * i] = bswap32(u32(c >> 32u));
+        }
+        var below = cmp == 2u;
+        if (!below) {
+            for (var i = 0u; i < 8u; i++) {
+                let h = hash_le[7u - i];
+                let t = tgt[7u - i];
+                if (h != t) {
+                    below = h < t;
+                    break;
+                }
+            }
         }
 
         if (below) {
@@ -579,7 +584,7 @@ fn state_unpack(v: ptr<function, array<u64, 12>>, state: ptr<function, array<Gol
 fn external_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
     var st: array<u64, 12>;
     state_pack(state, &st);
-    ext_layer64(&st, RC_ZERO);
+    ext_layer64(&st, 8u);
     state_unpack(&st, state);
 }
 
