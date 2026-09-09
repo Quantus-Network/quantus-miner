@@ -73,16 +73,16 @@ struct U128 {
 // Reduce a 128-bit value (lo + hi*2^64) mod P using
 // 2^64 ≡ EPS64 and 2^96 ≡ -1 (mod P).
 fn gf64_reduce(v: U128) -> u64 {
-    let hi_hi = v.hi >> 32u;
-    let folded = (v.hi & EPS64) * EPS64;
-    let sum = v.lo + folded;
-    let result = sum - hi_hi;
-    // Combine the addition carry and subtraction borrow before folding.
-    // Their signed difference is -1, 0 or 1, so only one EPS64 correction
-    // is needed; the high-limb bounds prevent a further wrap correction.
-    let correction = i64(select(0i, 1i, sum < v.lo) - select(0i, 1i, sum < hi_hi));
-    let bits = bitcast<u64>(correction);
-    return result + ((bits << 32u) - bits);
+    // In radix B=2^32, B^2 = B-1 and B^3 = -1 modulo P. Fold
+    // the four limbs directly, avoiding 64-bit carry/borrow comparisons.
+    let low = i64(u32(v.lo)) - i64(u32(v.hi)) - i64(u32(v.hi >> 32u));
+    let high = i64(u32(v.lo >> 32u)) + i64(u32(v.hi)) + (low >> 32u);
+    let result = (u64(u32(high)) << 32u) | u64(u32(low));
+    // -1 <= high <= 2B-2: the correction is -1, 0, or 1.
+    // A positive correction has result <= B^2-B-1; a negative one
+    // has its high limb equal to B-1. Neither requires another fold.
+    let correction = bitcast<u64>(high >> 32u);
+    return result + ((correction << 32u) - correction);
 }
 
 fn mul_wide(a: u64, b: u64) -> U128 {
@@ -148,9 +148,9 @@ fn mds4(x0: u64, x1: u64, x2: u64, x3: u64) -> array<Acc, 4> {
     let t01233 = acc_add(t0123, x3);
     return array<Acc, 4>(
         acc_add2(t01123, t01),
-        acc_add2(t01123, acc_add(Acc(x2, 0u), x2)),
+        acc_add2(t01123, Acc(x2 << 1u, u32(x2 >> 63u))),
         acc_add2(t01233, t23),
-        acc_add2(t01233, acc_add(Acc(x0, 0u), x0))
+        acc_add2(t01233, Acc(x0 << 1u, u32(x0 >> 63u)))
     );
 }
 

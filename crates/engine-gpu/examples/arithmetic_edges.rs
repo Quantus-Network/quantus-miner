@@ -1,4 +1,5 @@
 //! Compare full-width GPU arithmetic against Rust u128, including lazy residues.
+//! Optionally pass a kernel source path to validate an experimental Apple kernel.
 use rand::{RngCore, SeedableRng};
 use wgpu::util::DeviceExt;
 
@@ -27,11 +28,26 @@ async fn run() {
             inputs.extend([a, b]);
         }
     }
+    // Independently exercise all four limbs of the 128-bit reduction input,
+    // including negative low sums and high sums crossing the radix boundary.
+    for w0 in [0u64, 1, 0xffff_fffe, 0xffff_ffff] {
+        for w1 in [0u64, 1, 0xffff_fffe, 0xffff_ffff] {
+            for w2 in [0u64, 1, 0xffff_fffe, 0xffff_ffff] {
+                for w3 in [0u64, 1, 0xffff_fffe, 0xffff_ffff] {
+                    inputs.extend([w0 | (w1 << 32), w2 | (w3 << 32)]);
+                }
+            }
+        }
+    }
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x20260909);
     for _ in 0..4096 {
         inputs.extend([rng.next_u64(), rng.next_u64()]);
     }
     let count = inputs.len() / 2;
+    let kernel_source = std::env::args()
+        .nth(1)
+        .map(|path| std::fs::read_to_string(path).expect("read kernel source"))
+        .unwrap_or_else(|| engine_gpu::Kernel::Apple.source().to_owned());
     let source = format!(
         r#"{}
 @group(0) @binding(5) var<storage, read> pairs: array<u64>;
@@ -49,8 +65,7 @@ fn arithmetic_edges(@builtin(global_invocation_id) id: vec3<u32>) {{
     answer[id.x * 5u + 4u] = gf64_canon(gf64_reduce(U128(a,b)));
 }}
 "#,
-        engine_gpu::Kernel::Apple.source(),
-        count
+        kernel_source, count
     );
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
