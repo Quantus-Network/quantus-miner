@@ -230,6 +230,67 @@ pub fn hash_from_nonce(ctx: &JobContext, nonce: U512) -> U512 {
     qpow_math::get_nonce_hash(ctx.header, nonce_bytes)
 }
 
+/// Job-local CPU hasher that reuses the header/high-nonce sponge state.
+///
+/// The reference `hash_from_nonce` remains independent. This mining path skips
+/// the final squeeze when the first half already exceeds the target, but
+/// returns the full reference hash for every qualifying nonce.
+pub struct MiningHasher {
+    header: [u8; 32],
+    target: U512,
+    target_bytes: [u8; 64],
+    poseidon: Poseidon2,
+    cached: Option<([u8; 32], [Goldilocks; SPONGE_WIDTH])>,
+}
+
+impl MiningHasher {
+    pub fn new(ctx: &JobContext) -> Self {
+        Self {
+            header: ctx.header,
+            target: ctx.target,
+            target_bytes: ctx.target.to_big_endian(),
+            poseidon: Poseidon2::new(),
+            cached: None,
+        }
+    }
+
+    /// Return the full hash iff it is strictly below this job's target.
+    /// Arbitrary nonce order and carries into the high half are supported.
+    pub fn hash_if_valid(&mut self, nonce: U512) -> Option<U512> {
+        let bytes = nonce.to_big_endian();
+        let high: [u8; 32] = bytes[..32].try_into().unwrap();
+        let mut state = match self.cached {
+            Some((cached_high, state)) if cached_high == high => state,
+            _ => {
+                let state = mining_midstate(self.header, high).map(Goldilocks::from_u64);
+                self.cached = Some((high, state));
+                state
+            }
+        };
+        for (felt, chunk) in state.iter_mut().zip(bytes[32..].chunks_exact(4)) {
+            *felt += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+        }
+        self.poseidon.permute_mut(&mut state);
+        state[0] += Goldilocks::ONE;
+        state[1] += Goldilocks::ONE;
+        self.poseidon.permute_mut(&mut state);
+
+        let mut hash_bytes = [0u8; 64];
+        for (felt, chunk) in state.iter().zip(hash_bytes[..32].chunks_exact_mut(8)) {
+            chunk.copy_from_slice(&felt.as_canonical_u64().to_le_bytes());
+        }
+        if hash_bytes[..32] > self.target_bytes[..32] {
+            return None;
+        }
+        self.poseidon.permute_mut(&mut state);
+        for (felt, chunk) in state.iter().zip(hash_bytes[32..].chunks_exact_mut(8)) {
+            chunk.copy_from_slice(&felt.as_canonical_u64().to_le_bytes());
+        }
+        let hash = U512::from_big_endian(&hash_bytes);
+        (hash < self.target).then_some(hash)
+    }
+}
+
 /// Check if hash meets difficulty target
 pub fn is_valid_hash(ctx: &JobContext, hash: U512) -> bool {
     hash < ctx.target
@@ -252,6 +313,56 @@ pub fn mine_nonce_range(ctx: &JobContext, start_nonce: U512, steps: u64) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mining_hasher_matches_reference_across_cache_changes() {
+        let boundary = U512::one() << 256;
+        let mut nonces = vec![U512::zero(), U512::one(), U512::MAX];
+        for offset in 0..8u64 {
+            nonces.push(boundary - U512::from(4u64) + U512::from(offset));
+        }
+        // Jump backwards and between high halves as well as incrementing.
+        nonces.extend([U512::one(), U512::MAX, boundary, U512::zero()]);
+        let mut seed = 0x517a9e37u64;
+        for _ in 0..64 {
+            let mut bytes = [0u8; 64];
+            for chunk in bytes.chunks_exact_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                chunk.copy_from_slice(&seed.to_le_bytes());
+            }
+            nonces.push(U512::from_big_endian(&bytes));
+        }
+        for header in [0u8, 17, 255] {
+            for target in [U512::zero(), U512::one(), U512::MAX >> 1, U512::MAX] {
+                let mut ctx = JobContext::new([header; 32], U512::one());
+                ctx.target = target;
+                let mut hasher = MiningHasher::new(&ctx);
+                for &nonce in &nonces {
+                    let hash = hash_from_nonce(&ctx, nonce);
+                    assert_eq!(hasher.hash_if_valid(nonce), (hash < target).then_some(hash));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mining_hasher_preserves_strict_full_hash_comparison() {
+        for vector in NONCE_HASH_KVS {
+            let nonce = U512::from_big_endian(&decode64(vector.nonce));
+            let mut ctx = JobContext::new(decode32(vector.header), U512::one());
+            let hash = U512::from_big_endian(&decode64(vector.hash));
+            for target in [hash - U512::one(), hash, hash + U512::one()] {
+                ctx.target = target;
+                let mut hasher = MiningHasher::new(&ctx);
+                // Both a cold cache and a reused midstate must behave identically.
+                for _ in 0..2 {
+                    assert_eq!(hasher.hash_if_valid(nonce), (hash < target).then_some(hash));
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_job_context_creation() {

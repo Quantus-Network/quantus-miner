@@ -144,7 +144,7 @@ impl MinerEngine for FastCpuEngine {
         range: Range,
         cancel: &dyn CancelCheck,
     ) -> EngineStatus {
-        use pow_core::{hash_from_nonce, is_valid_hash, step_nonce};
+        use pow_core::{step_nonce, MiningHasher};
 
         if range.start > range.end {
             return EngineStatus::Exhausted { hash_count: 0 };
@@ -155,6 +155,7 @@ impl MinerEngine for FastCpuEngine {
         // Use decrementing counter to avoid modulo division in hot loop
         // Initialize to 0 so we check cancellation immediately on first iteration
         let mut until_check: u64 = 0;
+        let mut hasher = MiningHasher::new(ctx);
 
         loop {
             // Check for cancellation every batch_size hashes
@@ -166,10 +167,10 @@ impl MinerEngine for FastCpuEngine {
             }
             until_check -= 1;
 
-            let hash = hash_from_nonce(ctx, current);
+            let hash = hasher.hash_if_valid(current);
             hash_count = hash_count.saturating_add(1);
 
-            if is_valid_hash(ctx, hash) {
+            if let Some(hash) = hash {
                 let work = current.to_big_endian();
                 return EngineStatus::Found {
                     candidate: Candidate {
@@ -201,6 +202,72 @@ mod tests {
     use super::*;
     use primitive_types::U512;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn cached_search_matches_first_reference_solution_across_nonce_carry() {
+        let engine = FastCpuEngine::new(7);
+        let flag = AtomicBool::new(false);
+        let cancel = AtomicBoolCancelCheck(&flag);
+        for start in [
+            (U512::one() << 256) - U512::from(8u64),
+            U512::MAX - U512::from(31u64),
+        ] {
+            let end = start + U512::from(31u64);
+            let mut ctx = JobContext::new([37; 32], U512::one());
+            let hashes: Vec<_> = (0..32u64)
+                .map(|i| pow_core::hash_from_nonce(&ctx, start + U512::from(i)))
+                .collect();
+            for target in [
+                U512::zero(),
+                *hashes.iter().min().unwrap() + U512::one(),
+                U512::MAX,
+            ] {
+                ctx.target = target;
+                let expected = hashes.iter().position(|hash| *hash < target);
+                match (
+                    engine.search_range(&ctx, Range { start, end }, &cancel),
+                    expected,
+                ) {
+                    (
+                        EngineStatus::Found {
+                            candidate,
+                            hash_count,
+                            ..
+                        },
+                        Some(index),
+                    ) => {
+                        assert_eq!(candidate.nonce, start + U512::from(index));
+                        assert_eq!(candidate.hash, hashes[index]);
+                        assert_eq!(candidate.work, candidate.nonce.to_big_endian());
+                        assert_eq!(hash_count, index as u64 + 1);
+                    }
+                    (EngineStatus::Exhausted { hash_count: 32 }, None) => {}
+                    other => panic!("reference mismatch: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_search_preserves_cancellation_interval() {
+        struct CancelAfterFirstBatch(std::sync::atomic::AtomicUsize);
+        impl CancelCheck for CancelAfterFirstBatch {
+            fn is_cancelled(&self) -> bool {
+                self.0.fetch_add(1, Ordering::Relaxed) > 0
+            }
+        }
+        let cancel = CancelAfterFirstBatch(std::sync::atomic::AtomicUsize::new(0));
+        let ctx = JobContext::new([8; 32], U512::MAX);
+        let result = FastCpuEngine::new(13).search_range(
+            &ctx,
+            Range {
+                start: U512::zero(),
+                end: U512::from(100u64),
+            },
+            &cancel,
+        );
+        assert!(matches!(result, EngineStatus::Cancelled { hash_count: 13 }));
+    }
 
     #[test]
     fn engine_returns_exhausted_when_no_solution_in_range() {
