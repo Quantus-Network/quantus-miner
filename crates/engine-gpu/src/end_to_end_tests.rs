@@ -40,7 +40,7 @@ pub async fn test_end_to_end_mining(
     let midstate_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Midstate Buffer"),
         contents: bytemuck::cast_slice(&midstate_u32s),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
     });
 
     // Target Buffer
@@ -53,7 +53,7 @@ pub async fn test_end_to_end_mining(
     let target_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Target Buffer"),
         contents: bytemuck::cast_slice(&target_u32s),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
     });
 
     // Start Nonce Buffer
@@ -67,7 +67,7 @@ pub async fn test_end_to_end_mining(
     let start_nonce_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Start Nonce Buffer"),
         contents: bytemuck::cast_slice(&start_nonce_u32s),
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
     });
 
     // Results Buffer
@@ -89,8 +89,10 @@ pub async fn test_end_to_end_mining(
     let dispatch_config_data: [u32; 3] = [256, 1, 256];
     let dispatch_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Dispatch Config Buffer"),
-        size: 12,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     queue.write_buffer(

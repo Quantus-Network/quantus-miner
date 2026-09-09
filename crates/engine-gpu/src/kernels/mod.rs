@@ -1,6 +1,8 @@
 //! Poseidon2 mining kernels.
 //!
-//! Same `mining_main` bindings; must stay bit-exact with `pow_core`.
+//! Same `mining_main` binding numbers; must stay bit-exact with `pow_core`.
+//! Apple uses uniform bindings for inputs 1..4; other kernels use storage.
+//! Input word layouts are identical, with dispatch config padded to 16 bytes.
 //!
 //! - Apple Metal + `SHADER_INT64` → Apple Metal u64 (`mining_u64_apple.wgsl`)
 //! - other GPUs + `SHADER_INT64` → native u64 (`mining_u64.wgsl`)

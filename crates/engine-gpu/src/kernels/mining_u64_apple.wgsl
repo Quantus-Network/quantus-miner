@@ -4,10 +4,11 @@
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
 // Sponge state after absorbing header + high nonce half (12 felts as LE u32 pairs),
 // precomputed on the host per batch. See pow_core::mining_midstate.
-@group(0) @binding(1) var<storage, read> midstate: array<u32, 24>;
-@group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>;
-@group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;
-@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 3>;
+// Pack u32 words into vec4s to preserve the byte layout with uniform alignment.
+@group(0) @binding(1) var<uniform> midstate: array<vec4<u32>, 6>;
+@group(0) @binding(2) var<uniform> start_nonce: array<vec4<u32>, 4>;
+@group(0) @binding(3) var<uniform> difficulty_target: array<vec4<u32>, 4>;
+@group(0) @binding(4) var<uniform> dispatch_config: vec4<u32>;
 
 const P64: u64 = 0xFFFFFFFF00000001lu;
 // EPS64 = 2^32 - 1 = 2^64 mod P
@@ -266,15 +267,15 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Hoist uniform storage reads out of the nonce loop
     var mid: array<u64, 12>;
     for (var i = 0u; i < 12u; i++) {
-        mid[i] = (u64(midstate[2u * i + 1u]) << 32u) | u64(midstate[2u * i]);
+        mid[i] = (u64(midstate[(2u * i + 1u) / 4u][(2u * i + 1u) % 4u]) << 32u) | u64(midstate[(2u * i) / 4u][(2u * i) % 4u]);
     }
     var tgt: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) {
-        tgt[i] = difficulty_target[i];
+        tgt[i] = difficulty_target[(i) / 4u][(i) % 4u];
     }
     var nonce_base: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) {
-        nonce_base[i] = start_nonce[i];
+        nonce_base[i] = start_nonce[(i) / 4u][(i) % 4u];
     }
 
     for (var j = 0u; j < nonces_per_thread; j = j + 1u) {

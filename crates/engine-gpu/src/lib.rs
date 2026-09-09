@@ -24,6 +24,8 @@ struct GpuContext {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
 
+    input_usage: wgpu::BufferUsages,
+
     // Cached vendor configuration
     optimal_workgroups: u32,
 }
@@ -68,7 +70,7 @@ impl GpuContext {
         let midstate_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Midstate Buffer"),
             size: 96,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: self.input_usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -76,7 +78,7 @@ impl GpuContext {
         let target_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Target Buffer"),
             size: 64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: self.input_usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -84,7 +86,7 @@ impl GpuContext {
         let start_nonce_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Start Nonce Buffer"),
             size: 64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: self.input_usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -99,11 +101,11 @@ impl GpuContext {
             mapped_at_creation: false,
         });
 
-        // Dispatch config: [total_threads, nonces_per_thread, total_nonces] = 3 u32s
+        // Three dispatch words plus padding for the Apple uniform vec4 binding.
         let dispatch_config_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Dispatch Config Buffer"),
-            size: 12,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: 16,
+            usage: self.input_usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -447,6 +449,11 @@ impl GpuEngine {
                     queue,
                     pipeline,
                     optimal_workgroups,
+                    input_usage: if kernel == Kernel::Apple {
+                        wgpu::BufferUsages::UNIFORM
+                    } else {
+                        wgpu::BufferUsages::STORAGE
+                    },
                 }),
                 device_type: info.device_type,
                 name: info.name.clone(),
@@ -807,7 +814,7 @@ fn run_single_batch(
     let nonces_per_thread = ((batch_size as u64).div_ceil(total_threads)).max(1) as u32;
 
     // Dispatch config: [total_threads, nonces_per_thread, total_nonces]
-    let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size];
+    let dispatch_config = [total_threads as u32, nonces_per_thread, batch_size, 0];
 
     // Write dispatch config
     gpu_ctx.queue.write_buffer(
