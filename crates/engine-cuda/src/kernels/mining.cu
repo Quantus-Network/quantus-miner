@@ -1,6 +1,13 @@
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
+struct MiningParams {
+    u32 midstate[24];
+    u32 start_nonce[16];
+    u32 difficulty_target[16];
+    u32 dispatch_config[3];
+};
+
 const u64 P64 = 0xFFFFFFFF00000001ULL;
 const u64 EPS64 = 0xFFFFFFFFULL;
 
@@ -89,26 +96,19 @@ __device__ __forceinline__ void mul64wide(u64 a, u64 b, u32 &r0, u32 &r1,
 }
 
 __device__ __forceinline__ u64 reduce128(u32 r0, u32 r1, u32 r2, u32 r3) {
-    u32 o0 = 0, o1 = 0;
+    u64 low = ((u64)r1 << 32) | r0;
+    u64 folded = (u64)r2 * EPS64;
+    u64 result;
+    u32 carry;
     asm("{\n\t"
-        ".reg .u32 t0, t1, m, u0, u1, c;\n\t"
-        "sub.cc.u32 t0, %2, %5;\n\t"
-        "subc.cc.u32 t1, %3, 0;\n\t"
-        "subc.u32 m, 0, 0;\n\t"
-        "sub.cc.u32 t0, t0, m;\n\t"
-        "subc.u32 t1, t1, 0;\n\t"
-        "sub.cc.u32 u0, 0, %4;\n\t"
-        "subc.u32 u1, %4, 0;\n\t"
-        "add.cc.u32 t0, t0, u0;\n\t"
-        "addc.cc.u32 t1, t1, u1;\n\t"
-        "addc.u32 c, 0, 0;\n\t"
-        "sub.u32 m, 0, c;\n\t"
-        "add.cc.u32 %0, t0, m;\n\t"
-        "addc.u32 %1, t1, 0;\n\t"
+        "add.cc.u64 %0, %2, %3;\n\t"
+        "addc.u32 %1, 0, 0;\n\t"
+        "sub.cc.u64 %0, %0, %4;\n\t"
+        "subc.u32 %1, %1, 0;\n\t"
         "}"
-        : "+r"(o0), "+r"(o1)
-        : "r"(r0), "r"(r1), "r"(r2), "r"(r3));
-    return ((u64)o1 << 32) | (u64)o0;
+        : "=l"(result), "=r"(carry)
+        : "l"(low), "l"(folded), "l"((u64)r3));
+    return result + (u64)(long long)(int)carry * EPS64;
 }
 
 __device__ __forceinline__ u64 gf64_mul(u64 a, u64 b) {
@@ -400,17 +400,15 @@ extern "C" __global__ void __launch_bounds__(256, 4) hash_nonces(u32 *hashes, co
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results, const u32 *midstate,
-                                       const u32 *start_nonce,
-                                       const u32 *difficulty_target,
-                                       const u32 *dispatch_config) {
+extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
+                                       const MiningParams params) {
     if (*((volatile u32 *)results) != 0u) {
         return;
     }
     u32 thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    u32 total_threads = dispatch_config[0];
-    u32 nonces_per_thread = dispatch_config[1];
-    u32 total_nonces = dispatch_config[2];
+    u32 total_threads = params.dispatch_config[0];
+    u32 nonces_per_thread = params.dispatch_config[1];
+    u32 total_nonces = params.dispatch_config[2];
     if (thread_id >= total_threads) {
         return;
     }
@@ -419,17 +417,17 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results, c
     u64 mid[12];
     #pragma unroll
     for (int i = 0; i < 12; i++) {
-        mid[i] = ((u64)midstate[2 * i + 1] << 32) | (u64)midstate[2 * i];
+        mid[i] = ((u64)params.midstate[2 * i + 1] << 32) | (u64)params.midstate[2 * i];
     }
     u32 tgt[16];
     #pragma unroll
     for (int i = 0; i < 16; i++) {
-        tgt[i] = difficulty_target[i];
+        tgt[i] = params.difficulty_target[i];
     }
     u32 nonce_base[16];
     #pragma unroll
     for (int i = 0; i < 16; i++) {
-        nonce_base[i] = start_nonce[i];
+        nonce_base[i] = params.start_nonce[i];
     }
 
     #pragma unroll

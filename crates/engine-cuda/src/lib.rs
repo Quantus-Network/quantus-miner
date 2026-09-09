@@ -16,6 +16,17 @@ const THREADS_PER_BLOCK: u32 = 256;
 const MAX_BLOCKS: u32 = 4096;
 const RESULTS_U32S: usize = 1 + 16 + 16;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MiningParams {
+    midstate: [u32; 24],
+    start_nonce: [u32; 16],
+    difficulty_target: [u32; 16],
+    dispatch_config: [u32; 3],
+}
+
+unsafe impl cudarc::driver::DeviceRepr for MiningParams {}
+
 struct CudaDevice {
     ctx: Arc<CudaContext>,
     module: Arc<CudaModule>,
@@ -29,8 +40,6 @@ struct WorkerBuffers {
     results: CudaSlice<u32>,
     midstate: CudaSlice<u32>,
     start_nonce: CudaSlice<u32>,
-    target: CudaSlice<u32>,
-    dispatch: CudaSlice<u32>,
     hashes: CudaSlice<u32>,
     mine: CudaFunction,
     hash: CudaFunction,
@@ -205,8 +214,6 @@ fn create_buffers(
         results: stream.alloc_zeros::<u32>(RESULTS_U32S)?,
         midstate: stream.alloc_zeros::<u32>(24)?,
         start_nonce: stream.alloc_zeros::<u32>(16)?,
-        target: stream.alloc_zeros::<u32>(16)?,
-        dispatch: stream.alloc_zeros::<u32>(3)?,
         hashes: stream.alloc_zeros::<u32>(hash_capacity.max(1) as usize * 16)?,
         mine,
         hash,
@@ -261,16 +268,14 @@ fn run_single_batch(
     let nonce_be = batch_start.to_big_endian();
     let mid = pow_core::mining_midstate_u32s(ctx.header, nonce_be[..32].try_into().unwrap());
     let target = pow_core::u512_to_le_u32s(ctx.target);
+    let params = MiningParams {
+        midstate: mid,
+        start_nonce: start_limbs,
+        difficulty_target: target,
+        dispatch_config: dispatch,
+    };
 
     if let Err(e) = (|| {
-        buffers
-            .stream
-            .memcpy_htod(&dispatch, &mut buffers.dispatch)?;
-        buffers
-            .stream
-            .memcpy_htod(&start_limbs, &mut buffers.start_nonce)?;
-        buffers.stream.memcpy_htod(&mid, &mut buffers.midstate)?;
-        buffers.stream.memcpy_htod(&target, &mut buffers.target)?;
         buffers.stream.memset_zeros(&mut buffers.results)?;
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
@@ -279,10 +284,7 @@ fn run_single_batch(
         };
         let mut builder = buffers.stream.launch_builder(&buffers.mine);
         builder.arg(&mut buffers.results);
-        builder.arg(&buffers.midstate);
-        builder.arg(&buffers.start_nonce);
-        builder.arg(&buffers.target);
-        builder.arg(&buffers.dispatch);
+        builder.arg(&params);
         unsafe {
             builder.launch(cfg)?;
         }
@@ -539,6 +541,133 @@ mod tests {
                 .unwrap_or_else(|e| panic!("kv {i}: CUDA hash_nonces failed: {e}"));
             assert_eq!(got.len(), 1, "kv {i}");
             assert_eq!(got[0], want, "kv {i}: CUDA hash != golden");
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_search_matches_golden_target_boundaries() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        let cancel = AtomicBool::new(false);
+        for (i, v) in pow_core::NONCE_HASH_KVS.iter().enumerate() {
+            let nonce = U512::from_big_endian(&decode64(v.nonce));
+            let hash = U512::from_big_endian(&decode64(v.hash));
+            for target in [hash - U512::one(), hash, hash + U512::one()] {
+                let ctx = JobContext {
+                    header: decode32(v.header),
+                    difficulty: U512::one(),
+                    target,
+                };
+                let status = engine.search_range(
+                    &ctx,
+                    Range {
+                        start: nonce,
+                        end: nonce,
+                    },
+                    &AtomicBoolCancelCheck(&cancel),
+                );
+                match status {
+                    EngineStatus::Found { candidate, .. } if hash < target => {
+                        assert_eq!(candidate.nonce, nonce, "kv {i}");
+                        assert_eq!(candidate.hash, hash, "kv {i}");
+                    }
+                    EngineStatus::Exhausted { hash_count: 1 } if hash >= target => {}
+                    other => panic!("kv {i}, target {target}: unexpected {other:?}"),
+                }
+            }
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_hash_batches_match_cpu_across_nonce_carries() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        let header = decode32(pow_core::NONCE_HASH_KVS[4].header);
+        let ctx = engine.prepare_context(header, U512::one());
+        let high = U512::from(0xdead_beef_cafeu64) << 256;
+        for bits in [32, 64, 128, 224] {
+            let start = high + (U512::one() << bits) - U512::from(128u64);
+            let hashes = engine.hash_nonces(header, start, 257).unwrap();
+            for (i, hash) in hashes.into_iter().enumerate() {
+                let nonce = start + U512::from(i);
+                assert_eq!(
+                    hash,
+                    pow_core::hash_from_nonce(&ctx, nonce),
+                    "nonce {nonce}"
+                );
+            }
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_field_reduction_matches_u128_modulo() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        let modulus = 0xffff_ffff_0000_0001u128;
+        let edges = [
+            0,
+            1,
+            0xffff_fffe,
+            0xffff_ffff,
+            0x1_0000_0000,
+            modulus as u64 - 1,
+            modulus as u64,
+            modulus as u64 + 1,
+            u64::MAX,
+        ];
+        let mut values = Vec::new();
+        for high in edges {
+            for low in edges {
+                values.push(((high as u128) << 64) | low as u128);
+            }
+        }
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        for _ in 0..4096 {
+            let mut value = 0u128;
+            for _ in 0..2 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                value = (value << 64) | seed as u128;
+            }
+            values.push(value);
+        }
+        let input: Vec<u32> = values
+            .iter()
+            .flat_map(|v| (0..4).map(move |i| (v >> (32 * i)) as u32))
+            .collect();
+        let source = format!(
+            "{KERNEL_SRC}\n\
+             extern \"C\" __global__ void reduce_test(const u32 *input, u64 *output, u32 count) {{\n\
+                 u32 i = blockIdx.x * blockDim.x + threadIdx.x;\n\
+                 if (i < count) output[i] = gf64_canon(reduce128(\n\
+                     input[4*i], input[4*i+1], input[4*i+2], input[4*i+3]));\n\
+             }}"
+        );
+        let device = &engine.devices[0];
+        let module = device
+            .ctx
+            .load_module(compile_ptx(source).unwrap())
+            .unwrap();
+        let function = module.load_function("reduce_test").unwrap();
+        let stream = device.ctx.default_stream();
+        let input = stream.clone_htod(&input).unwrap();
+        let mut output = stream.alloc_zeros::<u64>(values.len()).unwrap();
+        let count = values.len() as u32;
+        let mut launch = stream.launch_builder(&function);
+        launch.arg(&input).arg(&mut output).arg(&count);
+        unsafe {
+            launch.launch(LaunchConfig::for_num_elems(count)).unwrap();
+        }
+        stream.synchronize().unwrap();
+        for (value, got) in values.iter().zip(stream.clone_dtoh(&output).unwrap()) {
+            assert_eq!(got as u128, value % modulus, "input {value:032x}");
         }
         CudaEngine::clear_worker_resources();
     }

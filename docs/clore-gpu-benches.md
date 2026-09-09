@@ -261,3 +261,50 @@ The 2.04x speedup reproduces, so the win is architectural, not chip-specific.
 
 Same shape as the 3060 Ti: v6's constant-memory tables plus rolled loops are the
 jump, launch bounds is a wash except min-blocks 6 which over-constrains and halves it.
+
+## CUDA kernel optimization round 2 (2026-09-05)
+
+Clore RTX 3080 Ti 12 GB (server 90954, order 2090321, GPU-a313a1c0, driver 535.171.04,
+NVRTC 12.2.140, 220 W). Baseline revision `edb2eba`. Raw records with per-run clocks,
+temperature, power and binary hashes: [benchmarks/2026-09-05-clore-rtx3080ti.json](./benchmarks/2026-09-05-clore-rtx3080ti.json).
+Cost $0.22 ($0.12 runtime + $0.10 creation); the order expired at its 3 h deadline.
+Same-host comparison script: `.agents/skills/cuda-benchmark/scripts/compare.py`.
+
+Every candidate was gated on the five golden vectors plus targets `hash - 1`, `hash`,
+`hash + 1`. Three new `engine-cuda` tests were added and run on this GPU:
+`cuda_search_matches_golden_target_boundaries`, `cuda_hash_batches_match_cpu_across_nonce_carries`
+(257 nonces across 32/64/128/224-bit carries) and `cuda_field_reduction_matches_u128_modulo`
+(81 edge products + 4096 random 128-bit inputs vs CPU `u128 % p`). All five CUDA tests passed
+for the shipped kernel (sha256 `116afb8f…`).
+
+Kept, kernel-only screening (median of 3 × 15 s, batch 1M, alternated with baseline):
+
+| Kernel | MH/s | vs base |
+|---|---|---|
+| baseline (v8 from 2026-09-04) | 216.2 / 217.8 / 219.5 | 1.00x |
+| `reduce128` rewrite (`combined_reduce`) | 223.0–232.4 (5 runs) | ~1.05x |
+| + by-value `MiningParams` (**shipped**) | 235.7 / 232.6 | ~1.08x |
+
+`reduce128` folds `2^64 ≡ 2^32 - 1` and `2^96 ≡ -1` in one 64-bit add/sub chain with a signed
+carry correction, replacing the 13-op 32-bit PTX sequence. `mining_main` now takes one by-value
+`MiningParams` struct instead of four device buffers, dropping four host-to-device copies per batch.
+
+End-to-end release miner, unchanged binary vs `reduce128`-only candidate (`compare.py`,
+5 s warmup then three alternated 15 s rounds per engine, GPU-only):
+
+| Batch | WGSL | CUDA base | CUDA candidate | Gain |
+|---|---|---|---|---|
+| 1M | 50.5 | 209.3 | 217.0 | +3.7% |
+| 4M | 51.9 | 210.7 | 219.6 | +4.2% |
+
+CUDA vs WGSL on the same host is ~4.2x. The `MiningParams` step was GPU-tested and kernel-screened
+but not re-run through `compare.py`; the session was cut short before that pass.
+
+Rejected (kernel-only median MH/s, baseline ~217): `combined_bounds2` (launch bounds min-blocks 2,
+128 regs) 228–232 and `combined_padded` 226–231, both within noise of `combined_reduce`;
+`combined_reduce32` 223; `combined_sbox` 225; `combined_reduce_select` 197; `combined_mul32` 179;
+block 128 with min-blocks 4/6/7/8/9/10: 223/215/211/210/204/182; block 512 min-blocks 2: 218;
+`sbox_parallel` 216. An earlier pass (specialised squaring, S-box chain order, external unroll,
+`__restrict__`, `noinline`, column layout, native add/reduce/wide, static diag, sum tree, fused
+terminal, early compare, split external, output constraints) was slower or equal and was dropped
+before the results format was finalised.
