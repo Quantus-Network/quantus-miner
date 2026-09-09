@@ -39,8 +39,13 @@ async fn run() {
             }
         }
     }
+    for a in edges {
+        for carries in [0u64, 1, 2, 11, 12, 26, 27, u64::from(u32::MAX)] {
+            inputs.extend([a, carries]);
+        }
+    }
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x20260909);
-    for _ in 0..4096 {
+    for _ in 0..65536 {
         inputs.extend([rng.next_u64(), rng.next_u64()]);
     }
     let count = inputs.len() / 2;
@@ -58,11 +63,12 @@ fn arithmetic_edges(@builtin(global_invocation_id) id: vec3<u32>) {{
     let a = pairs[id.x * 2u];
     let b = pairs[id.x * 2u + 1u];
     let v = mul_wide(a, b);
-    answer[id.x * 5u] = v.lo;
-    answer[id.x * 5u + 1u] = v.hi;
-    answer[id.x * 5u + 2u] = gf64_canon(gf64_mul(a, b));
-    answer[id.x * 5u + 3u] = gf64_canon(gf64_sqr(a));
-    answer[id.x * 5u + 4u] = gf64_canon(gf64_reduce(U128(a,b)));
+    answer[id.x * 6u] = v.lo;
+    answer[id.x * 6u + 1u] = v.hi;
+    answer[id.x * 6u + 2u] = gf64_canon(gf64_mul(a, b));
+    answer[id.x * 6u + 3u] = gf64_canon(gf64_sqr(a));
+    answer[id.x * 6u + 4u] = gf64_canon(gf64_reduce(U128(a,b)));
+    answer[id.x * 6u + 5u] = gf64_canon(acc_fold(Acc(a,u32(b))));
 }}
 "#,
         kernel_source, count
@@ -84,7 +90,7 @@ fn arithmetic_edges(@builtin(global_invocation_id) id: vec3<u32>) {{
         contents: bytemuck::cast_slice(&inputs),
         usage: wgpu::BufferUsages::STORAGE,
     });
-    let size = (count * 5 * 8) as u64;
+    let size = (count * 6 * 8) as u64;
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size,
@@ -133,18 +139,19 @@ fn arithmetic_edges(@builtin(global_invocation_id) id: vec3<u32>) {{
         let b = u128::from(inputs[i * 2 + 1]);
         let product = a * b;
         assert_eq!(
-            &answers[i * 5..i * 5 + 5],
+            &answers[i * 6..i * 6 + 6],
             &[
                 product as u64,
                 (product >> 64) as u64,
                 (product % u128::from(p)) as u64,
                 ((a * a) % u128::from(p)) as u64,
-                (((b << 64) | a) % u128::from(p)) as u64
+                (((b << 64) | a) % u128::from(p)) as u64,
+                ((a + (u128::from(b as u32) << 64)) % u128::from(p)) as u64
             ],
             "pair {i}"
         );
     }
     drop(mapped);
     staging.unmap();
-    println!("ARITHMETIC OK: {count} operand pairs, wide product / modular multiply / square / arbitrary u128 reduction");
+    println!("ARITHMETIC OK: {count} operand pairs, wide product / modular multiply / square / arbitrary u128 reduction / accumulator fold");
 }

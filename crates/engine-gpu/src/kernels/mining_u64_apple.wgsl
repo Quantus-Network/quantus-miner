@@ -61,9 +61,14 @@ fn acc_add2(a: Acc, b: Acc) -> Acc {
 }
 
 fn acc_fold(a: Acc) -> u64 {
-    let c = u64(a.carries);
-    let t = a.lo + ((c << 32u) - c);
-    return t + select(0lu, EPS64, t < a.lo);
+    // Add carries * (2^32 - 1) in radix 2^32. The low subtraction
+    // borrows at most one; delta is nonnegative, even when carries=0.
+    let low = u32(a.lo) - a.carries;
+    let delta = a.carries - select(0u, 1u, u32(a.lo) < a.carries);
+    let high0 = u32(a.lo >> 32u);
+    let high = high0 + delta;
+    let result = (u64(high) << 32u) | u64(low);
+    return result + select(0lu, EPS64, high < high0);
 }
 
 struct U128 {
@@ -74,16 +79,24 @@ struct U128 {
 // Reduce a 128-bit value (lo + hi*2^64) mod P using
 // 2^64 ≡ EPS64 and 2^96 ≡ -1 (mod P).
 fn gf64_reduce(v: U128) -> u64 {
-    // In radix B=2^32, B^2 = B-1 and B^3 = -1 modulo P. Fold
-    // the four limbs directly, avoiding 64-bit carry/borrow comparisons.
-    let low = i64(u32(v.lo)) - i64(u32(v.hi)) - i64(u32(v.hi >> 32u));
-    let high = i64(u32(v.lo >> 32u)) + i64(u32(v.hi)) + (low >> 32u);
-    let result = (u64(u32(high)) << 32u) | u64(u32(low));
-    // -1 <= high <= 2B-2: the correction is -1, 0, or 1.
-    // A positive correction has result <= B^2-B-1; a negative one
-    // has its high limb equal to B-1. Neither requires another fold.
-    let correction = bitcast<u64>(high >> 32u);
-    return result + ((correction << 32u) - correction);
+    // With B=2^32, reduce to (w0-w2-w3) + (w1+w2)*B.
+    // Track the low limb's two possible borrows in u32 instead of
+    // carrying a signed 64-bit intermediate through the reduction.
+    let w0 = u32(v.lo);
+    let w1 = u32(v.lo >> 32u);
+    let w2 = u32(v.hi);
+    let w3 = u32(v.hi >> 32u);
+    let low0 = w0 - w2;
+    let low = low0 - w3;
+    let borrow = select(0u, 1u, w0 < w2) + select(0u, 1u, low0 < w3);
+    let high0 = w1 + w2;
+    let high = high0 - borrow;
+    // The mathematical high limb lies in [-1, 2B-2], so carry minus
+    // borrow is -1, 0 or 1. A positive correction cannot overflow;
+    // a negative correction has high=B-1 and cannot underflow.
+    let correction = i64(select(0i, 1i, high0 < w1) - select(0i, 1i, high0 < borrow));
+    let bits = bitcast<u64>(correction);
+    return ((u64(high) << 32u) | u64(low)) + ((bits << 32u) - bits);
 }
 
 fn mul_wide(a: u64, b: u64) -> U128 {
