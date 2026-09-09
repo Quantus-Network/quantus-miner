@@ -822,14 +822,9 @@ fn run_single_batch(
         .queue
         .write_buffer(&resources.start_nonce_buffer, 0, &start_nonce_bytes);
 
-    // Precompute the sponge midstate for this batch (header + high nonce half)
     let nonce_be = batch_start.to_big_endian();
-    let midstate = pow_core::mining_midstate(ctx.header, nonce_be[..32].try_into().unwrap());
-    let mut midstate_u32s = [0u32; 24];
-    for (i, felt) in midstate.iter().enumerate() {
-        midstate_u32s[2 * i] = *felt as u32;
-        midstate_u32s[2 * i + 1] = (*felt >> 32) as u32;
-    }
+    let midstate_u32s =
+        pow_core::mining_midstate_u32s(ctx.header, nonce_be[..32].try_into().unwrap());
     gpu_ctx.queue.write_buffer(
         &resources.midstate_buffer,
         0,

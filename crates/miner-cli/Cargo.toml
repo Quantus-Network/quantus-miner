@@ -14,6 +14,7 @@ tokio = { workspace = true, features = ["full"] }
 env_logger = { workspace = true }
 log = { workspace = true }
 engine-cpu = { path = "../engine-cpu" }
+engine-cuda = { path = "../engine-cuda" }
 engine-gpu = { path = "../engine-gpu" }
 primitive-types = { workspace = true }
 rand = { workspace = true }

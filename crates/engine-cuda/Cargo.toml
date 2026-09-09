@@ -1,0 +1,23 @@
+[package]
+name = "engine-cuda"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Native CUDA mining engine for NVIDIA GPUs (no Vulkan)"
+
+[dependencies]
+cudarc = { version = "0.19.9", default-features = false, features = [
+	"cuda-12040",
+	"driver",
+	"dynamic-loading",
+	"fallback-dynamic-loading",
+	"nvrtc",
+	"std",
+] }
+engine-cpu = { path = "../engine-cpu" }
+log = { workspace = true }
+pow-core = { path = "../pow-core" }
+primitive-types = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

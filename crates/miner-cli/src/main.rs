@@ -87,6 +87,10 @@ enum Command {
         #[arg(long = "allow-integrated", env = "MINER_ALLOW_INTEGRATED")]
         allow_integrated: bool,
 
+        /// Use the native CUDA engine instead of wgpu/Vulkan (NVIDIA only)
+        #[arg(long = "cuda-gpu", env = "MINER_CUDA_GPU")]
+        cuda_gpu: bool,
+
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
         verbose: bool,
@@ -117,6 +121,10 @@ enum Command {
         /// Allow integrated GPUs (APUs) even when discrete GPUs are available
         #[arg(long = "allow-integrated", env = "MINER_ALLOW_INTEGRATED")]
         allow_integrated: bool,
+
+        /// Use the native CUDA engine instead of wgpu/Vulkan (NVIDIA only)
+        #[arg(long = "cuda-gpu", env = "MINER_CUDA_GPU")]
+        cuda_gpu: bool,
 
         /// Enable verbose logging
         #[arg(short, long, env = "MINER_VERBOSE")]
@@ -160,6 +168,7 @@ async fn main() {
             gpu_throttle_ms,
             metrics_port,
             allow_integrated,
+            cuda_gpu,
             verbose,
         } => {
             init_logger(verbose);
@@ -207,6 +216,7 @@ async fn main() {
                 cpu_batch_size,
                 gpu_throttle_ms,
                 allow_integrated,
+                cuda_gpu,
             };
 
             if let Err(e) = run(config).await {
@@ -222,6 +232,7 @@ async fn main() {
             cpu_batch_size,
             duration,
             allow_integrated,
+            cuda_gpu,
             verbose,
         } => {
             init_logger(verbose);
@@ -232,6 +243,7 @@ async fn main() {
                 cpu_batch_size,
                 duration,
                 allow_integrated,
+                cuda_gpu,
             )
             .await;
         }
@@ -293,9 +305,9 @@ fn init_logger(verbose: bool) {
     if std::env::var("RUST_LOG").is_err() {
         // Filter out noisy wgpu/naga shader compilation logs
         let log_level = if verbose {
-            "debug,miner=debug,gpu_engine=debug,engine_cpu=debug,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn"
+            "debug,miner=debug,gpu_engine=debug,cuda_engine=debug,engine_cpu=debug,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn"
         } else {
-            "info,miner=info,gpu_engine=info,wgpu=error,wgpu_core=error,wgpu_hal=error,naga=error"
+            "info,miner=info,gpu_engine=info,cuda_engine=info,wgpu=error,wgpu_core=error,wgpu_hal=error,naga=error"
         };
         std::env::set_var("RUST_LOG", log_level);
     }
@@ -309,20 +321,30 @@ async fn run_benchmark(
     cpu_batch_size: u64,
     duration: u64,
     allow_integrated: bool,
+    cuda_gpu: bool,
 ) {
     let effective_cpu_workers = cpu_workers.unwrap_or_else(num_cpus::get);
 
-    // Initialize GPU engine (no throttle for benchmark)
-    let (gpu_engine, effective_gpu_devices) = match miner_service::resolve_gpu_configuration(
-        gpu_devices,
-        gpu_batch_size,
-        0,
-        allow_integrated,
-    ) {
-        Ok((engine, count)) => (engine, count),
-        Err(e) => {
-            eprintln!("❌ ERROR: {}", e);
-            std::process::exit(1);
+    let (gpu_engine, effective_gpu_devices) = if cuda_gpu {
+        match miner_service::resolve_cuda_configuration(gpu_devices, gpu_batch_size, 0) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                eprintln!("❌ ERROR: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match miner_service::resolve_gpu_configuration(
+            gpu_devices,
+            gpu_batch_size,
+            0,
+            allow_integrated,
+        ) {
+            Ok((engine, count)) => (engine, count),
+            Err(e) => {
+                eprintln!("❌ ERROR: {}", e);
+                std::process::exit(1);
+            }
         }
     };
 
@@ -434,6 +456,7 @@ async fn run_benchmark(
             }
 
             engine_gpu::GpuEngine::clear_worker_resources();
+            engine_cuda::CudaEngine::clear_worker_resources();
         });
 
         handles.push(handle);
