@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_GPU_BATCH_SIZE: u32 = 1_000_000;
 const DEFAULT_CUDA_BATCH_SIZE: u32 = 32_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
+const BENCHMARK_DIFFICULTY: U512 = U512::MAX;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -396,11 +397,10 @@ async fn run_benchmark(
     // Random header hash for benchmark
     let mut header = [0u8; 32];
     rand::rng().fill_bytes(&mut header);
-    let difficulty = U512::MAX; // High difficulty - no solutions expected
-
     let ref_engine = cpu_engine.as_ref().or(gpu_engine.as_ref()).unwrap();
-    let ctx = ref_engine.prepare_context(header, difficulty);
+    let ctx = ref_engine.prepare_context(header, BENCHMARK_DIFFICULTY);
 
+    println!("Difficulty: effectively infinite (target 1)");
     println!("⛏️  Starting benchmark...");
 
     // Spawn worker threads

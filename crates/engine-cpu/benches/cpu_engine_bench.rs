@@ -5,24 +5,27 @@ use primitive_types::U512;
 use rand::RngCore;
 use std::sync::atomic::AtomicBool;
 
+const BENCHMARK_DIFFICULTY: U512 = U512::MAX;
+
+fn benchmark_context() -> JobContext {
+    let mut header = [0u8; 32];
+    rand::rng().fill_bytes(&mut header);
+    JobContext::new(header, BENCHMARK_DIFFICULTY)
+}
+
 fn bench_cpu_fast_engine(c: &mut Criterion) {
-    // Create the engine with batch size of 10000
     let engine = FastCpuEngine::new(10_000);
     let cancel_flag = AtomicBool::new(false);
     let cancel_check = AtomicBoolCancelCheck(&cancel_flag);
+    let ctx = benchmark_context();
 
     let large_range = Range {
         start: U512::from(0u64),
-        end: U512::from(100000u64), // 100,000 nonces
+        end: U512::from(99_999u64),
     };
 
     c.bench_function("cpu_fast_large_range", |b| {
         b.iter(|| {
-            let mut header = [0u8; 32];
-            rand::rng().fill_bytes(&mut header);
-            let difficulty = U512::from(10_000_000u64);
-            let ctx = JobContext::new(header, difficulty);
-
             let result = engine.search_range(
                 black_box(&ctx),
                 black_box(large_range.clone()),
@@ -34,13 +37,8 @@ fn bench_cpu_fast_engine(c: &mut Criterion) {
 }
 
 fn bench_hash_from_nonce(c: &mut Criterion) {
-    // Create a test job context
-    let mut header = [0u8; 32];
-    rand::rng().fill_bytes(&mut header);
-    let difficulty = U512::from(1000u64);
-    let ctx = JobContext::new(header, difficulty);
+    let ctx = benchmark_context();
 
-    // Create some test nonce values
     let test_nonce_values: Vec<U512> = (0..100).map(|i| U512::from(1000u64 + i)).collect();
 
     c.bench_function("hash_from_nonce_single", |b| {
