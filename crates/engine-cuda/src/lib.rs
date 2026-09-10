@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 const KERNEL_SRC: &str = include_str!("kernels/mining.cu");
 const THREADS_PER_BLOCK: u32 = 256;
 const MAX_BLOCKS: u32 = 4096;
-const RESULTS_U32S: usize = 2;
+/// Claim flag, then the lowest candidate index (starts at `u32::MAX`).
+const RESULTS_INIT: [u32; 2] = [0, u32::MAX];
+const RESULTS_U32S: usize = RESULTS_INIT.len();
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,10 +57,12 @@ struct WorkerBuffers {
 /// Goldilocks reduction skips two carry corrections (`reduce128` in
 /// `kernels/mining.cu`). Each of the roughly 1,470 field multiplies per hash
 /// can therefore be off by EPS mod p with probability about 2^-33, so about one
-/// nonce in three million is hashed wrong on the GPU. A wrong hash that lands
-/// below the target is rejected by CPU verification and the search resumes
-/// after it. A wrong hash for a nonce that is actually valid is missed and the
-/// range reports `Exhausted`. `hash_count` counts every evaluated nonce, wrong
+/// nonce in three million is hashed wrong on the GPU. A launch reports its
+/// lowest candidate index; a wrong hash that lands below the target is
+/// rejected by CPU verification and the search resumes right after it, which
+/// is exact because every nonce below the lowest candidate was evaluated. A
+/// wrong hash for a nonce that is actually valid is missed and the range
+/// reports `Exhausted`. `hash_count` counts every evaluated nonce, wrong
 /// ones included. The expected loss is about 3e-7 of solutions, far below the
 /// throughput the shortcut buys. `hash_nonces` is subject to the same contract:
 /// it is a kernel self-test, not a verifier; use `pow_core::hash_from_nonce`.
@@ -383,7 +387,9 @@ fn run_single_batch(
 
     let launch_start = Instant::now();
     if let Err(e) = (|| {
-        buffers.stream.memset_zeros(&mut buffers.results)?;
+        buffers
+            .stream
+            .memcpy_htod(&RESULTS_INIT, &mut buffers.results)?;
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (THREADS_PER_BLOCK, 1, 1),
@@ -986,14 +992,15 @@ mod tests {
     }
 
     #[test]
-    fn cuda_search_resumes_after_rejected_candidate() {
+    fn cuda_search_resumes_after_rejected_candidate_and_returns_lowest_solution() {
         let Some(engine) = engine_or_skip() else {
             return;
         };
-        // Target equal to the golden hash: the golden nonce is a prefix-equal
-        // candidate that CPU verification rejects, and the search must go on.
-        // Vector 4's hash starts with 0xea, so almost every later nonce is a
-        // real solution within the next few nonces.
+        // Target equal to the golden hash: the golden nonce at index 0 is a
+        // prefix-equal candidate that CPU verification rejects. Vector 4's hash
+        // starts with 0xea, so most later nonces are real solutions and race
+        // for the claim; the launch must publish the lowest index, so the
+        // rejection happens first and the result is the lowest valid nonce.
         let v = &pow_core::NONCE_HASH_KVS[4];
         let start = U512::from_big_endian(&decode64(v.nonce));
         let target = U512::from_big_endian(&decode64(v.hash));
@@ -1003,6 +1010,14 @@ mod tests {
             target,
         };
         let end = start + U512::from(32u64);
+        let lowest_valid = (0..=32u64)
+            .map(|i| start + U512::from(i))
+            .find(|&nonce| pow_core::hash_from_nonce(&ctx, nonce) < target)
+            .expect("a valid nonce within the range");
+        assert!(
+            lowest_valid > start,
+            "the golden nonce itself must not qualify"
+        );
         let cancel = AtomicBool::new(false);
         match engine.search_range(&ctx, Range { start, end }, &AtomicBoolCancelCheck(&cancel)) {
             EngineStatus::Found {
@@ -1010,12 +1025,11 @@ mod tests {
                 hash_count,
                 ..
             } => {
-                assert!(candidate.nonce > start && candidate.nonce <= end);
+                assert_eq!(candidate.nonce, lowest_valid);
                 assert_eq!(
-                    pow_core::hash_from_nonce(&ctx, candidate.nonce),
-                    candidate.hash
+                    candidate.hash,
+                    pow_core::hash_from_nonce(&ctx, lowest_valid)
                 );
-                assert!(candidate.hash < target);
                 assert_eq!(
                     hash_count, 33,
                     "one rejected nonce plus the 32-nonce resume batch"

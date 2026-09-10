@@ -510,9 +510,11 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         if (cmp == 1u) {
             continue;
         }
-        if (atomicExch(&results[0], 1u) == 0u) {
-            results[1] = logical_index;
-        }
+        // Publish the lowest candidate index of the launch. A candidate thread
+        // stops here, so every nonce below the published index was fully
+        // evaluated and the host can resume exactly after a rejected one.
+        atomicMin(&results[1], logical_index);
+        results[0] = 1u;
         return;
     }
 }
