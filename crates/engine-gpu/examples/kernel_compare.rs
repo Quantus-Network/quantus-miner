@@ -1,5 +1,11 @@
+//! Compare two trusted mining kernels with CPU parity checks and ABBA timing.
+//!
+//! Usage: kernel_compare baseline.wgsl candidate.wgsl
+//! Both inputs must implement the miner's buffer layout and bounds checks;
+//! runtime shader checks are disabled to match the production mining pipeline.
 use pow_core::{hash_from_nonce, mining_midstate, JobContext};
 use primitive_types::U512;
+use rand::{RngCore, SeedableRng};
 use std::time::Instant;
 
 fn u512_to_u32s_le(v: U512) -> [u32; 16] {
@@ -24,7 +30,7 @@ struct Runner {
 }
 
 impl Runner {
-    async fn new(trusted: bool) -> Self {
+    async fn new(trusted: bool, source: &str) -> Self {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
@@ -49,9 +55,11 @@ impl Runner {
         let kernel = engine_gpu::Kernel::for_adapter(&adapter);
         let desc = wgpu::ShaderModuleDescriptor {
             label: Some(kernel.label()),
-            source: wgpu::ShaderSource::Wgsl(kernel.source().into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         };
         let shader = if trusted {
+            // SAFETY: This offline developer tool accepts only trusted mining
+            // shaders with the production layout and bounds-checked accesses.
             unsafe {
                 device.create_shader_module_trusted(desc, wgpu::ShaderRuntimeChecks::unchecked())
             }
@@ -184,46 +192,71 @@ impl Runner {
 }
 
 fn main() {
-    let batch: u32 = std::env::args()
-        .nth(1)
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(8_000_000);
-    let iters = 4u32;
+    let batch = 1_000_000u32;
     let rt = tokio::runtime::Runtime::new().unwrap();
-
-    for trusted in [false, true] {
-        let label = if trusted {
-            "trusted (no checks)"
-        } else {
-            "checked (default)"
-        };
-        let runner = rt.block_on(Runner::new(trusted));
-
+    let paths: Vec<_> = std::env::args().skip(1).collect();
+    assert_eq!(paths.len(), 2, "baseline.wgsl candidate.wgsl");
+    let runners: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(path).unwrap();
+            rt.block_on(Runner::new(true, &source))
+        })
+        .collect();
+    for runner in &runners {
         let header = [9u8; 32];
         let ctx = JobContext::new(header, U512::one());
         let start = (U512::from(7u64) << 300) | U512::from(123456789u64);
         runner.run_batch(header, start, 256, ctx.target);
         let r = runner.read_results();
-        assert_eq!(r[0], 1, "{label}: no solution with target=MAX");
+        assert_eq!(r[0], 1);
         let nonce = U512::from_little_endian(bytemuck::cast_slice(&r[1..17]));
         let hash = U512::from_little_endian(bytemuck::cast_slice(&r[17..33]));
-        assert_eq!(hash, hash_from_nonce(&ctx, nonce), "{label}: hash mismatch");
-        println!("{label}: correctness OK");
-
-        let header = [42u8; 32];
-        let start = U512::from(1u64) << 200;
-        let target = U512::one();
-        runner.run_batch(header, start, batch, target);
-        let mut total = 0.0;
-        for i in 0..iters {
-            total += runner.run_batch(
-                header,
-                start + U512::from((i as u64 + 1) * batch as u64),
-                batch,
-                target,
-            );
+        assert_eq!(hash, hash_from_nonce(&ctx, nonce));
+        // Force equality of every high word, then exercise strict comparison
+        // of the low half. Easy random targets rarely reach this branch.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x517a);
+        for _ in 0..64 {
+            let mut header = [0u8; 32];
+            let mut bytes = [0u8; 64];
+            rng.fill_bytes(&mut header);
+            rng.fill_bytes(&mut bytes);
+            let nonce = U512::from_big_endian(&bytes);
+            let ctx = JobContext::new(header, U512::one());
+            let hash = hash_from_nonce(&ctx, nonce);
+            assert!(hash > U512::zero() && hash < U512::MAX);
+            for (target, found) in [
+                (hash - U512::one(), false),
+                (hash, false),
+                (hash + U512::one(), true),
+            ] {
+                runner.run_batch(header, nonce, 1, target);
+                let result = runner.read_results();
+                assert_eq!(result[0] != 0, found, "strict target comparison");
+                if found {
+                    assert_eq!(
+                        U512::from_little_endian(bytemuck::cast_slice(&result[1..17])),
+                        nonce
+                    );
+                    assert_eq!(
+                        U512::from_little_endian(bytemuck::cast_slice(&result[17..33])),
+                        hash
+                    );
+                }
+            }
         }
-        let mhs = (batch as f64 * iters as f64) / total / 1e6;
-        println!("{label}: {batch} nonces x{iters} in {total:.3}s = {mhs:.3} MH/s");
+        runner.run_batch([42; 32], U512::one() << 200, batch, U512::one());
     }
+    let mut totals = [0.0; 2];
+    for iteration in 0..100u64 {
+        for (offset, index) in [0, 1, 1, 0].into_iter().enumerate() {
+            let start = (U512::one() << 200)
+                + U512::from((iteration * 4 + offset as u64) * u64::from(batch));
+            totals[index] += runners[index].run_batch([42; 32], start, batch, U512::one());
+        }
+    }
+    for index in 0..2 {
+        println!("{}: {:.4} MH/s", paths[index], 200.0 / totals[index]);
+    }
+    println!("speedup: {:.3}%", (totals[0] / totals[1] - 1.0) * 100.0);
 }

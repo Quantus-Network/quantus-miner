@@ -4,10 +4,11 @@
 @group(0) @binding(0) var<storage, read_write> results: array<atomic<u32>>;
 // Sponge state after absorbing header + high nonce half (12 felts as LE u32 pairs),
 // precomputed on the host per batch. See pow_core::mining_midstate.
-@group(0) @binding(1) var<storage, read> midstate: array<u32, 24>;
-@group(0) @binding(2) var<storage, read> start_nonce: array<u32, 16>;
-@group(0) @binding(3) var<storage, read> difficulty_target: array<u32, 16>;
-@group(0) @binding(4) var<storage, read> dispatch_config: array<u32, 3>;
+// Pack u32 words into vec4s to preserve the byte layout with uniform alignment.
+@group(0) @binding(1) var<uniform> midstate: array<vec4<u32>, 6>;
+@group(0) @binding(2) var<uniform> start_nonce: array<vec4<u32>, 4>;
+@group(0) @binding(3) var<uniform> difficulty_target: array<vec4<u32>, 4>;
+@group(0) @binding(4) var<uniform> dispatch_config: vec4<u32>;
 
 const P64: u64 = 0xFFFFFFFF00000001lu;
 // EPS64 = 2^32 - 1 = 2^64 mod P
@@ -60,9 +61,14 @@ fn acc_add2(a: Acc, b: Acc) -> Acc {
 }
 
 fn acc_fold(a: Acc) -> u64 {
-    let c = u64(a.carries);
-    let t = a.lo + ((c << 32u) - c);
-    return t + select(0lu, EPS64, t < a.lo);
+    // Add carries * (2^32 - 1) in radix 2^32. The low subtraction
+    // borrows at most one; delta is nonnegative, even when carries=0.
+    let low = u32(a.lo) - a.carries;
+    let delta = a.carries - select(0u, 1u, u32(a.lo) < a.carries);
+    let high0 = u32(a.lo >> 32u);
+    let high = high0 + delta;
+    let result = (u64(high) << 32u) | u64(low);
+    return result + select(0lu, EPS64, high < high0);
 }
 
 struct U128 {
@@ -73,13 +79,24 @@ struct U128 {
 // Reduce a 128-bit value (lo + hi*2^64) mod P using
 // 2^64 ≡ EPS64 and 2^96 ≡ -1 (mod P).
 fn gf64_reduce(v: U128) -> u64 {
-    let hi_hi = v.hi >> 32u;
-    let hi_lo = v.hi & EPS64;
-    var t0 = v.lo - hi_hi;
-    t0 = t0 - select(0lu, EPS64, v.lo < hi_hi);
-    let t1 = hi_lo * EPS64;
-    let t2 = t0 + t1;
-    return t2 + select(0lu, EPS64, t2 < t0);
+    // With B=2^32, reduce to (w0-w2-w3) + (w1+w2)*B.
+    // Track the low limb's two possible borrows in u32 instead of
+    // carrying a signed 64-bit intermediate through the reduction.
+    let w0 = u32(v.lo);
+    let w1 = u32(v.lo >> 32u);
+    let w2 = u32(v.hi);
+    let w3 = u32(v.hi >> 32u);
+    let low0 = w0 - w2;
+    let low = low0 - w3;
+    let borrow = select(0u, 1u, w0 < w2) + select(0u, 1u, low0 < w3);
+    let high0 = w1 + w2;
+    let high = high0 - borrow;
+    // The mathematical high limb lies in [-1, 2B-2], so carry minus
+    // borrow is -1, 0 or 1. A positive correction cannot overflow;
+    // a negative correction has high=B-1 and cannot underflow.
+    let correction = i64(select(0i, 1i, high0 < w1) - select(0i, 1i, high0 < borrow));
+    let bits = bitcast<u64>(correction);
+    return ((u64(high) << 32u) | u64(low)) + ((bits << 32u) - bits);
 }
 
 fn mul_wide(a: u64, b: u64) -> U128 {
@@ -91,8 +108,12 @@ fn mul_wide(a: u64, b: u64) -> U128 {
     let lh = a_lo * b_hi;
     let hl = a_hi * b_lo;
     let hh = a_hi * b_hi;
-    let mid = (ll >> 32u) + (lh & EPS64) + (hl & EPS64);
-    return U128((mid << 32u) | (ll & EPS64), hh + (lh >> 32u) + (hl >> 32u) + (mid >> 32u));
+    // Accumulate the middle limb in 32 bits; keep both carry bits explicitly.
+    let mid0 = u32(ll >> 32u) + u32(lh);
+    let c0 = select(0u, 1u, mid0 < u32(lh));
+    let mid = mid0 + u32(hl);
+    let c = c0 + select(0u, 1u, mid < mid0);
+    return U128((u64(mid) << 32u) | u64(u32(ll)), hh + (lh >> 32u) + (hl >> 32u) + u64(c));
 }
 
 // (a*b + addend) mod P for b <= 2^64 - 2^32 (all MDS_DIAG entries): the addend's
@@ -113,8 +134,12 @@ fn gf64_sqr(a: u64) -> u64 {
     let ll = a_lo * a_lo;
     let lh = a_lo * a_hi;
     let hh = a_hi * a_hi;
-    let mid = (ll >> 32u) + ((lh & EPS64) << 1u);
-    return gf64_reduce(U128((mid << 32u) | (ll & EPS64), hh + ((lh >> 32u) << 1u) + (mid >> 32u)));
+    // Accumulate the middle limb in 32 bits; keep both carry bits explicitly.
+    let mid0 = u32(ll >> 32u) + u32(lh);
+    let c0 = select(0u, 1u, mid0 < u32(lh));
+    let mid = mid0 + u32(lh);
+    let c = c0 + select(0u, 1u, mid < mid0);
+    return gf64_reduce(U128((u64(mid) << 32u) | u64(u32(ll)), hh + ((lh >> 32u) << 1u) + u64(c)));
 }
 
 fn gf64_sbox(x: u64) -> u64 {
@@ -137,16 +162,16 @@ fn mds4(x0: u64, x1: u64, x2: u64, x3: u64) -> array<Acc, 4> {
     let t01233 = acc_add(t0123, x3);
     return array<Acc, 4>(
         acc_add2(t01123, t01),
-        acc_add2(t01123, acc_add(Acc(x2, 0u), x2)),
+        acc_add2(t01123, Acc(x2 << 1u, u32(x2 >> 63u))),
         acc_add2(t01233, t23),
-        acc_add2(t01233, acc_add(Acc(x0, 0u), x0))
+        acc_add2(t01233, Acc(x0 << 1u, u32(x0 >> 63u)))
     );
 }
 
 // External linear layer: 4x4 MDS on each chunk, then circulant sums, plus the
 // next round's constants. Additions are accumulated unreduced (at most 27
 // carries) and folded once per output.
-fn ext_layer64(state: ptr<function, array<u64, 12>>, rc: array<u64, 12>) {
+fn ext_layer64(state: ptr<function, array<u64, 12>>, rc_index: u32) {
     var y: array<Acc, 12>;
     for (var chunk = 0u; chunk < 3u; chunk++) {
         let o = chunk * 4u;
@@ -158,9 +183,9 @@ fn ext_layer64(state: ptr<function, array<u64, 12>>, rc: array<u64, 12>) {
     }
     for (var k = 0u; k < 4u; k++) {
         let s = acc_add2(acc_add2(y[k], y[k + 4u]), y[k + 8u]);
-        (*state)[k] = acc_fold(acc_add(acc_add2(y[k], s), rc[k]));
-        (*state)[k + 4u] = acc_fold(acc_add(acc_add2(y[k + 4u], s), rc[k + 4u]));
-        (*state)[k + 8u] = acc_fold(acc_add(acc_add2(y[k + 8u], s), rc[k + 8u]));
+        (*state)[k] = acc_fold(acc_add(acc_add2(y[k], s), RC_EXT[rc_index][k]));
+        (*state)[k + 4u] = acc_fold(acc_add(acc_add2(y[k + 4u], s), RC_EXT[rc_index][k + 4u]));
+        (*state)[k + 8u] = acc_fold(acc_add(acc_add2(y[k + 8u], s), RC_EXT[rc_index][k + 8u]));
     }
 }
 
@@ -224,7 +249,7 @@ fn permute64(state: ptr<function, array<u64, 12>>) {
             sbox_lanes(state, select(1u, 12u, is_ext));
         }
         if (is_ext) {
-            ext_layer64(state, RC_EXT[select(k, k - 22u, k > 26u)]);
+            ext_layer64(state, select(k, k - 22u, k > 26u));
         } else {
             int_layer64(state, RC_INTERNAL[k - 4u]);
             if (k == 26u) {
@@ -255,15 +280,15 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Hoist uniform storage reads out of the nonce loop
     var mid: array<u64, 12>;
     for (var i = 0u; i < 12u; i++) {
-        mid[i] = (u64(midstate[2u * i + 1u]) << 32u) | u64(midstate[2u * i]);
+        mid[i] = (u64(midstate[(2u * i + 1u) / 4u][(2u * i + 1u) % 4u]) << 32u) | u64(midstate[(2u * i) / 4u][(2u * i) % 4u]);
     }
     var tgt: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) {
-        tgt[i] = difficulty_target[i];
+        tgt[i] = difficulty_target[(i) / 4u][(i) % 4u];
     }
     var nonce_base: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) {
-        nonce_base[i] = start_nonce[i];
+        nonce_base[i] = start_nonce[(i) / 4u][(i) % 4u];
     }
 
     for (var j = 0u; j < nonces_per_thread; j = j + 1u) {
@@ -298,59 +323,53 @@ fn mining_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var i = 0u; i < 8u; i++) {
             st[i] = gf64_add(st[i], u64(bswap32(current_nonce[7u - i])));
         }
-        // Squeeze-and-compare phases share one inlined permutation: phase 0
-        // pads after absorbing, phase 1 yields the most significant 256 bits of
-        // the hash, which decide hash-vs-target on their own unless they exactly
-        // equal the target's high half, and only candidates run phase 2 for the
-        // low half. Byte-swapped hash words are produced on demand.
-        var hash_le: array<u32, 16>;
-        var cmp = 0u;
-        var below = false;
-        for (var phase = 0u; phase < 3u; phase++) {
+        // The overwhelmingly common rejection needs only the first hash word.
+        // Delay materializing the full result until that comparison passes.
+        for (var phase = 0u; phase < 2u; phase++) {
             permute64(&st);
             if (phase == 0u) {
                 st[0] = gf64_add(st[0], 1lu);
                 st[1] = gf64_add(st[1], 1lu);
-                continue;
             }
-            var words: array<u32, 8>;
-            for (var i = 0u; i < 4u; i++) {
-                let c = gf64_canon(st[i]);
-                words[2u * i] = bswap32(u32(c & EPS64));
-                words[2u * i + 1u] = bswap32(u32(c >> 32u));
-            }
-            let base = select(15u, 7u, phase == 2u);
-            for (var i = 0u; i < 8u; i++) {
-                hash_le[base - i] = words[i];
-            }
-            if (phase == 1u) {
-                for (var i = 0u; i < 8u; i++) {
-                    let h = words[i];
-                    let t = tgt[15u - i];
-                    if (h != t) {
-                        cmp = select(2u, 1u, h > t);
-                        break;
-                    }
-                }
-                if (cmp == 1u) {
-                    break;
-                }
-            } else {
-                below = cmp == 2u;
-                if (!below) {
-                    for (var i = 0u; i < 8u; i++) {
-                        let h = words[i];
-                        let t = tgt[7u - i];
-                        if (h != t) {
-                            below = h < t;
-                            break;
-                        }
-                    }
-                }
+        }
+        let first = bswap32(u32(gf64_canon(st[0]) & EPS64));
+        if (first > tgt[15]) {
+            continue;
+        }
+        var hash_le: array<u32, 16>;
+        var cmp = 0u;
+        for (var i = 0u; i < 4u; i++) {
+            let c = gf64_canon(st[i]);
+            hash_le[15u - 2u * i] = bswap32(u32(c & EPS64));
+            hash_le[14u - 2u * i] = bswap32(u32(c >> 32u));
+        }
+        for (var i = 0u; i < 8u; i++) {
+            let h = hash_le[15u - i];
+            let t = tgt[15u - i];
+            if (h != t) {
+                cmp = select(2u, 1u, h > t);
+                break;
             }
         }
         if (cmp == 1u) {
             continue;
+        }
+        permute64(&st);
+        for (var i = 0u; i < 4u; i++) {
+            let c = gf64_canon(st[i]);
+            hash_le[7u - 2u * i] = bswap32(u32(c & EPS64));
+            hash_le[6u - 2u * i] = bswap32(u32(c >> 32u));
+        }
+        var below = cmp == 2u;
+        if (!below) {
+            for (var i = 0u; i < 8u; i++) {
+                let h = hash_le[7u - i];
+                let t = tgt[7u - i];
+                if (h != t) {
+                    below = h < t;
+                    break;
+                }
+            }
         }
 
         if (below) {
@@ -579,7 +598,7 @@ fn state_unpack(v: ptr<function, array<u64, 12>>, state: ptr<function, array<Gol
 fn external_linear_layer(state: ptr<function, array<GoldilocksField, 12>>) {
     var st: array<u64, 12>;
     state_pack(state, &st);
-    ext_layer64(&st, RC_ZERO);
+    ext_layer64(&st, 8u);
     state_unpack(&st, state);
 }
 
