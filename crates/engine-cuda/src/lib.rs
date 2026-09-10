@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 const KERNEL_SRC: &str = include_str!("kernels/mining.cu");
 const THREADS_PER_BLOCK: u32 = 256;
 const MAX_BLOCKS: u32 = 4096;
-/// Claim flag, then the lowest candidate index (starts at `u32::MAX`).
-const RESULTS_INIT: [u32; 2] = [0, u32::MAX];
+/// Lowest candidate index (`u32::MAX` = none), then the count of nonces that
+/// candidate threads left unevaluated. Both are only ever updated atomically.
+const RESULTS_INIT: [u32; 2] = [u32::MAX, 0];
 const RESULTS_U32S: usize = RESULTS_INIT.len();
 
 #[repr(C)]
@@ -62,10 +63,13 @@ struct WorkerBuffers {
 /// rejected by CPU verification and the search resumes right after it, which
 /// is exact because every nonce below the lowest candidate was evaluated. A
 /// wrong hash for a nonce that is actually valid is missed and the range
-/// reports `Exhausted`. `hash_count` counts every evaluated nonce, wrong
-/// ones included. The expected loss is about 3e-7 of solutions, far below the
-/// throughput the shortcut buys. `hash_nonces` is subject to the same contract:
-/// it is a kernel self-test, not a verifier; use `pow_core::hash_from_nonce`.
+/// reports `Exhausted`. `hash_count` counts the nonces evaluated in this call
+/// that will not be evaluated again, wrong ones included: a found batch counts
+/// every nonce its threads hashed (candidate threads stop at their candidate),
+/// and a rejected candidate counts the nonces below it. The expected loss is
+/// about 3e-7 of solutions, far below the throughput the shortcut buys.
+/// `hash_nonces` is subject to the same contract: it is a kernel self-test,
+/// not a verifier; use `pow_core::hash_from_nonce`.
 pub struct CudaEngine {
     engine_id: usize,
     devices: Vec<Arc<CudaDevice>>,
@@ -418,12 +422,13 @@ fn run_single_batch(
     };
 
     let dispatched = (total_threads as u64 * nonces_per_thread as u64).min(batch_size as u64);
-    if result_u32s[0] != 0 {
-        let logical_index = result_u32s[1] as u64;
-        if logical_index >= dispatched {
+    if result_u32s[0] != u32::MAX {
+        let logical_index = result_u32s[0] as u64;
+        let unevaluated = result_u32s[1] as u64;
+        if logical_index >= dispatched || unevaluated >= dispatched {
             log::error!(
                 target: "cuda_engine",
-                "CUDA returned out-of-range candidate index {logical_index} for {dispatched} dispatched nonces"
+                "CUDA returned candidate index {logical_index} with {unevaluated} unevaluated nonces for {dispatched} dispatched"
             );
             return BatchResult::DeviceLost;
         }
@@ -445,7 +450,7 @@ fn run_single_batch(
                 work: nonce.to_big_endian(),
                 hash,
             },
-            hash_count: dispatched,
+            hash_count: dispatched - unevaluated,
         };
     }
 
@@ -957,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_found_batch_counts_every_dispatched_nonce() {
+    fn cuda_found_batch_counts_only_evaluated_nonces() {
         let batch_size = 4_000_000u32;
         let Some(engine) = engine_or_skip_with(batch_size) else {
             return;
@@ -968,6 +973,9 @@ mod tests {
             batch_size > total_threads,
             "batch must span several nonces per thread"
         );
+        // Difficulty 1 makes every nonce a candidate, so each thread evaluates
+        // exactly its first nonce and stops; the count must not include the
+        // rest of the dispatched rectangle.
         let header = decode32(pow_core::NONCE_HASH_KVS[1].header);
         let ctx = engine.prepare_context(header, U512::one());
         let start = U512::from(0xfeed_face_0000_0000u64);
@@ -979,12 +987,15 @@ mod tests {
                 hash_count,
                 ..
             } => {
-                assert!(candidate.nonce >= start && candidate.nonce <= end);
+                assert_eq!(
+                    candidate.nonce, start,
+                    "lowest candidate is the first nonce"
+                );
                 assert_eq!(
                     pow_core::hash_from_nonce(&ctx, candidate.nonce),
                     candidate.hash
                 );
-                assert_eq!(hash_count, batch_size as u64);
+                assert_eq!(hash_count, total_threads as u64);
             }
             other => panic!("expected Found, got {other:?}"),
         }

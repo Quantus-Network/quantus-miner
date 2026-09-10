@@ -510,11 +510,14 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         if (cmp == 1u) {
             continue;
         }
-        // Publish the lowest candidate index of the launch. A candidate thread
-        // stops here, so every nonce below the published index was fully
-        // evaluated and the host can resume exactly after a rejected one.
-        atomicMin(&results[1], logical_index);
-        results[0] = 1u;
+        // Publish the lowest candidate index of the launch and how many of this
+        // thread's nonces stay unevaluated. A candidate thread stops here, so
+        // every nonce below the published index was evaluated and the host can
+        // resume exactly after a rejected one and count exactly what was hashed.
+        atomicMin(&results[0], logical_index);
+        u32 remaining = total_nonces - base_index;
+        u32 assigned = (nonces_per_thread < remaining) ? nonces_per_thread : remaining;
+        atomicAdd(&results[1], assigned - j - 1u);
         return;
     }
 }
