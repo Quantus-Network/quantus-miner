@@ -973,9 +973,13 @@ mod tests {
             batch_size > total_threads,
             "batch must span several nonces per thread"
         );
-        // Difficulty 1 makes every nonce a candidate, so each thread evaluates
-        // exactly its first nonce and stops; the count must not include the
-        // rest of the dispatched rectangle.
+        // Difficulty 1 makes every nonce a candidate, so each thread with work
+        // evaluates exactly its first nonce and stops; the count must not
+        // include the rest of the dispatched rectangle. Threads whose first
+        // index is past the batch never evaluate anything.
+        let nonces_per_thread = batch_size.div_ceil(total_threads);
+        let threads_with_work = batch_size.div_ceil(nonces_per_thread);
+        assert!(threads_with_work < total_threads);
         let header = decode32(pow_core::NONCE_HASH_KVS[1].header);
         let ctx = engine.prepare_context(header, U512::one());
         let start = U512::from(0xfeed_face_0000_0000u64);
@@ -995,7 +999,7 @@ mod tests {
                     pow_core::hash_from_nonce(&ctx, candidate.nonce),
                     candidate.hash
                 );
-                assert_eq!(hash_count, total_threads as u64);
+                assert_eq!(hash_count, threads_with_work as u64);
             }
             other => panic!("expected Found, got {other:?}"),
         }
