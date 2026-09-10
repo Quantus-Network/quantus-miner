@@ -39,3 +39,19 @@ different Poseidon2 implementation in the private tree.
 - Without `libnvrtc`, the CUDA binary `abort`s (`panic = "abort"`) before
   logging, because NVRTC load is wrapped in `catch_unwind`.
 - Instance destroyed after the benches.
+
+## PR #100 same-host A/B (2026-09-10)
+
+Release v4.1.1 Linux binary against the PR #100 head, GPU only, default 32M batch,
+three alternating 30 s runs each, `engine-cuda` GPU tests passed on both cards first.
+Raw record: [`benchmarks/2026-09-10-vast-pr100.json`](./benchmarks/2026-09-10-vast-pr100.json).
+
+| GPU | Driver | Power cap | v4.1.1 | PR #100 | Gain |
+|---|---|---:|---:|---:|---:|
+| RTX 4090 (Vast 50467557) | 580.159.03 | 350 W | 624-629 MH/s | 816-820 MH/s | +30.5% |
+| RTX 3080 Ti (Vast 50470741) | 580.173.02 | 330 W | 289.4-289.6 MH/s | 380-381 MH/s | +31.4% |
+
+`mining_main`: 64 registers, 0 B local memory on both (v4.1.1 had 16 B local).
+The JSON also records the kernel-only experiments that were rejected: geometry sweep (flat),
+launch bounds 3/2 blocks per SM, internal-round unroll, `__byte_perm`, ALU-only EPS fold (-13%),
+`mad`-with-1 lane adds (-6%), NVRTC cubin vs driver JIT (equal), dual-nonce interleave (-6.5%).

@@ -1,0 +1,198 @@
+{
+  "date": "2026-09-10",
+  "provider": "Vast.ai",
+  "pr": 100,
+  "baseline": "v4.1.1 release quantus-miner-linux-x86_64 (GitHub release asset)",
+  "candidate": "PR #100 head (n13/cuda-fast-arith): 6-op reduce, 5-op add, unreduced row sum, no third squeeze, compute_XY NVRTC, specialized squaring, zero-row constant tables, lane reduce via reduce128",
+  "method": "GPU only, --cpu-workers 0 --gpu-devices 1, default 32M batch, three alternating 30 s runs per binary, release binaries cross-compiled with cargo zigbuild; correctness gate = engine-cuda GPU tests (9) on each card before timing",
+  "nvrtc": "12.8 (nvidia/cuda:12.8.1-devel-ubuntu22.04), driver JIT of compute_XY PTX",
+  "hosts": [
+    {
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "uuid": "GPU-9a25c126-7956-c6cb-b722-78b8be180e50",
+      "instance": 50467557,
+      "driver": "580.159.03",
+      "power_limit_w": 350,
+      "sm_clock_mhz": "2385-2790",
+      "temp_c": "49-64",
+      "gpu_tests": "9 passed",
+      "mining_main": "64 registers, 0 B local, 1240 B constant",
+      "baseline_mh_s": [
+        629.42,
+        626.34,
+        624.47
+      ],
+      "candidate_mh_s": [
+        819.6,
+        817.97,
+        815.73
+      ],
+      "gain": "+30.5%",
+      "earlier_stages": {
+        "pr100_as_pushed": {
+          "baseline": [
+            635.59,
+            627.32,
+            625.22
+          ],
+          "candidate": [
+            776.62,
+            770.15,
+            770.02
+          ],
+          "local_bytes": 8
+        },
+        "plus_squaring": {
+          "baseline": [
+            639.04,
+            628.41,
+            626.06
+          ],
+          "candidate": [
+            803.22,
+            794.75,
+            793.4
+          ],
+          "local_bytes": 8
+        }
+      }
+    },
+    {
+      "gpu": "NVIDIA GeForce RTX 3080 Ti",
+      "instance": 50470741,
+      "driver": "580.173.02",
+      "power_limit_w": 330,
+      "sm_clock_mhz": "1725-1980",
+      "temp_c": "61-62",
+      "gpu_tests": "9 passed",
+      "mining_main": "64 registers, 0 B local, 1240 B constant",
+      "baseline_mh_s": [
+        289.62,
+        289.56,
+        289.38
+      ],
+      "candidate_mh_s": [
+        379.95,
+        380.85,
+        380.16
+      ],
+      "gain": "+31.4%"
+    }
+  ],
+  "kernel_only_experiments_rtx4090": {
+    "note": "bench-kernel.py: NVRTC compile, golden-vector and prefix-candidate checks, then timed mining_main with target 0; 3 x 5 s samples, alternating with the control; MH/s medians; thermal drift of a few percent between rounds is why controls are repeated",
+    "geometry_sweep": "blocks {512..8192} x nonces/thread {8,32,128,512}: 776-789 MH/s, flat; default 4096 x 31 is at the optimum",
+    "launch_bounds_256_3": {
+      "control": 783.3,
+      "variant": 787.2,
+      "registers": 80,
+      "verdict": "noise"
+    },
+    "launch_bounds_256_2": {
+      "control": 783.3,
+      "variant": 775.3,
+      "registers": 118,
+      "verdict": "-1%"
+    },
+    "internal_round_unroll_2": {
+      "control": 779.1,
+      "variant": 783.1,
+      "verdict": "+0.5%, noise"
+    },
+    "byte_perm_bswap": {
+      "control": 777.9,
+      "variant": 778.1,
+      "verdict": "0"
+    },
+    "specialized_squaring": {
+      "control": 777.2,
+      "variant": 800.8,
+      "verdict": "+3%, kept"
+    },
+    "nvrtc_cubin_vs_driver_jit": {
+      "ptx_jit": [
+        818.6,
+        811.6
+      ],
+      "cubin": [
+        814.0,
+        807.3
+      ],
+      "verdict": "driver JIT equal or better; PTX route kept"
+    },
+    "alu_only_eps_fold": {
+      "control": [
+        798.8,
+        799.9,
+        800.5
+      ],
+      "variant": [
+        696.5,
+        697.0,
+        696.8
+      ],
+      "verdict": "-13%; ALU pipe is the busy one"
+    },
+    "mad_with_1_lane_adds": {
+      "control": [
+        818.2,
+        804.0,
+        800.1
+      ],
+      "variant": [
+        766.1,
+        759.1,
+        757.8
+      ],
+      "verdict": "-6%; ptxas rewrote to IMAD+LEA"
+    },
+    "zero_row_constant_tables": {
+      "control": [
+        818.2,
+        804.0,
+        800.1
+      ],
+      "variant": [
+        826.0,
+        811.0,
+        810.8
+      ],
+      "local_bytes": 0,
+      "verdict": "+1%, spill gone, kept"
+    },
+    "lane_reduce_via_reduce128": {
+      "control": [
+        829.4,
+        819.2,
+        813.0
+      ],
+      "variant": [
+        838.2,
+        830.8,
+        826.4
+      ],
+      "verdict": "+1.3%, kept"
+    },
+    "dual_nonce_interleave": {
+      "control": [
+        844.2,
+        835.3,
+        830.7
+      ],
+      "variant": [
+        790.8,
+        783.7,
+        778.8
+      ],
+      "registers": 128,
+      "stack": 16,
+      "verdict": "-6.5% (also -6% on 3080 Ti); closed"
+    },
+    "sass": "mining_main 2776 static instructions before squaring; loop bodies: external round 948, internal round 283, terminal round 941; ~28.5k dynamic instructions per hash; static mix ~45% IMAD-class, ~45% IADD3/SEL/SHF/LOP3"
+  },
+  "cost_usd": {
+    "rtx4090": 0.42,
+    "rtx3080ti": 0.08,
+    "failed_3090_attempts": 0.1
+  }
+}

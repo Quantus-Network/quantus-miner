@@ -3,7 +3,7 @@
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
-use cudarc::nvrtc::{compile_ptx, compile_ptx_with_opts, CompileOptions, Ptx};
+use cudarc::nvrtc::{compile_ptx_with_opts, sys as nvrtc_sys, CompileOptions, Ptx};
 use engine_cpu::{CancelCheck, Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use pow_core::{format_hashrate, format_u512, JobContext};
 use primitive_types::U512;
@@ -49,6 +49,19 @@ struct WorkerBuffers {
     busy_since: Instant,
 }
 
+/// Native CUDA mining engine.
+///
+/// Search contract: the kernel evaluates every nonce in the range, but its
+/// Goldilocks reduction skips two carry corrections (`reduce128` in
+/// `kernels/mining.cu`). Each of the roughly 1,470 field multiplies per hash
+/// can therefore be off by EPS mod p with probability about 2^-33, so about one
+/// nonce in three million is hashed wrong on the GPU. A wrong hash that lands
+/// below the target is rejected by CPU verification and the search resumes
+/// after it. A wrong hash for a nonce that is actually valid is missed and the
+/// range reports `Exhausted`. `hash_count` counts every evaluated nonce, wrong
+/// ones included. The expected loss is about 3e-7 of solutions, far below the
+/// throughput the shortcut buys. `hash_nonces` is subject to the same contract:
+/// it is a kernel self-test, not a verifier; use `pow_core::hash_from_nonce`.
 pub struct CudaEngine {
     engine_id: usize,
     devices: Vec<Arc<CudaDevice>>,
@@ -217,26 +230,46 @@ impl CudaEngine {
     }
 }
 
+fn nvrtc_supported_archs() -> Result<Vec<i32>, String> {
+    let mut count = 0i32;
+    unsafe { nvrtc_sys::nvrtcGetNumSupportedArchs(&mut count) }
+        .result()
+        .map_err(|e| format!("nvrtcGetNumSupportedArchs failed: {e:?}"))?;
+    let mut archs = vec![0i32; count.max(0) as usize];
+    unsafe { nvrtc_sys::nvrtcGetSupportedArchs(archs.as_mut_ptr()) }
+        .result()
+        .map_err(|e| format!("nvrtcGetSupportedArchs failed: {e:?}"))?;
+    Ok(archs)
+}
+
+/// Compiles PTX for the newest virtual architecture NVRTC knows that the device
+/// can run. The driver JIT then emits native code; on a 4090 that measured
+/// equal to loading NVRTC's own cubin, so the PTX route is kept.
 fn compile_kernel(major: i32, minor: i32) -> Result<Ptx, Box<dyn std::error::Error>> {
-    let arch = format!("sm_{major}{minor}");
+    let device_arch = major * 10 + minor;
+    let target = nvrtc_supported_archs()?
+        .into_iter()
+        .filter(|&arch| arch <= device_arch)
+        .max()
+        .ok_or_else(|| format!("NVRTC supports no architecture at or below sm_{device_arch}"))?;
+    if target != device_arch {
+        log::warn!(
+            target: "cuda_engine",
+            "NVRTC does not know sm_{device_arch}; compiling PTX for compute_{target} instead"
+        );
+    }
     let opts = CompileOptions {
-        options: vec![format!("--gpu-architecture={arch}")],
+        options: vec![format!("--gpu-architecture=compute_{target}")],
         ..Default::default()
     };
-    match compile_ptx_with_opts(KERNEL_SRC, opts) {
-        Ok(ptx) => {
-            log::info!(target: "cuda_engine", "Compiled CUDA mining kernel for {arch}");
-            Ok(ptx)
-        }
-        Err(e) => {
-            log::warn!(
-                target: "cuda_engine",
-                "NVRTC could not target {arch}, falling back to generic PTX for the driver JIT: {e}"
-            );
-            compile_ptx(KERNEL_SRC)
-                .map_err(|e| format!("NVRTC failed to compile the CUDA mining kernel: {e}").into())
-        }
-    }
+    let ptx = compile_ptx_with_opts(KERNEL_SRC, opts).map_err(|e| {
+        format!("NVRTC failed to compile the CUDA mining kernel for compute_{target}: {e}")
+    })?;
+    log::info!(
+        target: "cuda_engine",
+        "Compiled CUDA mining kernel PTX for compute_{target} (device sm_{device_arch}); the driver JIT emits native code"
+    );
+    Ok(ptx)
 }
 
 fn silent_catch<T>(f: impl FnOnce() -> T) -> std::thread::Result<T> {
@@ -592,6 +625,7 @@ impl MinerEngine for CudaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cudarc::nvrtc::compile_ptx;
     use engine_cpu::AtomicBoolCancelCheck;
     use std::sync::atomic::AtomicBool;
 
@@ -834,6 +868,21 @@ mod tests {
             GOLDILOCKS_P - EPS as u128
         );
         assert_eq!(random_slips, 0, "slipped additions among random inputs");
+    }
+
+    #[test]
+    fn reduction_slips_are_absent_in_millions_of_random_products() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let slips = (0..1 << 22)
+            .filter(|_| reduce128_model(next() as u128 * next() as u128).1 != 0)
+            .count();
+        assert_eq!(slips, 0, "reducer slipped on random 64x64-bit products");
     }
 
     #[test]
