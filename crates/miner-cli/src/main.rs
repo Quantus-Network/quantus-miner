@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 // CLI defaults
 const DEFAULT_GPU_BATCH_SIZE: u32 = 1_000_000;
+const DEFAULT_CUDA_BATCH_SIZE: u32 = 32_000_000;
 const DEFAULT_CPU_BATCH_SIZE: u64 = 10_000;
 
 #[derive(Subcommand, Debug)]
@@ -58,8 +59,9 @@ enum Command {
         gpu_devices: Option<usize>,
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
-        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE, value_parser = clap::value_parser!(u32).range(1..))]
-        gpu_batch_size: u32,
+        /// (default: 1000000, or 32000000 with --cuda-gpu)
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", value_parser = clap::value_parser!(u32).range(1..))]
+        gpu_batch_size: Option<u32>,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
         #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE, value_parser = clap::value_parser!(u64).range(1..))]
@@ -107,8 +109,9 @@ enum Command {
         gpu_devices: Option<usize>,
 
         /// GPU batch size in nonces - controls how often GPU checks for cancellation
-        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", default_value_t = DEFAULT_GPU_BATCH_SIZE, value_parser = clap::value_parser!(u32).range(1..))]
-        gpu_batch_size: u32,
+        /// (default: 1000000, or 32000000 with --cuda-gpu)
+        #[arg(long = "gpu-batch-size", env = "MINER_GPU_BATCH_SIZE", value_parser = clap::value_parser!(u32).range(1..))]
+        gpu_batch_size: Option<u32>,
 
         /// CPU batch size in hashes - controls how often CPU checks for cancellation
         #[arg(long = "cpu-batch-size", env = "MINER_CPU_BATCH_SIZE", default_value_t = DEFAULT_CPU_BATCH_SIZE, value_parser = clap::value_parser!(u64).range(1..))]
@@ -212,7 +215,7 @@ async fn main() {
                 tls_cert_sha256,
                 cpu_workers,
                 gpu_devices,
-                gpu_batch_size,
+                gpu_batch_size: resolve_gpu_batch_size(gpu_batch_size, cuda_gpu),
                 cpu_batch_size,
                 gpu_throttle_ms,
                 allow_integrated,
@@ -239,7 +242,7 @@ async fn main() {
             run_benchmark(
                 cpu_workers,
                 gpu_devices,
-                gpu_batch_size,
+                resolve_gpu_batch_size(gpu_batch_size, cuda_gpu),
                 cpu_batch_size,
                 duration,
                 allow_integrated,
@@ -248,6 +251,14 @@ async fn main() {
             .await;
         }
     }
+}
+
+fn resolve_gpu_batch_size(explicit: Option<u32>, cuda_gpu: bool) -> u32 {
+    explicit.unwrap_or(if cuda_gpu {
+        DEFAULT_CUDA_BATCH_SIZE
+    } else {
+        DEFAULT_GPU_BATCH_SIZE
+    })
 }
 
 fn resolve_auth_token(
