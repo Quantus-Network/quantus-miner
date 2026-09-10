@@ -15,7 +15,16 @@ use std::time::{Duration, Instant};
 
 const KERNEL_SRC: &str = include_str!("kernels/mining.cu");
 const THREADS_PER_BLOCK: u32 = 256;
-const MAX_BLOCKS: u32 = 4096;
+const MINING_THREADS_PER_BLOCK: u32 = if cfg!(feature = "experimental-shared-square") {
+    1024
+} else {
+    THREADS_PER_BLOCK
+};
+const MAX_BLOCKS: u32 = if cfg!(feature = "experimental-shared-square") {
+    640
+} else {
+    4096
+};
 /// Lowest candidate index (`u32::MAX` = none), then the count of nonces that
 /// candidate threads left unevaluated. Both are only ever updated atomically.
 const RESULTS_INIT: [u32; 2] = [u32::MAX, 0];
@@ -272,7 +281,13 @@ fn compile_kernel(major: i32, minor: i32) -> Result<Ptx, Box<dyn std::error::Err
         );
     }
     let opts = CompileOptions {
-        options: vec![format!("--gpu-architecture=compute_{target}")],
+        options: vec![
+            format!("--gpu-architecture=compute_{target}"),
+            format!(
+                "-DQUANTUS_CUDA_SHARED_SQUARE={}",
+                u8::from(cfg!(feature = "experimental-shared-square"))
+            ),
+        ],
         ..Default::default()
     };
     let ptx = compile_ptx_with_opts(KERNEL_SRC, opts).map_err(|e| {
@@ -376,8 +391,10 @@ fn run_single_batch(
     batch_start: U512,
     batch_size: u32,
 ) -> BatchResult {
-    let num_blocks = batch_size.div_ceil(THREADS_PER_BLOCK).clamp(1, MAX_BLOCKS);
-    let total_threads = num_blocks * THREADS_PER_BLOCK;
+    let num_blocks = batch_size
+        .div_ceil(MINING_THREADS_PER_BLOCK)
+        .clamp(1, MAX_BLOCKS);
+    let total_threads = num_blocks * MINING_THREADS_PER_BLOCK;
     let nonces_per_thread = batch_size.div_ceil(total_threads).max(1);
     let dispatch = [total_threads, nonces_per_thread, batch_size];
     let nonce_be = batch_start.to_big_endian();
@@ -398,7 +415,7 @@ fn run_single_batch(
             .memcpy_htod(&RESULTS_INIT, &mut buffers.results)?;
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
-            block_dim: (THREADS_PER_BLOCK, 1, 1),
+            block_dim: (MINING_THREADS_PER_BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
         let mut builder = buffers.stream.launch_builder(&buffers.mine);
@@ -670,7 +687,9 @@ mod tests {
             Ok(e) => Some(e),
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("not available") || msg.contains("No CUDA devices") {
+                if std::env::var_os("QUANTUS_REQUIRE_CUDA").is_none()
+                    && (msg.contains("not available") || msg.contains("No CUDA devices"))
+                {
                     eprintln!("skipping CUDA test: {e}");
                     None
                 } else {
@@ -976,8 +995,10 @@ mod tests {
         let Some(engine) = engine_or_skip_with(batch_size) else {
             return;
         };
-        let total_threads =
-            batch_size.div_ceil(THREADS_PER_BLOCK).min(MAX_BLOCKS) * THREADS_PER_BLOCK;
+        let total_threads = batch_size
+            .div_ceil(MINING_THREADS_PER_BLOCK)
+            .min(MAX_BLOCKS)
+            * MINING_THREADS_PER_BLOCK;
         assert!(
             batch_size > total_threads,
             "batch must span several nonces per thread"
