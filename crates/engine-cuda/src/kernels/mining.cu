@@ -426,9 +426,6 @@ extern "C" __global__ void __launch_bounds__(256, 4) hash_nonces(u32 *hashes, co
 
 extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
                                        const MiningParams params) {
-    if (*((volatile u32 *)results) != 0u) {
-        return;
-    }
     u32 thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     u32 total_threads = params.dispatch_config[0];
     u32 nonces_per_thread = params.dispatch_config[1];

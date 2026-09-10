@@ -348,15 +348,13 @@ fn run_single_batch(
             );
             return BatchResult::DeviceLost;
         }
-        let winning_iteration = logical_index % (nonces_per_thread as u64);
-        let hashes_computed = (total_threads as u64 * (winning_iteration + 1)).min(dispatched);
         return BatchResult::Found {
             candidate: Candidate {
                 nonce,
                 work: nonce.to_big_endian(),
                 hash,
             },
-            hash_count: hashes_computed,
+            hash_count: dispatched,
         };
     }
 
@@ -552,7 +550,11 @@ mod tests {
     }
 
     fn engine_or_skip() -> Option<CudaEngine> {
-        match CudaEngine::try_new(1024, 0) {
+        engine_or_skip_with(1024)
+    }
+
+    fn engine_or_skip_with(batch_size: u32) -> Option<CudaEngine> {
+        match CudaEngine::try_new(batch_size, 0) {
             Ok(e) => Some(e),
             Err(e) => {
                 let msg = e.to_string();
@@ -720,6 +722,41 @@ mod tests {
         stream.synchronize().unwrap();
         for (value, got) in values.iter().zip(stream.clone_dtoh(&output).unwrap()) {
             assert_eq!(got as u128, value % modulus, "input {value:032x}");
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_found_batch_counts_every_dispatched_nonce() {
+        let batch_size = 4_000_000u32;
+        let Some(engine) = engine_or_skip_with(batch_size) else {
+            return;
+        };
+        let total_threads =
+            batch_size.div_ceil(THREADS_PER_BLOCK).min(MAX_BLOCKS) * THREADS_PER_BLOCK;
+        assert!(
+            batch_size > total_threads,
+            "batch must span several nonces per thread"
+        );
+        let header = decode32(pow_core::NONCE_HASH_KVS[1].header);
+        let ctx = engine.prepare_context(header, U512::one());
+        let start = U512::from(0xfeed_face_0000_0000u64);
+        let end = start + U512::from(batch_size - 1);
+        let cancel = AtomicBool::new(false);
+        match engine.search_range(&ctx, Range { start, end }, &AtomicBoolCancelCheck(&cancel)) {
+            EngineStatus::Found {
+                candidate,
+                hash_count,
+                ..
+            } => {
+                assert!(candidate.nonce >= start && candidate.nonce <= end);
+                assert_eq!(
+                    pow_core::hash_from_nonce(&ctx, candidate.nonce),
+                    candidate.hash
+                );
+                assert_eq!(hash_count, batch_size as u64);
+            }
+            other => panic!("expected Found, got {other:?}"),
         }
         CudaEngine::clear_worker_resources();
     }
