@@ -1,3 +1,7 @@
+#ifndef QUANTUS_CUDA_SHARED_SQUARE
+#define QUANTUS_CUDA_SHARED_SQUARE 0
+#endif
+
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
@@ -130,6 +134,36 @@ __device__ __forceinline__ u64 gf64_mul(u64 a, u64 b) {
 }
 
 // Three partial products instead of four: (a1:a0)^2 = a0^2 + 2*a0*a1*2^32 + a1^2*2^64.
+#if QUANTUS_CUDA_SHARED_SQUARE
+__device__ __forceinline__ u64 gf64_sqr(u64 a) {
+ u64 out;
+ asm("{\n\t"
+     ".reg .u64 ll,lh,hh,mid;\n\t"
+     ".reg .u32 a0,a1,r0,r1,r2,r3,m0,m1,top,c;\n\t"
+     "mov.b64 {a0,a1}, %1;\n\t"
+     "mul.wide.u32 ll, a0, a0;\n\t"
+     "mul.wide.u32 lh, a0, a1;\n\t"
+     "mul.wide.u32 hh, a1, a1;\n\t"
+     "mov.b64 {m0,m1}, lh;\n\t"
+     "shr.u32 top, m1, 31;\n\t"
+     "shl.b64 mid, lh, 1;\n\t"
+     "mov.b64 {m0,m1}, mid;\n\t"
+     "mov.b64 {r0,r1}, ll;\n\t"
+     "mov.b64 {r2,r3}, hh;\n\t"
+     "add.cc.u32 r1, r1, m0;\n\t"
+     "addc.cc.u32 r2, r2, m1;\n\t"
+     "addc.u32 r3, r3, top;\n\t"
+     "mad.lo.cc.u32 r0, r2, 0xffffffff, r0;\n\t"
+     "madc.hi.cc.u32 r1, r2, 0xffffffff, r1;\n\t"
+     "addc.u32 c, r3, 0;\n\t"
+     "addc.u32 r1, r1, 0;\n\t"
+     "sub.cc.u32 r0, r0, c;\n\t"
+     "subc.u32 r1, r1, 0;\n\t"
+     "mov.b64 %0, {r0,r1};\n\t"
+     "}" : "=l"(out) : "l"(a));
+ return out;
+}
+#else
 __device__ __forceinline__ u64 gf64_sqr(u64 a) {
     u32 a0 = (u32)a, a1 = (u32)(a >> 32);
     u64 ll = (u64)a0 * a0;
@@ -148,6 +182,7 @@ __device__ __forceinline__ u64 gf64_sqr(u64 a) {
           "r"((u32)(mid >> 32)), "r"((u32)(hh >> 32)), "r"(mid_top));
     return reduce128(r0, r1, r2, r3);
 }
+#endif
 
 __device__ __forceinline__ u64 gf64_sbox(u64 x) {
     u64 x2 = gf64_sqr(x);
@@ -425,8 +460,24 @@ extern "C" __global__ void __launch_bounds__(256, 4) hash_nonces(u32 *hashes, co
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
+#if QUANTUS_CUDA_SHARED_SQUARE
+#define MINING_LAUNCH_BOUNDS __launch_bounds__(1024, 1)
+#else
+#define MINING_LAUNCH_BOUNDS __launch_bounds__(256, 4)
+#endif
+
+extern "C" __global__ void MINING_LAUNCH_BOUNDS mining_main(u32 *results,
                                        const MiningParams params) {
+#if QUANTUS_CUDA_SHARED_SQUARE
+    // All block threads participate before the per-thread range guard.
+    __shared__ volatile u64 template_state[12];
+    if (threadIdx.x < 12) {
+        u32 i = threadIdx.x;
+        template_state[i] = ((u64)params.prestate[2 * i + 1] << 32) |
+                            params.prestate[2 * i];
+    }
+    __syncthreads();
+#endif
     u32 thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     u32 total_threads = params.dispatch_config[0];
     u32 nonces_per_thread = params.dispatch_config[1];
@@ -436,11 +487,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
     }
     u32 base_index = thread_id * nonces_per_thread;
 
+#if !QUANTUS_CUDA_SHARED_SQUARE
     u64 mid[12];
     #pragma unroll
     for (int i = 0; i < 12; i++) {
         mid[i] = ((u64)params.prestate[2 * i + 1] << 32) | (u64)params.prestate[2 * i];
     }
+#endif
     u32 tgt_hi[8];
     #pragma unroll
     for (int i = 0; i < 8; i++) {
@@ -459,7 +512,11 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         u64 st[12];
         #pragma unroll
         for (int i = 0; i < 12; i++) {
+#if QUANTUS_CUDA_SHARED_SQUARE
+            st[i] = template_state[i];
+#else
             st[i] = mid[i];
+#endif
         }
         u64 nonce_low = nonce_base_low + (u64)logical_index;
         u64 x6 = (u64)bswap32((u32)(nonce_low >> 32));

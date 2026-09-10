@@ -5,6 +5,10 @@ edition.workspace = true
 publish = false
 description = "Native CUDA mining engine for NVIDIA GPUs (no Vulkan)"
 
+[features]
+# Opt-in prototype; measured only on RTX 3080 Ti.
+experimental-shared-square = []
+
 [dependencies]
 cudarc = { version = "0.19.9", default-features = false, features = [
 	"cuda-12040",
