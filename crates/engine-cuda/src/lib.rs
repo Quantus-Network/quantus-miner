@@ -185,6 +185,10 @@ impl CudaEngine {
         });
     }
 
+    /// Hashes `count` consecutive nonces on the first device with the mining
+    /// kernel's arithmetic. This is a kernel self-test under the engine's
+    /// probabilistic contract, not a verifier; use `pow_core::hash_from_nonce`
+    /// for exact hashes.
     pub fn hash_nonces(
         &self,
         header: [u8; 32],
@@ -977,6 +981,47 @@ mod tests {
                 assert_eq!(hash_count, batch_size as u64);
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_search_resumes_after_rejected_candidate() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        // Target equal to the golden hash: the golden nonce is a prefix-equal
+        // candidate that CPU verification rejects, and the search must go on.
+        // Vector 4's hash starts with 0xea, so almost every later nonce is a
+        // real solution within the next few nonces.
+        let v = &pow_core::NONCE_HASH_KVS[4];
+        let start = U512::from_big_endian(&decode64(v.nonce));
+        let target = U512::from_big_endian(&decode64(v.hash));
+        let ctx = JobContext {
+            header: decode32(v.header),
+            difficulty: U512::one(),
+            target,
+        };
+        let end = start + U512::from(32u64);
+        let cancel = AtomicBool::new(false);
+        match engine.search_range(&ctx, Range { start, end }, &AtomicBoolCancelCheck(&cancel)) {
+            EngineStatus::Found {
+                candidate,
+                hash_count,
+                ..
+            } => {
+                assert!(candidate.nonce > start && candidate.nonce <= end);
+                assert_eq!(
+                    pow_core::hash_from_nonce(&ctx, candidate.nonce),
+                    candidate.hash
+                );
+                assert!(candidate.hash < target);
+                assert_eq!(
+                    hash_count, 33,
+                    "one rejected nonce plus the 32-nonce resume batch"
+                );
+            }
+            other => panic!("expected Found after the rejected candidate, got {other:?}"),
         }
         CudaEngine::clear_worker_resources();
     }
