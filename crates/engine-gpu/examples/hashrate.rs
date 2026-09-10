@@ -20,7 +20,7 @@ fn main() {
     let cancel = AtomicBoolCancelCheck(&cancel_flag);
 
     let header = [42u8; 32];
-    let ctx = engine.prepare_context(header, U512::from(u64::MAX));
+    let ctx = engine.prepare_context(header, U512::MAX);
 
     let range = Range {
         start: U512::from(1u64) << 200,
