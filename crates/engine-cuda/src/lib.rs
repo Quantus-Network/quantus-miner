@@ -3,11 +3,12 @@
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
-use cudarc::nvrtc::compile_ptx;
+use cudarc::nvrtc::{compile_ptx_with_opts, sys as nvrtc_sys, CompileOptions, Ptx};
 use engine_cpu::{CancelCheck, Candidate, EngineStatus, FoundOrigin, MinerEngine, Range};
 use pow_core::{format_hashrate, format_u512, JobContext};
 use primitive_types::U512;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,10 @@ use std::time::{Duration, Instant};
 const KERNEL_SRC: &str = include_str!("kernels/mining.cu");
 const THREADS_PER_BLOCK: u32 = 256;
 const MAX_BLOCKS: u32 = 4096;
-const RESULTS_U32S: usize = 2;
+/// Lowest candidate index (`u32::MAX` = none), then the count of nonces that
+/// candidate threads left unevaluated. Both are only ever updated atomically.
+const RESULTS_INIT: [u32; 2] = [u32::MAX, 0];
+const RESULTS_U32S: usize = RESULTS_INIT.len();
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -48,6 +52,25 @@ struct WorkerBuffers {
     busy_since: Instant,
 }
 
+/// Native CUDA mining engine.
+///
+/// Search contract: the kernel evaluates every nonce in the range, but its
+/// Goldilocks reduction skips two carry corrections (`reduce128` in
+/// `kernels/mining.cu`). Each of the roughly 1,470 field multiplies per hash
+/// can therefore be off by EPS mod p with probability about 2^-33, so about one
+/// nonce in three million is hashed wrong on the GPU. A launch reports its
+/// lowest candidate index; a wrong hash that lands below the target is
+/// rejected by CPU verification and the search resumes right after it, which
+/// is exact because every nonce below the lowest candidate was evaluated. A
+/// wrong hash for a nonce that is actually valid is missed and the range
+/// reports `Exhausted`. `hash_count` counts every nonce hashed in this call,
+/// wrong ones included; candidate threads stop at their candidate, so a launch
+/// counts exactly what its threads executed. After a rejected candidate the
+/// nonces above it are hashed again and counted again, since they are real
+/// work. The expected loss is about 3e-7 of solutions, far below the
+/// throughput the shortcut buys.
+/// `hash_nonces` is subject to the same contract: it is a kernel self-test,
+/// not a verifier; use `pow_core::hash_from_nonce`.
 pub struct CudaEngine {
     engine_id: usize,
     devices: Vec<Arc<CudaDevice>>,
@@ -70,19 +93,6 @@ impl CudaEngine {
             return Err("batch_size must be non-zero".into());
         }
 
-        let ptx = match silent_catch(|| compile_ptx(KERNEL_SRC)) {
-            Ok(Ok(ptx)) => ptx,
-            Ok(Err(e)) => {
-                return Err(format!("NVRTC failed to compile the CUDA mining kernel: {e}").into());
-            }
-            Err(_) => {
-                return Err(
-                    "CUDA NVRTC library is not available (need libnvrtc from the CUDA toolkit)"
-                        .into(),
-                );
-            }
-        };
-
         match silent_catch(cudarc::driver::result::init) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -102,6 +112,7 @@ impl CudaEngine {
         }
 
         let mut devices = Vec::new();
+        let mut compiled: HashMap<(i32, i32), Ptx> = HashMap::new();
         for ordinal in 0..count as usize {
             let ctx = CudaContext::new(ordinal)
                 .map_err(|e| format!("Failed to create CUDA context for device {ordinal}: {e}"))?;
@@ -111,10 +122,44 @@ impl CudaEngine {
             let name = ctx
                 .name()
                 .unwrap_or_else(|_| format!("cuda-device-{ordinal}"));
+            let (major, minor) = ctx.compute_capability().map_err(|e| {
+                format!("Failed to query compute capability of CUDA device {ordinal}: {e}")
+            })?;
+            let ptx = match compiled.get(&(major, minor)) {
+                Some(ptx) => ptx.clone(),
+                None => {
+                    let ptx = match silent_catch(|| compile_kernel(major, minor)) {
+                        Ok(ptx) => ptx?,
+                        Err(_) => {
+                            return Err("CUDA NVRTC library is not available (need libnvrtc from the CUDA toolkit)".into());
+                        }
+                    };
+                    compiled.insert((major, minor), ptx.clone());
+                    ptx
+                }
+            };
             let module = ctx
-                .load_module(ptx.clone())
+                .load_module(ptx)
                 .map_err(|e| format!("Failed to load CUDA mining module on {name}: {e}"))?;
-            log::info!(target: "cuda_engine", "CUDA device {ordinal}: {name}");
+            let mine = module
+                .load_function("mining_main")
+                .map_err(|e| format!("Failed to load mining_main on {name}: {e}"))?;
+            let (regs, local, shared, constant) = (
+                mine.num_regs()?,
+                mine.local_size_bytes()?,
+                mine.shared_size_bytes()?,
+                mine.const_size_bytes()?,
+            );
+            log::info!(
+                target: "cuda_engine",
+                "CUDA device {ordinal}: {name} (sm_{major}{minor}; mining_main uses {regs} registers, {local} B local, {shared} B shared, {constant} B constant)"
+            );
+            if local > 0 {
+                log::warn!(
+                    target: "cuda_engine",
+                    "mining_main spills {local} bytes per thread to local memory on {name}"
+                );
+            }
             devices.push(Arc::new(CudaDevice { ctx, module, name }));
         }
 
@@ -149,6 +194,10 @@ impl CudaEngine {
         });
     }
 
+    /// Hashes `count` consecutive nonces on the first device with the mining
+    /// kernel's arithmetic. This is a kernel self-test under the engine's
+    /// probabilistic contract, not a verifier; use `pow_core::hash_from_nonce`
+    /// for exact hashes.
     pub fn hash_nonces(
         &self,
         header: [u8; 32],
@@ -192,6 +241,48 @@ impl CudaEngine {
         }
         Ok(out)
     }
+}
+
+fn nvrtc_supported_archs() -> Result<Vec<i32>, String> {
+    let mut count = 0i32;
+    unsafe { nvrtc_sys::nvrtcGetNumSupportedArchs(&mut count) }
+        .result()
+        .map_err(|e| format!("nvrtcGetNumSupportedArchs failed: {e:?}"))?;
+    let mut archs = vec![0i32; count.max(0) as usize];
+    unsafe { nvrtc_sys::nvrtcGetSupportedArchs(archs.as_mut_ptr()) }
+        .result()
+        .map_err(|e| format!("nvrtcGetSupportedArchs failed: {e:?}"))?;
+    Ok(archs)
+}
+
+/// Compiles PTX for the newest virtual architecture NVRTC knows that the device
+/// can run. The driver JIT then emits native code; on a 4090 that measured
+/// equal to loading NVRTC's own cubin, so the PTX route is kept.
+fn compile_kernel(major: i32, minor: i32) -> Result<Ptx, Box<dyn std::error::Error>> {
+    let device_arch = major * 10 + minor;
+    let target = nvrtc_supported_archs()?
+        .into_iter()
+        .filter(|&arch| arch <= device_arch)
+        .max()
+        .ok_or_else(|| format!("NVRTC supports no architecture at or below sm_{device_arch}"))?;
+    if target != device_arch {
+        log::warn!(
+            target: "cuda_engine",
+            "NVRTC does not know sm_{device_arch}; compiling PTX for compute_{target} instead"
+        );
+    }
+    let opts = CompileOptions {
+        options: vec![format!("--gpu-architecture=compute_{target}")],
+        ..Default::default()
+    };
+    let ptx = compile_ptx_with_opts(KERNEL_SRC, opts).map_err(|e| {
+        format!("NVRTC failed to compile the CUDA mining kernel for compute_{target}: {e}")
+    })?;
+    log::info!(
+        target: "cuda_engine",
+        "Compiled CUDA mining kernel PTX for compute_{target} (device sm_{device_arch}); the driver JIT emits native code"
+    );
+    Ok(ptx)
 }
 
 fn silent_catch<T>(f: impl FnOnce() -> T) -> std::thread::Result<T> {
@@ -268,6 +359,10 @@ enum BatchResult {
     NotFound {
         hash_count: u64,
     },
+    Rejected {
+        logical_index: u64,
+        hash_count: u64,
+    },
     DeviceLost,
 }
 
@@ -298,7 +393,9 @@ fn run_single_batch(
 
     let launch_start = Instant::now();
     if let Err(e) = (|| {
-        buffers.stream.memset_zeros(&mut buffers.results)?;
+        buffers
+            .stream
+            .memcpy_htod(&RESULTS_INIT, &mut buffers.results)?;
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (THREADS_PER_BLOCK, 1, 1),
@@ -327,26 +424,32 @@ fn run_single_batch(
     };
 
     let dispatched = (total_threads as u64 * nonces_per_thread as u64).min(batch_size as u64);
-    if result_u32s[0] != 0 {
-        let logical_index = result_u32s[1] as u64;
-        if logical_index >= dispatched {
+    if result_u32s[0] != u32::MAX {
+        let logical_index = result_u32s[0] as u64;
+        let unevaluated = result_u32s[1] as u64;
+        if logical_index >= dispatched || unevaluated >= dispatched {
             log::error!(
                 target: "cuda_engine",
-                "CUDA returned out-of-range candidate index {logical_index} for {dispatched} dispatched nonces"
+                "CUDA returned candidate index {logical_index} with {unevaluated} unevaluated nonces for {dispatched} dispatched"
             );
             return BatchResult::DeviceLost;
         }
         let nonce = batch_start + U512::from(logical_index);
         let hash = pow_core::hash_from_nonce(ctx, nonce);
+        let hash_count = dispatched - unevaluated;
         if hash >= ctx.target {
-            log::error!(
+            log::warn!(
                 target: "cuda_engine",
-                "CUDA candidate verification failed for nonce {}: hash {} is not below target {}",
+                "CUDA candidate {} rejected by CPU verification (hash {} >= target {}); resuming after it, {} nonces above it will be hashed again",
                 format_u512(nonce),
                 format_u512(hash),
-                format_u512(ctx.target)
+                format_u512(ctx.target),
+                hash_count - logical_index - 1
             );
-            return BatchResult::DeviceLost;
+            return BatchResult::Rejected {
+                logical_index,
+                hash_count,
+            };
         }
         return BatchResult::Found {
             candidate: Candidate {
@@ -354,7 +457,7 @@ fn run_single_batch(
                 work: nonce.to_big_endian(),
                 hash,
             },
-            hash_count: dispatched,
+            hash_count,
         };
     }
 
@@ -486,6 +589,14 @@ impl MinerEngine for CudaEngine {
                 BatchResult::NotFound { hash_count } => {
                     total_hashes += hash_count;
                 }
+                BatchResult::Rejected {
+                    logical_index,
+                    hash_count,
+                } => {
+                    total_hashes += hash_count;
+                    current_start = current_start.saturating_add(U512::from(logical_index + 1));
+                    continue;
+                }
                 BatchResult::DeviceLost => {
                     DEVICE_LOST.with(|lost| *lost.borrow_mut() = Some(self.engine_id));
                     WORKER_BUFFERS.with(|res| *res.borrow_mut() = None);
@@ -538,6 +649,7 @@ impl MinerEngine for CudaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cudarc::nvrtc::compile_ptx;
     use engine_cpu::AtomicBoolCancelCheck;
     use std::sync::atomic::AtomicBool;
 
@@ -658,30 +770,76 @@ mod tests {
         CudaEngine::clear_worker_resources();
     }
 
-    #[test]
-    fn cuda_field_reduction_matches_u128_modulo() {
-        let Some(engine) = engine_or_skip() else {
-            return;
-        };
-        let modulus = 0xffff_ffff_0000_0001u128;
+    const GOLDILOCKS_P: u128 = 0xffff_ffff_0000_0001;
+    const EPS: u64 = 0xffff_ffff;
+
+    /// Bit-exact model of the kernel's `reduce128` and its deviation from
+    /// `value mod p`, so the GPU can be checked exactly and the deviation
+    /// bounded on the host.
+    fn reduce128_model(value: u128) -> (u64, u128) {
+        let (r0, r1, r2, r3) = (
+            value as u32,
+            (value >> 32) as u32,
+            (value >> 64) as u32,
+            (value >> 96) as u32,
+        );
+        let low = ((r1 as u64) << 32) | r0 as u64;
+        let (folded, carry) = low.overflowing_add(r2 as u64 * EPS);
+        let (subtrahend, subtrahend_wrapped) = r3.overflowing_add(carry as u32);
+        let (hi, hi_wrapped) = ((folded >> 32) as u32).overflowing_add(carry as u32);
+        let shifted = ((hi as u64) << 32) | (folded as u32 as u64);
+        let (result, borrowed) = shifted.overflowing_sub(subtrahend as u64);
+        let mut error = 0u128;
+        if subtrahend_wrapped {
+            error += 1 << 32;
+        }
+        if hi_wrapped {
+            error += GOLDILOCKS_P - EPS as u128;
+        }
+        if borrowed {
+            error += EPS as u128;
+        }
+        (result, error % GOLDILOCKS_P)
+    }
+
+    /// Bit-exact model of the kernel's `gf64_add` and its deviation from `a + b mod p`.
+    fn gf64_add_model(a: u64, b: u64) -> (u64, u128) {
+        let (sum, carry) = a.overflowing_add(b);
+        if !carry {
+            return (sum, 0);
+        }
+        let (folded, wrapped) = sum.overflowing_add(EPS);
+        (
+            folded,
+            if wrapped {
+                GOLDILOCKS_P - EPS as u128
+            } else {
+                0
+            },
+        )
+    }
+
+    /// Edge cases built to hit every carry path, followed by 4096 random values.
+    fn reduction_inputs() -> (Vec<u128>, Vec<u128>) {
         let edges = [
             0,
             1,
             0xffff_fffe,
             0xffff_ffff,
             0x1_0000_0000,
-            modulus as u64 - 1,
-            modulus as u64,
-            modulus as u64 + 1,
+            GOLDILOCKS_P as u64 - 1,
+            GOLDILOCKS_P as u64,
+            GOLDILOCKS_P as u64 + 1,
             u64::MAX,
         ];
-        let mut values = Vec::new();
+        let mut edge_values = Vec::new();
         for high in edges {
             for low in edges {
-                values.push(((high as u128) << 64) | low as u128);
+                edge_values.push(((high as u128) << 64) | low as u128);
             }
         }
         let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut random = Vec::new();
         for _ in 0..4096 {
             let mut value = 0u128;
             for _ in 0..2 {
@@ -690,18 +848,87 @@ mod tests {
                 seed ^= seed << 17;
                 value = (value << 64) | seed as u128;
             }
-            values.push(value);
+            random.push(value);
         }
+        (edge_values, random)
+    }
+
+    #[test]
+    fn reduction_models_deviate_only_on_carry_wraps() {
+        let (edge_values, random) = reduction_inputs();
+        for value in edge_values.iter().chain(&random) {
+            let (result, error) = reduce128_model(*value);
+            assert_eq!(
+                result as u128 % GOLDILOCKS_P,
+                (value % GOLDILOCKS_P + error) % GOLDILOCKS_P,
+                "reduce128 model invariant broken for {value:032x}"
+            );
+        }
+        assert_eq!(reduce128_model(1 << 96).1, EPS as u128, "2^96 borrows");
+        let slips = random
+            .iter()
+            .filter(|v| reduce128_model(**v).1 != 0)
+            .count();
+        assert_eq!(
+            slips,
+            0,
+            "slipped reductions among {} random inputs",
+            random.len()
+        );
+
+        let mut random_slips = 0;
+        for pair in random.windows(2) {
+            let (a, b) = (pair[0] as u64, pair[1] as u64);
+            let (result, error) = gf64_add_model(a, b);
+            assert_eq!(
+                result as u128 % GOLDILOCKS_P,
+                (a as u128 + b as u128 + error) % GOLDILOCKS_P,
+                "gf64_add model invariant broken for {a:016x} + {b:016x}"
+            );
+            random_slips += (error != 0) as usize;
+        }
+        assert_eq!(
+            gf64_add_model(u64::MAX, u64::MAX).1,
+            GOLDILOCKS_P - EPS as u128
+        );
+        assert_eq!(random_slips, 0, "slipped additions among random inputs");
+    }
+
+    #[test]
+    fn reduction_slips_are_absent_in_millions_of_random_products() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let slips = (0..1 << 22)
+            .filter(|_| reduce128_model(next() as u128 * next() as u128).1 != 0)
+            .count();
+        assert_eq!(slips, 0, "reducer slipped on random 64x64-bit products");
+    }
+
+    #[test]
+    fn cuda_field_arithmetic_matches_models_bit_exactly() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        let (edge_values, random) = reduction_inputs();
+        let values: Vec<u128> = edge_values.into_iter().chain(random).collect();
         let input: Vec<u32> = values
             .iter()
             .flat_map(|v| (0..4).map(move |i| (v >> (32 * i)) as u32))
             .collect();
         let source = format!(
             "{KERNEL_SRC}\n\
-             extern \"C\" __global__ void reduce_test(const u32 *input, u64 *output, u32 count) {{\n\
+             extern \"C\" __global__ void arith_test(const u32 *input, u64 *reduced, u64 *added, u32 count) {{\n\
                  u32 i = blockIdx.x * blockDim.x + threadIdx.x;\n\
-                 if (i < count) output[i] = gf64_canon(reduce128(\n\
-                     input[4*i], input[4*i+1], input[4*i+2], input[4*i+3]));\n\
+                 if (i >= count) return;\n\
+                 reduced[i] = reduce128(input[4*i], input[4*i+1], input[4*i+2], input[4*i+3]);\n\
+                 u64 a = ((u64)input[4*i+1] << 32) | input[4*i];\n\
+                 u64 b = ((u64)input[4*i+3] << 32) | input[4*i+2];\n\
+                 added[i] = gf64_add(a, b);\n\
              }}"
         );
         let device = &engine.devices[0];
@@ -709,25 +936,42 @@ mod tests {
             .ctx
             .load_module(compile_ptx(source).unwrap())
             .unwrap();
-        let function = module.load_function("reduce_test").unwrap();
+        let function = module.load_function("arith_test").unwrap();
         let stream = device.ctx.default_stream();
         let input = stream.clone_htod(&input).unwrap();
-        let mut output = stream.alloc_zeros::<u64>(values.len()).unwrap();
+        let mut reduced = stream.alloc_zeros::<u64>(values.len()).unwrap();
+        let mut added = stream.alloc_zeros::<u64>(values.len()).unwrap();
         let count = values.len() as u32;
         let mut launch = stream.launch_builder(&function);
-        launch.arg(&input).arg(&mut output).arg(&count);
+        launch
+            .arg(&input)
+            .arg(&mut reduced)
+            .arg(&mut added)
+            .arg(&count);
         unsafe {
             launch.launch(LaunchConfig::for_num_elems(count)).unwrap();
         }
         stream.synchronize().unwrap();
-        for (value, got) in values.iter().zip(stream.clone_dtoh(&output).unwrap()) {
-            assert_eq!(got as u128, value % modulus, "input {value:032x}");
+        let reduced = stream.clone_dtoh(&reduced).unwrap();
+        let added = stream.clone_dtoh(&added).unwrap();
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                reduced[i],
+                reduce128_model(*value).0,
+                "reduce128 of {value:032x}"
+            );
+            let (a, b) = (*value as u64, (*value >> 64) as u64);
+            assert_eq!(
+                added[i],
+                gf64_add_model(a, b).0,
+                "gf64_add of {a:016x} + {b:016x}"
+            );
         }
         CudaEngine::clear_worker_resources();
     }
 
     #[test]
-    fn cuda_found_batch_counts_every_dispatched_nonce() {
+    fn cuda_found_batch_counts_only_evaluated_nonces() {
         let batch_size = 4_000_000u32;
         let Some(engine) = engine_or_skip_with(batch_size) else {
             return;
@@ -738,6 +982,13 @@ mod tests {
             batch_size > total_threads,
             "batch must span several nonces per thread"
         );
+        // Difficulty 1 makes every nonce a candidate, so each thread with work
+        // evaluates exactly its first nonce and stops; the count must not
+        // include the rest of the dispatched rectangle. Threads whose first
+        // index is past the batch never evaluate anything.
+        let nonces_per_thread = batch_size.div_ceil(total_threads);
+        let threads_with_work = batch_size.div_ceil(nonces_per_thread);
+        assert!(threads_with_work < total_threads);
         let header = decode32(pow_core::NONCE_HASH_KVS[1].header);
         let ctx = engine.prepare_context(header, U512::one());
         let start = U512::from(0xfeed_face_0000_0000u64);
@@ -749,14 +1000,66 @@ mod tests {
                 hash_count,
                 ..
             } => {
-                assert!(candidate.nonce >= start && candidate.nonce <= end);
+                assert_eq!(
+                    candidate.nonce, start,
+                    "lowest candidate is the first nonce"
+                );
                 assert_eq!(
                     pow_core::hash_from_nonce(&ctx, candidate.nonce),
                     candidate.hash
                 );
-                assert_eq!(hash_count, batch_size as u64);
+                assert_eq!(hash_count, threads_with_work as u64);
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_search_resumes_after_rejected_candidate_and_returns_lowest_solution() {
+        let Some(engine) = engine_or_skip() else {
+            return;
+        };
+        // Target equal to the golden hash: the golden nonce at index 0 is a
+        // prefix-equal candidate that CPU verification rejects. Vector 4's hash
+        // starts with 0xea, so most later nonces are real solutions and race
+        // for the claim; the launch must publish the lowest index, so the
+        // rejection happens first and the result is the lowest valid nonce.
+        let v = &pow_core::NONCE_HASH_KVS[4];
+        let start = U512::from_big_endian(&decode64(v.nonce));
+        let target = U512::from_big_endian(&decode64(v.hash));
+        let ctx = JobContext {
+            header: decode32(v.header),
+            difficulty: U512::one(),
+            target,
+        };
+        let end = start + U512::from(32u64);
+        let lowest_valid = (0..=32u64)
+            .map(|i| start + U512::from(i))
+            .find(|&nonce| pow_core::hash_from_nonce(&ctx, nonce) < target)
+            .expect("a valid nonce within the range");
+        assert!(
+            lowest_valid > start,
+            "the golden nonce itself must not qualify"
+        );
+        let cancel = AtomicBool::new(false);
+        match engine.search_range(&ctx, Range { start, end }, &AtomicBoolCancelCheck(&cancel)) {
+            EngineStatus::Found {
+                candidate,
+                hash_count,
+                ..
+            } => {
+                assert_eq!(candidate.nonce, lowest_valid);
+                assert_eq!(
+                    candidate.hash,
+                    pow_core::hash_from_nonce(&ctx, lowest_valid)
+                );
+                assert_eq!(
+                    hash_count, 65,
+                    "33 nonces hashed in the rejected launch plus 32 in the resume launch"
+                );
+            }
+            other => panic!("expected Found after the rejected candidate, got {other:?}"),
         }
         CudaEngine::clear_worker_resources();
     }

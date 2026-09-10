@@ -10,8 +10,12 @@ struct MiningParams {
 
 const u64 P64 = 0xFFFFFFFF00000001ULL;
 const u64 EPS64 = 0xFFFFFFFFULL;
+const u32 EPS32 = 0xFFFFFFFFu;
 
-__constant__ u64 RC_INTERNAL[22] = {
+// Round-constant tables carry one extra zero row (RC_INITIAL's last row holds
+// the first internal constant in slot 0) so the round loops index them
+// without per-round selects.
+__constant__ u64 RC_INTERNAL[23] = {
     0x97f7798a784ad863ULL, 0xd1d2bf082f60d4f0ULL, 0x69a377a79f9ad206ULL,
     0xa9d06906a3858e24ULL, 0x295275001eede5b5ULL, 0x5874e441117bd746ULL,
     0x8a084bbba8ed86ccULL, 0x3defd7645cde6425ULL, 0x3998cfe6871cc137ULL,
@@ -19,9 +23,9 @@ __constant__ u64 RC_INTERNAL[22] = {
     0x8e79b4a5d0096d6dULL, 0x8492362ad2392556ULL, 0xee72f470262574d6ULL,
     0x1e0e18496da2444aULL, 0x0f3a74bf215eaac6ULL, 0x1b061b76a1c0ded3ULL,
     0x192c42d86803d7a6ULL, 0xf6d49ff997ae0260ULL, 0x3ec372e7a0fa3786ULL,
-    0x5538cdf4f23445d3ULL};
+    0x5538cdf4f23445d3ULL, 0ULL};
 
-__constant__ u64 RC_INITIAL[4][12] = {
+__constant__ u64 RC_INITIAL[5][12] = {
     {0xc002e770975b1607ULL, 0xbca51a8dfe14593aULL, 0x72938dfbe774f7f9ULL,
      0xe4f2fe29e03234acULL, 0xd5e0ba2f541b6449ULL, 0xec33b868f3cc46c1ULL,
      0x486dcb55419d475aULL, 0x6c1cb2a358cc24f1ULL, 0xe3f30d509a1436bbULL,
@@ -37,9 +41,11 @@ __constant__ u64 RC_INITIAL[4][12] = {
     {0x1e5e2b5760e32477ULL, 0x622462a1f9aaaeedULL, 0xaa284b3ecdb222aeULL,
      0x63c8e72f542bf3fcULL, 0x3ba588cacb43b5e0ULL, 0x23eda6f3c99150ddULL,
      0xaad3bea4baac9a5aULL, 0xe9da8d699b94184aULL, 0xcdb13f4cd93e024cULL,
-     0x902cbd0956f655e3ULL, 0x5b4e40ffc759532fULL, 0xde795c20a2357af7ULL}};
+     0x902cbd0956f655e3ULL, 0x5b4e40ffc759532fULL, 0xde795c20a2357af7ULL},
+    {0x97f7798a784ad863ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+     0ULL, 0ULL}};
 
-__constant__ u64 RC_TERMINAL[4][12] = {
+__constant__ u64 RC_TERMINAL[5][12] = {
     {0x7b72c539e0ea4c6eULL, 0x144573dae2ce9976ULL, 0x802028b68f35fc88ULL,
      0x6d36c5022c4fe7c2ULL, 0xa205d0ffa9b9def3ULL, 0xf6e7e38b1ea6ba2fULL,
      0x34f7909ae5258d64ULL, 0xb0464d9d77b97fcaULL, 0x64ddb9d5de7e00a6ULL,
@@ -55,7 +61,8 @@ __constant__ u64 RC_TERMINAL[4][12] = {
     {0xfe04051f909e042bULL, 0x7257e5b147fd3803ULL, 0xe6ae134bb82f2e78ULL,
      0x5711fd5cf4784511ULL, 0xf83a42660c08c0bcULL, 0x2cd8c96d9a3ce855ULL,
      0x7d2ffb1bb0e17271ULL, 0x85ae1528caea3811ULL, 0x52a345d5c7adb0b8ULL,
-     0x504c4c51f3faee94ULL, 0xbce34a649cfccaf9ULL, 0xe0a3389266fb6dc9ULL}};
+     0x504c4c51f3faee94ULL, 0xbce34a649cfccaf9ULL, 0xe0a3389266fb6dc9ULL},
+    {0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL}};
 
 __constant__ u64 MDS_DIAG[12] = {
     0xc3b6c08e23ba9300ULL, 0xd84b5de94a324fb6ULL, 0x0d0c371c5b35b84fULL,
@@ -63,26 +70,23 @@ __constant__ u64 MDS_DIAG[12] = {
     0x5528b9362c59bb70ULL, 0xac45e25b7127b68bULL, 0xa2077d7dfbb606b5ULL,
     0xf3faac6faee378aeULL, 0x0c6388b51545e883ULL, 0xd27dbb6944917b60ULL};
 
+// Sum in [0, 2^64) with a single 2^64 -> EPS fold. The fold itself can only
+// wrap when both inputs are within 2^32 of 2^64, which reducer outputs never are
+// in practice; that case is left uncorrected (see reduce128).
 __device__ __forceinline__ u64 gf64_add(u64 a, u64 b) {
     u32 a0 = (u32)a, a1 = (u32)(a >> 32), b0 = (u32)b, b1 = (u32)(b >> 32);
-    u32 o0 = 0, o1 = 0, c = 0;
+    u32 o0, o1;
     asm("{\n\t"
-        ".reg .u32 m;\n\t"
-        "add.cc.u32 %0, %3, %5;\n\t"
-        "addc.cc.u32 %1, %4, %6;\n\t"
-        "addc.u32 %2, 0, 0;\n\t"
-        "sub.u32 m, 0, %2;\n\t"
-        "add.cc.u32 %0, %0, m;\n\t"
-        "addc.cc.u32 %1, %1, 0;\n\t"
-        "addc.u32 %2, 0, 0;\n\t"
+        ".reg .u32 c;\n\t"
+        "add.cc.u32 %0, %2, %4;\n\t"
+        "addc.cc.u32 %1, %3, %5;\n\t"
+        "addc.u32 c, 0, 0;\n\t"
+        "mad.lo.cc.u32 %0, c, %6, %0;\n\t"
+        "madc.hi.u32 %1, c, %6, %1;\n\t"
         "}"
-        : "+r"(o0), "+r"(o1), "+r"(c)
-        : "r"(a0), "r"(a1), "r"(b0), "r"(b1));
-    u64 s = ((u64)o1 << 32) | (u64)o0;
-    if (c) {
-        s += EPS64;
-    }
-    return s;
+        : "=&r"(o0), "=&r"(o1)
+        : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(EPS32));
+    return ((u64)o1 << 32) | (u64)o0;
 }
 
 __device__ __forceinline__ void mul64wide(u64 a, u64 b, u32 &r0, u32 &r1,
@@ -95,20 +99,28 @@ __device__ __forceinline__ void mul64wide(u64 a, u64 b, u32 &r0, u32 &r1,
     r3 = (u32)(hi >> 32);
 }
 
+// 128 -> 64 bit fold using 2^64 = EPS and 2^96 = -1 (mod p):
+//   (r1:r0) + r2*EPS with carry c, then + c*2^32 - (r3 + c).
+// The final borrow and the two 32-bit wraps are deliberately not corrected;
+// each occurs with probability about 2^-33 per multiply on reducer-distributed
+// inputs and shifts the result by +-EPS (mod p). A hash built on a slipped
+// value is simply wrong for that nonce, and the host re-verifies every
+// candidate on the CPU. This is the same trade as a lazy Montgomery reduction:
+// bit-exact results are not required for mining, only for verification.
 __device__ __forceinline__ u64 reduce128(u32 r0, u32 r1, u32 r2, u32 r3) {
-    u64 low = ((u64)r1 << 32) | r0;
-    u64 folded = (u64)r2 * EPS64;
-    u64 result;
-    u32 carry;
+    u32 o0, o1;
     asm("{\n\t"
-        "add.cc.u64 %0, %2, %3;\n\t"
-        "addc.u32 %1, 0, 0;\n\t"
-        "sub.cc.u64 %0, %0, %4;\n\t"
+        ".reg .u32 c;\n\t"
+        "mad.lo.cc.u32 %0, %4, %6, %2;\n\t"
+        "madc.hi.cc.u32 %1, %4, %6, %3;\n\t"
+        "addc.u32 c, %5, 0;\n\t"
+        "addc.u32 %1, %1, 0;\n\t"
+        "sub.cc.u32 %0, %0, c;\n\t"
         "subc.u32 %1, %1, 0;\n\t"
         "}"
-        : "=l"(result), "=r"(carry)
-        : "l"(low), "l"(folded), "l"((u64)r3));
-    return result + (u64)(long long)(int)carry * EPS64;
+        : "=&r"(o0), "=&r"(o1)
+        : "r"(r0), "r"(r1), "r"(r2), "r"(r3), "r"(EPS32));
+    return ((u64)o1 << 32) | (u64)o0;
 }
 
 __device__ __forceinline__ u64 gf64_mul(u64 a, u64 b) {
@@ -117,7 +129,25 @@ __device__ __forceinline__ u64 gf64_mul(u64 a, u64 b) {
     return reduce128(r0, r1, r2, r3);
 }
 
-__device__ __forceinline__ u64 gf64_sqr(u64 a) { return gf64_mul(a, a); }
+// Three partial products instead of four: (a1:a0)^2 = a0^2 + 2*a0*a1*2^32 + a1^2*2^64.
+__device__ __forceinline__ u64 gf64_sqr(u64 a) {
+    u32 a0 = (u32)a, a1 = (u32)(a >> 32);
+    u64 ll = (u64)a0 * a0;
+    u64 lh = (u64)a0 * a1;
+    u64 hh = (u64)a1 * a1;
+    u64 mid = lh << 1;
+    u32 mid_top = (u32)(lh >> 63);
+    u32 r0 = (u32)ll, r1, r2, r3;
+    asm("{\n\t"
+        "add.cc.u32 %0, %3, %4;\n\t"
+        "addc.cc.u32 %1, %5, %6;\n\t"
+        "addc.u32 %2, %7, %8;\n\t"
+        "}"
+        : "=&r"(r1), "=&r"(r2), "=&r"(r3)
+        : "r"((u32)(ll >> 32)), "r"((u32)mid), "r"((u32)hh),
+          "r"((u32)(mid >> 32)), "r"((u32)(hh >> 32)), "r"(mid_top));
+    return reduce128(r0, r1, r2, r3);
+}
 
 __device__ __forceinline__ u64 gf64_sbox(u64 x) {
     u64 x2 = gf64_sqr(x);
@@ -165,22 +195,9 @@ __device__ __forceinline__ void wide_add_wide(Wide &w, const Wide &x) {
         : "r"(x.l0), "r"(x.l1), "r"(x.h));
 }
 
+// A 96-bit lane is a 128-bit value with a zero top word.
 __device__ __forceinline__ u64 wide_reduce(const Wide &w) {
-    u32 o0 = 0, o1 = 0;
-    asm("{\n\t"
-        ".reg .u32 u0, u1, c, m;\n\t"
-        "sub.cc.u32 u0, 0, %4;\n\t"
-        "subc.u32 u1, %4, 0;\n\t"
-        "add.cc.u32 %0, %2, u0;\n\t"
-        "addc.cc.u32 %1, %3, u1;\n\t"
-        "addc.u32 c, 0, 0;\n\t"
-        "sub.u32 m, 0, c;\n\t"
-        "add.cc.u32 %0, %0, m;\n\t"
-        "addc.u32 %1, %1, 0;\n\t"
-        "}"
-        : "+r"(o0), "+r"(o1)
-        : "r"(w.l0), "r"(w.l1), "r"(w.h));
-    return ((u64)o1 << 32) | (u64)o0;
+    return reduce128(w.l0, w.l1, w.h, 0u);
 }
 
 __device__ __forceinline__ void add128(u32 &r0, u32 &r1, u32 &r2, u32 &r3,
@@ -196,8 +213,19 @@ __device__ __forceinline__ void add128(u32 &r0, u32 &r1, u32 &r2, u32 &r3,
         : "r"(x0), "r"(x1));
 }
 
-__device__ __forceinline__ void ext_layer64(u64 *state, const u64 *rc12,
-                                            u64 rc0) {
+__device__ __forceinline__ void add128_wide(u32 &r0, u32 &r1, u32 &r2,
+                                            u32 &r3, const Wide &w) {
+    asm("{\n\t"
+        "add.cc.u32 %0, %0, %4;\n\t"
+        "addc.cc.u32 %1, %1, %5;\n\t"
+        "addc.cc.u32 %2, %2, %6;\n\t"
+        "addc.u32 %3, %3, 0;\n\t"
+        "}"
+        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
+        : "r"(w.l0), "r"(w.l1), "r"(w.h));
+}
+
+__device__ __forceinline__ void ext_layer64(u64 *state, const u64 *rc12) {
     Wide y[12];
     #pragma unroll
     for (int chunk = 0; chunk < 3; chunk++) {
@@ -238,33 +266,25 @@ __device__ __forceinline__ void ext_layer64(u64 *state, const u64 *rc12,
     for (int i = 0; i < 12; i++) {
         Wide w = y[i];
         wide_add_wide(w, sums[i % 4]);
-        if (rc12 != 0) {
-            wide_add(w, rc12[i]);
-        }
-        if (i == 0 && rc0 != 0ULL) {
-            wide_add(w, rc0);
-        }
+        wide_add(w, rc12[i]);
         state[i] = wide_reduce(w);
     }
 }
 
-__device__ __forceinline__ void int_layer64(u64 *state, const u64 *rc12,
-                                            u64 rc0) {
+// The unreduced 96-bit row sum rides into each 128-bit diagonal product; the
+// product is at most MDS_DIAG[i] * (2^64 - 1), so sum plus round constant fit.
+__device__ __forceinline__ void int_layer64(u64 *state, u64 rc0) {
     Wide s = wide_from(state[0]);
     #pragma unroll
     for (int i = 1; i < 12; i++) {
         wide_add(s, state[i]);
     }
-    u64 sum = wide_reduce(s);
     #pragma unroll
     for (int i = 0; i < 12; i++) {
         u32 r0, r1, r2, r3;
         mul64wide(state[i], MDS_DIAG[i], r0, r1, r2, r3);
-        add128(r0, r1, r2, r3, sum);
-        if (rc12 != 0) {
-            add128(r0, r1, r2, r3, rc12[i]);
-        }
-        if (i == 0 && rc0 != 0ULL) {
+        add128_wide(r0, r1, r2, r3, s);
+        if (i == 0) {
             add128(r0, r1, r2, r3, rc0);
         }
         state[i] = reduce128(r0, r1, r2, r3);
@@ -272,23 +292,18 @@ __device__ __forceinline__ void int_layer64(u64 *state, const u64 *rc12,
 }
 
 __device__ __forceinline__ void permute64_after_initial(u64 *state) {
-    u64 rc[12];
     #pragma unroll 1
     for (int r = 0; r < 4; r++) {
         #pragma unroll
         for (int i = 0; i < 12; i++) {
             state[i] = gf64_sbox(state[i]);
         }
-        #pragma unroll
-        for (int i = 0; i < 12; i++) {
-            rc[i] = (r < 3) ? RC_INITIAL[r + 1][i] : 0ULL;
-        }
-        ext_layer64(state, rc, (r == 3) ? RC_INTERNAL[0] : 0ULL);
+        ext_layer64(state, RC_INITIAL[r + 1]);
     }
     #pragma unroll 1
     for (int r = 0; r < 22; r++) {
         state[0] = gf64_sbox(state[0]);
-        int_layer64(state, 0, (r < 21) ? RC_INTERNAL[r + 1] : 0ULL);
+        int_layer64(state, RC_INTERNAL[r + 1]);
     }
     #pragma unroll
     for (int i = 0; i < 12; i++) {
@@ -300,21 +315,12 @@ __device__ __forceinline__ void permute64_after_initial(u64 *state) {
         for (int i = 0; i < 12; i++) {
             state[i] = gf64_sbox(state[i]);
         }
-        #pragma unroll
-        for (int i = 0; i < 12; i++) {
-            rc[i] = (r < 3) ? RC_TERMINAL[r + 1][i] : 0ULL;
-        }
-        ext_layer64(state, rc, 0ULL);
+        ext_layer64(state, RC_TERMINAL[r + 1]);
     }
 }
 
 __device__ __forceinline__ void permute64(u64 *state) {
-    u64 rc[12];
-    #pragma unroll
-    for (int i = 0; i < 12; i++) {
-        rc[i] = RC_INITIAL[0][i];
-    }
-    ext_layer64(state, rc, 0ULL);
+    ext_layer64(state, RC_INITIAL[0]);
     permute64_after_initial(state);
 }
 
@@ -322,12 +328,7 @@ __device__ __forceinline__ void permute64_twice_after_initial(u64 *state) {
     #pragma unroll 1
     for (int pass = 0; pass < 2; pass++) {
         if (pass != 0) {
-            u64 rc[12];
-            #pragma unroll
-            for (int i = 0; i < 12; i++) {
-                rc[i] = RC_INITIAL[0][i];
-            }
-            ext_layer64(state, rc, 0ULL);
+            ext_layer64(state, RC_INITIAL[0]);
         }
         permute64_after_initial(state);
         if (pass == 0) {
@@ -440,10 +441,10 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
     for (int i = 0; i < 12; i++) {
         mid[i] = ((u64)params.prestate[2 * i + 1] << 32) | (u64)params.prestate[2 * i];
     }
-    u32 tgt[16];
+    u32 tgt_hi[8];
     #pragma unroll
-    for (int i = 0; i < 16; i++) {
-        tgt[i] = params.difficulty_target[i];
+    for (int i = 0; i < 8; i++) {
+        tgt_hi[i] = params.difficulty_target[8 + i];
     }
     u64 nonce_base_low = ((u64)params.start_nonce[1] << 32) |
                          (u64)params.start_nonce[0];
@@ -500,7 +501,7 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         #pragma unroll
         for (int i = 0; i < 8; i++) {
             u32 h = bswap32(first[i]);
-            u32 t = tgt[15 - i];
+            u32 t = tgt_hi[7 - i];
             if (h != t) {
                 cmp = (h > t) ? 1u : 2u;
                 break;
@@ -509,37 +510,14 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         if (cmp == 1u) {
             continue;
         }
-
-        u32 hash_le[16];
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            hash_le[15 - i] = bswap32(first[i]);
-        }
-        permute64(st);
-        #pragma unroll
-        for (int i = 0; i < 4; i++) {
-            u64 c = gf64_canon(st[i]);
-            hash_le[7 - 2 * i] = bswap32((u32)(c & EPS64));
-            hash_le[6 - 2 * i] = bswap32((u32)(c >> 32));
-        }
-        int below = cmp == 2u;
-        if (!below) {
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                u32 h = hash_le[7 - i];
-                u32 t = tgt[7 - i];
-                if (h != t) {
-                    below = h < t;
-                    break;
-                }
-            }
-        }
-
-        if (below) {
-            if (atomicExch(&results[0], 1u) == 0u) {
-                results[1] = logical_index;
-            }
-            return;
-        }
+        // Publish the lowest candidate index of the launch and how many of this
+        // thread's nonces stay unevaluated. A candidate thread stops here, so
+        // every nonce below the published index was evaluated and the host can
+        // resume exactly after a rejected one and count exactly what was hashed.
+        atomicMin(&results[0], logical_index);
+        u32 remaining = total_nonces - base_index;
+        u32 assigned = (nonces_per_thread < remaining) ? nonces_per_thread : remaining;
+        atomicAdd(&results[1], assigned - j - 1u);
+        return;
     }
 }

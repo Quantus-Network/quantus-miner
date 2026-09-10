@@ -100,6 +100,11 @@ pub trait MinerEngine: Send + Sync {
     fn prepare_context(&self, header_hash: [u8; 32], difficulty: U512) -> JobContext;
 
     /// Search an inclusive nonce range with cancellation support.
+    ///
+    /// `Exhausted` means every nonce in the range was evaluated. An engine
+    /// whose evaluation is not bit-exact must document its miss probability
+    /// (see `CudaEngine`); callers treat `Exhausted` as "no solution found",
+    /// never as a proof that none exists.
     fn search_range(
         &self,
         ctx: &JobContext,
