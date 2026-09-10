@@ -63,11 +63,12 @@ struct WorkerBuffers {
 /// rejected by CPU verification and the search resumes right after it, which
 /// is exact because every nonce below the lowest candidate was evaluated. A
 /// wrong hash for a nonce that is actually valid is missed and the range
-/// reports `Exhausted`. `hash_count` counts the nonces evaluated in this call
-/// that will not be evaluated again, wrong ones included: a found batch counts
-/// every nonce its threads hashed (candidate threads stop at their candidate),
-/// and a rejected candidate counts the nonces below it. The expected loss is
-/// about 3e-7 of solutions, far below the throughput the shortcut buys.
+/// reports `Exhausted`. `hash_count` counts every nonce hashed in this call,
+/// wrong ones included; candidate threads stop at their candidate, so a launch
+/// counts exactly what its threads executed. After a rejected candidate the
+/// nonces above it are hashed again and counted again, since they are real
+/// work. The expected loss is about 3e-7 of solutions, far below the
+/// throughput the shortcut buys.
 /// `hash_nonces` is subject to the same contract: it is a kernel self-test,
 /// not a verifier; use `pow_core::hash_from_nonce`.
 pub struct CudaEngine {
@@ -360,6 +361,7 @@ enum BatchResult {
     },
     Rejected {
         logical_index: u64,
+        hash_count: u64,
     },
     DeviceLost,
 }
@@ -434,15 +436,20 @@ fn run_single_batch(
         }
         let nonce = batch_start + U512::from(logical_index);
         let hash = pow_core::hash_from_nonce(ctx, nonce);
+        let hash_count = dispatched - unevaluated;
         if hash >= ctx.target {
             log::warn!(
                 target: "cuda_engine",
-                "CUDA candidate {} rejected by CPU verification (hash {} >= target {}); resuming after it",
+                "CUDA candidate {} rejected by CPU verification (hash {} >= target {}); resuming after it, {} nonces above it will be hashed again",
                 format_u512(nonce),
                 format_u512(hash),
-                format_u512(ctx.target)
+                format_u512(ctx.target),
+                hash_count - logical_index - 1
             );
-            return BatchResult::Rejected { logical_index };
+            return BatchResult::Rejected {
+                logical_index,
+                hash_count,
+            };
         }
         return BatchResult::Found {
             candidate: Candidate {
@@ -450,7 +457,7 @@ fn run_single_batch(
                 work: nonce.to_big_endian(),
                 hash,
             },
-            hash_count: dispatched - unevaluated,
+            hash_count,
         };
     }
 
@@ -582,10 +589,12 @@ impl MinerEngine for CudaEngine {
                 BatchResult::NotFound { hash_count } => {
                     total_hashes += hash_count;
                 }
-                BatchResult::Rejected { logical_index } => {
-                    let skip = logical_index + 1;
-                    total_hashes += skip;
-                    current_start = current_start.saturating_add(U512::from(skip));
+                BatchResult::Rejected {
+                    logical_index,
+                    hash_count,
+                } => {
+                    total_hashes += hash_count;
+                    current_start = current_start.saturating_add(U512::from(logical_index + 1));
                     continue;
                 }
                 BatchResult::DeviceLost => {
@@ -1046,8 +1055,8 @@ mod tests {
                     pow_core::hash_from_nonce(&ctx, lowest_valid)
                 );
                 assert_eq!(
-                    hash_count, 33,
-                    "one rejected nonce plus the 32-nonce resume batch"
+                    hash_count, 65,
+                    "33 nonces hashed in the rejected launch plus 32 in the resume launch"
                 );
             }
             other => panic!("expected Found after the rejected candidate, got {other:?}"),
