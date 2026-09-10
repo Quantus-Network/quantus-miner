@@ -10,16 +10,17 @@ use primitive_types::U512;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const KERNEL_SRC: &str = include_str!("kernels/mining.cu");
 const THREADS_PER_BLOCK: u32 = 256;
 const MAX_BLOCKS: u32 = 4096;
-const RESULTS_U32S: usize = 1 + 16 + 16;
+const RESULTS_U32S: usize = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MiningParams {
-    midstate: [u32; 24],
+    prestate: [u32; 24],
     start_nonce: [u32; 16],
     difficulty_target: [u32; 16],
     dispatch_config: [u32; 3],
@@ -43,6 +44,8 @@ struct WorkerBuffers {
     hashes: CudaSlice<u32>,
     mine: CudaFunction,
     hash: CudaFunction,
+    busy: Duration,
+    busy_since: Instant,
 }
 
 pub struct CudaEngine {
@@ -102,6 +105,9 @@ impl CudaEngine {
         for ordinal in 0..count as usize {
             let ctx = CudaContext::new(ordinal)
                 .map_err(|e| format!("Failed to create CUDA context for device {ordinal}: {e}"))?;
+            ctx.set_blocking_synchronize().map_err(|e| {
+                format!("Failed to enable blocking CUDA synchronization on device {ordinal}: {e}")
+            })?;
             let name = ctx
                 .name()
                 .unwrap_or_else(|_| format!("cuda-device-{ordinal}"));
@@ -218,7 +224,18 @@ fn create_buffers(
         mine,
         hash,
         stream,
+        busy: Duration::ZERO,
+        busy_since: Instant::now(),
     })
+}
+
+fn take_gpu_duty_cycle(buffers: &mut WorkerBuffers) -> Option<f64> {
+    let wall = buffers.busy_since.elapsed();
+    let duty = (wall >= Duration::from_secs(1))
+        .then(|| 100.0 * buffers.busy.as_secs_f64() / wall.as_secs_f64());
+    buffers.busy = Duration::ZERO;
+    buffers.busy_since = Instant::now();
+    duty
 }
 
 fn worker_buffers(
@@ -254,6 +271,10 @@ enum BatchResult {
     DeviceLost,
 }
 
+fn nonces_until_low64_carry(nonce: U512) -> U512 {
+    (U512::one() << 64).saturating_sub(U512::from(nonce.low_u64()))
+}
+
 fn run_single_batch(
     buffers: &mut WorkerBuffers,
     ctx: &JobContext,
@@ -264,17 +285,18 @@ fn run_single_batch(
     let total_threads = num_blocks * THREADS_PER_BLOCK;
     let nonces_per_thread = batch_size.div_ceil(total_threads).max(1);
     let dispatch = [total_threads, nonces_per_thread, batch_size];
-    let start_limbs = pow_core::u512_to_le_u32s(batch_start);
     let nonce_be = batch_start.to_big_endian();
-    let mid = pow_core::mining_midstate_u32s(ctx.header, nonce_be[..32].try_into().unwrap());
+    let start_limbs = pow_core::u512_to_le_u32s(batch_start);
+    let prestate = pow_core::mining_prestate_low64_u32s(ctx.header, nonce_be);
     let target = pow_core::u512_to_le_u32s(ctx.target);
     let params = MiningParams {
-        midstate: mid,
+        prestate,
         start_nonce: start_limbs,
         difficulty_target: target,
         dispatch_config: dispatch,
     };
 
+    let launch_start = Instant::now();
     if let Err(e) = (|| {
         buffers.stream.memset_zeros(&mut buffers.results)?;
         let cfg = LaunchConfig {
@@ -294,6 +316,7 @@ fn run_single_batch(
         log::error!(target: "cuda_engine", "CUDA batch failed: {e}");
         return BatchResult::DeviceLost;
     }
+    buffers.busy += launch_start.elapsed();
 
     let result_u32s = match buffers.stream.clone_dtoh(&buffers.results) {
         Ok(v) => v,
@@ -305,26 +328,33 @@ fn run_single_batch(
 
     let dispatched = (total_threads as u64 * nonces_per_thread as u64).min(batch_size as u64);
     if result_u32s[0] != 0 {
-        let mut nonce_limbs = [0u32; 16];
-        let mut hash_limbs = [0u32; 16];
-        nonce_limbs.copy_from_slice(&result_u32s[1..17]);
-        hash_limbs.copy_from_slice(&result_u32s[17..33]);
-        let nonce = pow_core::u512_from_le_u32s(nonce_limbs);
-        let hash = pow_core::u512_from_le_u32s(hash_limbs);
-        let hashes_computed = if nonce >= batch_start {
-            let logical_index = (nonce - batch_start).as_u64();
-            let winning_iteration = logical_index % (nonces_per_thread as u64);
-            (total_threads as u64 * (winning_iteration + 1)).min(dispatched)
-        } else {
-            dispatched
-        };
+        let logical_index = result_u32s[1] as u64;
+        if logical_index >= dispatched {
+            log::error!(
+                target: "cuda_engine",
+                "CUDA returned out-of-range candidate index {logical_index} for {dispatched} dispatched nonces"
+            );
+            return BatchResult::DeviceLost;
+        }
+        let nonce = batch_start + U512::from(logical_index);
+        let hash = pow_core::hash_from_nonce(ctx, nonce);
+        if hash >= ctx.target {
+            log::error!(
+                target: "cuda_engine",
+                "CUDA candidate verification failed for nonce {}: hash {} is not below target {}",
+                format_u512(nonce),
+                format_u512(hash),
+                format_u512(ctx.target)
+            );
+            return BatchResult::DeviceLost;
+        }
         return BatchResult::Found {
             candidate: Candidate {
                 nonce,
                 work: nonce.to_big_endian(),
                 hash,
             },
-            hash_count: hashes_computed,
+            hash_count: dispatched,
         };
     }
 
@@ -393,18 +423,26 @@ impl MinerEngine for CudaEngine {
             return EngineStatus::DeviceLost { hash_count: 0 };
         }
 
-        let search_start = std::time::Instant::now();
+        let search_start = Instant::now();
         let mut total_hashes: u64 = 0;
         let mut current_start = range.start;
         let mut batch_num = 0u64;
 
+        let duty = WORKER_BUFFERS.with(|cell| {
+            take_gpu_duty_cycle(
+                cell.borrow_mut()
+                    .as_mut()
+                    .expect("CUDA buffers initialized"),
+            )
+        });
         log::info!(
             target: "cuda_engine",
-            "CUDA {} search started: range {}..{}, batch size: {} nonces",
+            "CUDA {} search started: range {}..{}, batch size: {} nonces{}",
             device_index,
             format_u512(range.start),
             format_u512(range.end),
-            self.batch_size
+            self.batch_size,
+            duty.map_or(String::new(), |d| format!(", GPU busy {d:.1}% since previous search"))
         );
 
         while current_start <= range.end {
@@ -418,8 +456,7 @@ impl MinerEngine for CudaEngine {
                 .end
                 .saturating_sub(current_start)
                 .saturating_add(U512::one());
-            let headroom =
-                (U512::one() << 256) - (current_start & ((U512::one() << 256) - U512::one()));
+            let headroom = nonces_until_low64_carry(current_start);
             let cap = remaining.min(headroom);
             let batch_size_u512 = U512::from(self.batch_size);
             let this_batch_size: u32 = if cap > batch_size_u512 {
@@ -513,7 +550,11 @@ mod tests {
     }
 
     fn engine_or_skip() -> Option<CudaEngine> {
-        match CudaEngine::try_new(1024, 0) {
+        engine_or_skip_with(1024)
+    }
+
+    fn engine_or_skip_with(batch_size: u32) -> Option<CudaEngine> {
+        match CudaEngine::try_new(batch_size, 0) {
             Ok(e) => Some(e),
             Err(e) => {
                 let msg = e.to_string();
@@ -525,6 +566,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn low64_batches_stop_before_carry() {
+        assert_eq!(nonces_until_low64_carry(U512::from(u64::MAX)), U512::one());
+        assert_eq!(
+            nonces_until_low64_carry(U512::from(u64::MAX - 7)),
+            U512::from(8u64)
+        );
+        assert_eq!(
+            nonces_until_low64_carry((U512::one() << 192) + U512::from(1u64)),
+            (U512::one() << 64) - U512::one()
+        );
     }
 
     #[test]
@@ -668,6 +722,41 @@ mod tests {
         stream.synchronize().unwrap();
         for (value, got) in values.iter().zip(stream.clone_dtoh(&output).unwrap()) {
             assert_eq!(got as u128, value % modulus, "input {value:032x}");
+        }
+        CudaEngine::clear_worker_resources();
+    }
+
+    #[test]
+    fn cuda_found_batch_counts_every_dispatched_nonce() {
+        let batch_size = 4_000_000u32;
+        let Some(engine) = engine_or_skip_with(batch_size) else {
+            return;
+        };
+        let total_threads =
+            batch_size.div_ceil(THREADS_PER_BLOCK).min(MAX_BLOCKS) * THREADS_PER_BLOCK;
+        assert!(
+            batch_size > total_threads,
+            "batch must span several nonces per thread"
+        );
+        let header = decode32(pow_core::NONCE_HASH_KVS[1].header);
+        let ctx = engine.prepare_context(header, U512::one());
+        let start = U512::from(0xfeed_face_0000_0000u64);
+        let end = start + U512::from(batch_size - 1);
+        let cancel = AtomicBool::new(false);
+        match engine.search_range(&ctx, Range { start, end }, &AtomicBoolCancelCheck(&cancel)) {
+            EngineStatus::Found {
+                candidate,
+                hash_count,
+                ..
+            } => {
+                assert!(candidate.nonce >= start && candidate.nonce <= end);
+                assert_eq!(
+                    pow_core::hash_from_nonce(&ctx, candidate.nonce),
+                    candidate.hash
+                );
+                assert_eq!(hash_count, batch_size as u64);
+            }
+            other => panic!("expected Found, got {other:?}"),
         }
         CudaEngine::clear_worker_resources();
     }

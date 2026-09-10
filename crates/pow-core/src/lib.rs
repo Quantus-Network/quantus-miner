@@ -1,4 +1,5 @@
 use primitive_types::U512;
+use qp_poseidon_core::poseidon2::INITIAL_EXTERNAL_CONSTANTS;
 use qp_poseidon_core::{Goldilocks, Poseidon2};
 
 pub use qp_poseidon_core::SPONGE_WIDTH;
@@ -32,6 +33,61 @@ pub fn mining_midstate_u32s(header: [u8; 32], nonce_high_be: [u8; 32]) -> [u32; 
         out[2 * i + 1] = (*felt >> 32) as u32;
     }
     out
+}
+
+/// Poseidon2 state after the nonce-invariant part of the next permutation's
+/// initial linear layer and first round constants.
+///
+/// The low 64 bits of `nonce_be` are deliberately excluded. A GPU kernel can
+/// inject their sparse linear contribution per nonce, then resume immediately
+/// before the first external-round S-box. Callers must split batches before the
+/// low 64 bits carry.
+pub fn mining_prestate_low64_u32s(header: [u8; 32], nonce_be: [u8; 64]) -> [u32; 24] {
+    let prestate = mining_prestate_low64(header, nonce_be);
+    let mut out = [0u32; 24];
+    for (i, felt) in prestate.iter().enumerate() {
+        out[2 * i] = *felt as u32;
+        out[2 * i + 1] = (*felt >> 32) as u32;
+    }
+    out
+}
+
+/// Canonical-felt form of [`mining_prestate_low64_u32s`].
+pub fn mining_prestate_low64(header: [u8; 32], nonce_be: [u8; 64]) -> [u64; SPONGE_WIDTH] {
+    let mut state =
+        mining_midstate(header, nonce_be[..32].try_into().unwrap()).map(Goldilocks::from_u64);
+
+    // Absorb the fixed upper 192 bits of the nonce's low 256-bit half. The
+    // final two words are the low 64 bits specialized by the GPU kernel.
+    for (i, chunk) in nonce_be[32..56].chunks_exact(4).enumerate() {
+        state[i] += Goldilocks::from_u64(u32::from_le_bytes(chunk.try_into().unwrap()) as u64);
+    }
+    external_linear_layer(&mut state);
+    for (felt, constant) in state.iter_mut().zip(INITIAL_EXTERNAL_CONSTANTS[0]) {
+        *felt += Goldilocks::from_u64(constant);
+    }
+    state.map(|felt| felt.as_canonical_u64())
+}
+
+fn external_linear_layer(state: &mut [Goldilocks; SPONGE_WIDTH]) {
+    for chunk in state.chunks_exact_mut(4) {
+        let chunk: &mut [Goldilocks; 4] = chunk.try_into().unwrap();
+        let t01 = chunk[0] + chunk[1];
+        let t23 = chunk[2] + chunk[3];
+        let t0123 = t01 + t23;
+        let t01123 = t0123 + chunk[1];
+        let t01233 = t0123 + chunk[3];
+        chunk[3] = t01233 + chunk[0] + chunk[0];
+        chunk[1] = t01123 + chunk[2] + chunk[2];
+        chunk[0] = t01123 + t01;
+        chunk[2] = t01233 + t23;
+    }
+
+    let sums: [Goldilocks; 4] =
+        std::array::from_fn(|offset| (offset..SPONGE_WIDTH).step_by(4).map(|i| state[i]).sum());
+    for (i, felt) in state.iter_mut().enumerate() {
+        *felt += sums[i % 4];
+    }
 }
 
 /// Sponge state (canonical u64 felts) after absorbing the 32-byte header and the

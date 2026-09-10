@@ -2,7 +2,7 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 
 struct MiningParams {
-    u32 midstate[24];
+    u32 prestate[24];
     u32 start_nonce[16];
     u32 difficulty_target[16];
     u32 dispatch_config[3];
@@ -271,13 +271,8 @@ __device__ __forceinline__ void int_layer64(u64 *state, const u64 *rc12,
     }
 }
 
-__device__ __forceinline__ void permute64(u64 *state) {
+__device__ __forceinline__ void permute64_after_initial(u64 *state) {
     u64 rc[12];
-    #pragma unroll
-    for (int i = 0; i < 12; i++) {
-        rc[i] = RC_INITIAL[0][i];
-    }
-    ext_layer64(state, rc, 0ULL);
     #pragma unroll 1
     for (int r = 0; r < 4; r++) {
         #pragma unroll
@@ -310,6 +305,35 @@ __device__ __forceinline__ void permute64(u64 *state) {
             rc[i] = (r < 3) ? RC_TERMINAL[r + 1][i] : 0ULL;
         }
         ext_layer64(state, rc, 0ULL);
+    }
+}
+
+__device__ __forceinline__ void permute64(u64 *state) {
+    u64 rc[12];
+    #pragma unroll
+    for (int i = 0; i < 12; i++) {
+        rc[i] = RC_INITIAL[0][i];
+    }
+    ext_layer64(state, rc, 0ULL);
+    permute64_after_initial(state);
+}
+
+__device__ __forceinline__ void permute64_twice_after_initial(u64 *state) {
+    #pragma unroll 1
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass != 0) {
+            u64 rc[12];
+            #pragma unroll
+            for (int i = 0; i < 12; i++) {
+                rc[i] = RC_INITIAL[0][i];
+            }
+            ext_layer64(state, rc, 0ULL);
+        }
+        permute64_after_initial(state);
+        if (pass == 0) {
+            state[0] = gf64_add(state[0], 1ULL);
+            state[1] = gf64_add(state[1], 1ULL);
+        }
     }
 }
 
@@ -402,9 +426,6 @@ extern "C" __global__ void __launch_bounds__(256, 4) hash_nonces(u32 *hashes, co
 
 extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
                                        const MiningParams params) {
-    if (*((volatile u32 *)results) != 0u) {
-        return;
-    }
     u32 thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     u32 total_threads = params.dispatch_config[0];
     u32 nonces_per_thread = params.dispatch_config[1];
@@ -417,18 +438,15 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
     u64 mid[12];
     #pragma unroll
     for (int i = 0; i < 12; i++) {
-        mid[i] = ((u64)params.midstate[2 * i + 1] << 32) | (u64)params.midstate[2 * i];
+        mid[i] = ((u64)params.prestate[2 * i + 1] << 32) | (u64)params.prestate[2 * i];
     }
     u32 tgt[16];
     #pragma unroll
     for (int i = 0; i < 16; i++) {
         tgt[i] = params.difficulty_target[i];
     }
-    u32 nonce_base[16];
-    #pragma unroll
-    for (int i = 0; i < 16; i++) {
-        nonce_base[i] = params.start_nonce[i];
-    }
+    u64 nonce_base_low = ((u64)params.start_nonce[1] << 32) |
+                         (u64)params.start_nonce[0];
 
     #pragma unroll
 
@@ -437,26 +455,39 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         if (logical_index >= total_nonces) {
             break;
         }
-        if (j > 0u && *((volatile u32 *)results) != 0u) {
-            return;
-        }
-
-        u32 current_nonce[16];
-        nonce_from_index(nonce_base, logical_index, current_nonce);
-
         u64 st[12];
         #pragma unroll
         for (int i = 0; i < 12; i++) {
             st[i] = mid[i];
         }
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            st[i] = gf64_add(st[i], (u64)bswap32(current_nonce[7 - i]));
-        }
-        permute64(st);
-        st[0] = gf64_add(st[0], 1ULL);
-        st[1] = gf64_add(st[1], 1ULL);
-        permute64(st);
+        u64 nonce_low = nonce_base_low + (u64)logical_index;
+        u64 x6 = (u64)bswap32((u32)(nonce_low >> 32));
+        u64 x7 = (u64)bswap32((u32)nonce_low);
+        u64 x6_2 = x6 + x6;
+        u64 x6_3 = x6_2 + x6;
+        u64 x6_4 = x6_2 + x6_2;
+        u64 x6_6 = x6_3 + x6_3;
+        u64 x7_2 = x7 + x7;
+        u64 x7_3 = x7_2 + x7;
+        u64 x7_4 = x7_2 + x7_2;
+        u64 x7_6 = x7_3 + x7_3;
+        u64 c0 = x6 + x7;
+        u64 c1 = x6_3 + x7;
+        u64 c2 = x6_2 + x7_3;
+        u64 c3 = x6 + x7_2;
+        st[0] = gf64_add(st[0], c0);
+        st[1] = gf64_add(st[1], c1);
+        st[2] = gf64_add(st[2], c2);
+        st[3] = gf64_add(st[3], c3);
+        st[4] = gf64_add(st[4], x6_2 + x7_2);
+        st[5] = gf64_add(st[5], x6_6 + x7_2);
+        st[6] = gf64_add(st[6], x6_4 + x7_6);
+        st[7] = gf64_add(st[7], x6_2 + x7_4);
+        st[8] = gf64_add(st[8], c0);
+        st[9] = gf64_add(st[9], c1);
+        st[10] = gf64_add(st[10], c2);
+        st[11] = gf64_add(st[11], c3);
+        permute64_twice_after_initial(st);
 
         u32 first[8];
         #pragma unroll
@@ -506,11 +537,7 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
 
         if (below) {
             if (atomicExch(&results[0], 1u) == 0u) {
-                #pragma unroll
-                for (int i = 0; i < 16; i++) {
-                    results[1 + i] = current_nonce[i];
-                    results[17 + i] = hash_le[i];
-                }
+                results[1] = logical_index;
             }
             return;
         }

@@ -58,7 +58,7 @@ node's chain config dir (`<base-path>/chains/<chain>/`):
 | `--cpu-workers <N>` | `MINER_CPU_WORKERS` | Number of CPU worker threads | Auto-detect |
 | `--gpu-devices <N>` | `MINER_GPU_DEVICES` | Number of GPU devices | Auto-detect |
 | `--cuda-gpu` | `MINER_CUDA_GPU` | Use native CUDA instead of wgpu/Vulkan (NVIDIA) | off |
-| `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 |
+| `--gpu-batch-size <N>` | `MINER_GPU_BATCH_SIZE` | GPU batch size in nonces | 1000000 (32000000 with `--cuda-gpu`) |
 | `--cpu-batch-size <N>` | `MINER_CPU_BATCH_SIZE` | CPU batch size in hashes | 10000 |
 | `--gpu-throttle-ms <MS>` | `MINER_GPU_THROTTLE_MS` | Sleep duration (ms) between GPU batches | 0 |
 | `--metrics-port <PORT>` | `MINER_METRICS_PORT` | Prometheus metrics port | 9900 |
