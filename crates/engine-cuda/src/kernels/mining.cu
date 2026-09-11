@@ -203,6 +203,18 @@ __device__ __forceinline__ u64 wide_reduce(const Wide &w) {
     return reduce128(w.l0, w.l1, w.h, 0u);
 }
 
+__device__ __forceinline__ void add128_wide(u32 &r0, u32 &r1, u32 &r2,
+                                            u32 &r3, const Wide &w) {
+    asm("{\n\t"
+        "add.cc.u32 %0, %0, %4;\n\t"
+        "addc.cc.u32 %1, %1, %5;\n\t"
+        "addc.cc.u32 %2, %2, %6;\n\t"
+        "addc.u32 %3, %3, 0;\n\t"
+        "}"
+        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
+        : "r"(w.l0), "r"(w.l1), "r"(w.h));
+}
+
 // a * b + w as a 128-bit value. The three words of the 96-bit addend ride in
 // the 64-bit accumulators of the partial products, so the add costs nothing.
 // Requires b < 2^64 - 2^59 (true for MDS_DIAG) and w.h small, so every partial
@@ -293,11 +305,13 @@ __device__ __forceinline__ u64 int_round_p(u64 *state, u64 x, u64 rc0) {
     Wide s0 = s;
     wide_add(s0, rc0);
     u32 r0, r1, r2, r3;
-    mul128_add_wide(x, MDS_DIAG[0], s0, r0, r1, r2, r3);
+    mul64wide(x, MDS_DIAG[0], r0, r1, r2, r3);
+    add128_wide(r0, r1, r2, r3, s0);
     u64 out0 = reduce128(r0, r1, r2, r3);
     #pragma unroll
     for (int i = 1; i < 12; i++) {
-        mul128_add_wide(state[i], MDS_DIAG[i], s, r0, r1, r2, r3);
+        mul64wide(state[i], MDS_DIAG[i], r0, r1, r2, r3);
+        add128_wide(r0, r1, r2, r3, s);
         state[i] = reduce128(r0, r1, r2, r3);
     }
     return out0;
