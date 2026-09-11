@@ -1,6 +1,8 @@
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
+#define MAX_HITS 8
+
 struct MiningParams {
     u32 prestate[24];
     u32 start_nonce[16];
@@ -149,11 +151,12 @@ __device__ __forceinline__ u64 gf64_sqr(u64 a) {
     return reduce128(r0, r1, r2, r3);
 }
 
+// x^7 with a depth-3 chain: x3 and x4 come from x2 in parallel.
 __device__ __forceinline__ u64 gf64_sbox(u64 x) {
     u64 x2 = gf64_sqr(x);
+    u64 x3 = gf64_mul(x2, x);
     u64 x4 = gf64_sqr(x2);
-    u64 x6 = gf64_mul(x4, x2);
-    return gf64_mul(x6, x);
+    return gf64_mul(x4, x3);
 }
 
 __device__ __forceinline__ u64 gf64_canon(u64 a) {
@@ -200,29 +203,33 @@ __device__ __forceinline__ u64 wide_reduce(const Wide &w) {
     return reduce128(w.l0, w.l1, w.h, 0u);
 }
 
-__device__ __forceinline__ void add128(u32 &r0, u32 &r1, u32 &r2, u32 &r3,
-                                       u64 x) {
-    u32 x0 = (u32)x, x1 = (u32)(x >> 32);
+// a * b + w as a 128-bit value. The three words of the 96-bit addend ride in
+// the 64-bit accumulators of the partial products, so the add costs nothing.
+// Requires b < 2^64 - 2^59 (true for MDS_DIAG) and w.h small, so every partial
+// sum and the total fit.
+__device__ __forceinline__ void mul128_add_wide(u64 a, u64 b, const Wide &w,
+                                                u32 &r0, u32 &r1, u32 &r2,
+                                                u32 &r3) {
+    u32 a0 = (u32)a, a1 = (u32)(a >> 32), b0 = (u32)b, b1 = (u32)(b >> 32);
+    u64 w0 = w.l0, w1 = w.l1, w2 = w.h;
     asm("{\n\t"
-        "add.cc.u32 %0, %0, %4;\n\t"
-        "addc.cc.u32 %1, %1, %5;\n\t"
-        "addc.cc.u32 %2, %2, 0;\n\t"
-        "addc.u32 %3, %3, 0;\n\t"
+        ".reg .b64 p0, m, m2, p3;\n\t"
+        ".reg .b32 m0, m1, p0h, p3l, p3h, cw;\n\t"
+        "mad.wide.u32 p0, %4, %6, %8;\n\t"
+        "mad.wide.u32 m, %5, %6, %9;\n\t"
+        "mul.wide.u32 m2, %4, %7;\n\t"
+        "mad.wide.u32 p3, %5, %7, %10;\n\t"
+        "mov.b64 {%0, p0h}, p0;\n\t"
+        "mov.b64 {p3l, p3h}, p3;\n\t"
+        "add.cc.u64 m, m, m2;\n\t"
+        "addc.u32 cw, p3h, 0;\n\t"
+        "mov.b64 {m0, m1}, m;\n\t"
+        "add.cc.u32 %1, p0h, m0;\n\t"
+        "addc.cc.u32 %2, p3l, m1;\n\t"
+        "addc.u32 %3, cw, 0;\n\t"
         "}"
-        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
-        : "r"(x0), "r"(x1));
-}
-
-__device__ __forceinline__ void add128_wide(u32 &r0, u32 &r1, u32 &r2,
-                                            u32 &r3, const Wide &w) {
-    asm("{\n\t"
-        "add.cc.u32 %0, %0, %4;\n\t"
-        "addc.cc.u32 %1, %1, %5;\n\t"
-        "addc.cc.u32 %2, %2, %6;\n\t"
-        "addc.u32 %3, %3, 0;\n\t"
-        "}"
-        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3)
-        : "r"(w.l0), "r"(w.l1), "r"(w.h));
+        : "=&r"(r0), "=&r"(r1), "=&r"(r2), "=&r"(r3)
+        : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "l"(w0), "l"(w1), "l"(w2));
 }
 
 __device__ __forceinline__ void ext_layer64(u64 *state, const u64 *rc12) {
@@ -271,24 +278,29 @@ __device__ __forceinline__ void ext_layer64(u64 *state, const u64 *rc12) {
     }
 }
 
-// The unreduced 96-bit row sum rides into each 128-bit diagonal product; the
-// product is at most MDS_DIAG[i] * (2^64 - 1), so sum plus round constant fit.
-__device__ __forceinline__ void int_layer64(u64 *state, u64 rc0) {
-    Wide s = wide_from(state[0]);
+// Software-pipelined internal round. `x` is this round's S-boxed element 0.
+// Elements 1..11 are summed before x is needed, element 0's output comes out
+// first so the caller can start the next S-box while the other 11 products
+// retire, and the unreduced 96-bit row sum (plus rc0 for element 0) rides in
+// the multiply accumulators. Returns the new element 0; updates state[1..11].
+__device__ __forceinline__ u64 int_round_p(u64 *state, u64 x, u64 rc0) {
+    Wide s = wide_from(state[1]);
     #pragma unroll
-    for (int i = 1; i < 12; i++) {
+    for (int i = 2; i < 12; i++) {
         wide_add(s, state[i]);
     }
+    wide_add(s, x);
+    Wide s0 = s;
+    wide_add(s0, rc0);
+    u32 r0, r1, r2, r3;
+    mul128_add_wide(x, MDS_DIAG[0], s0, r0, r1, r2, r3);
+    u64 out0 = reduce128(r0, r1, r2, r3);
     #pragma unroll
-    for (int i = 0; i < 12; i++) {
-        u32 r0, r1, r2, r3;
-        mul64wide(state[i], MDS_DIAG[i], r0, r1, r2, r3);
-        add128_wide(r0, r1, r2, r3, s);
-        if (i == 0) {
-            add128(r0, r1, r2, r3, rc0);
-        }
+    for (int i = 1; i < 12; i++) {
+        mul128_add_wide(state[i], MDS_DIAG[i], s, r0, r1, r2, r3);
         state[i] = reduce128(r0, r1, r2, r3);
     }
+    return out0;
 }
 
 __device__ __forceinline__ void permute64_after_initial(u64 *state) {
@@ -300,11 +312,12 @@ __device__ __forceinline__ void permute64_after_initial(u64 *state) {
         }
         ext_layer64(state, RC_INITIAL[r + 1]);
     }
+    u64 x = gf64_sbox(state[0]);
     #pragma unroll 1
-    for (int r = 0; r < 22; r++) {
-        state[0] = gf64_sbox(state[0]);
-        int_layer64(state, RC_INTERNAL[r + 1]);
+    for (int r = 0; r < 21; r++) {
+        x = gf64_sbox(int_round_p(state, x, RC_INTERNAL[r + 1]));
     }
+    state[0] = int_round_p(state, x, 0ULL);
     #pragma unroll
     for (int i = 0; i < 12; i++) {
         state[i] = gf64_add(state[i], RC_TERMINAL[0][i]);
@@ -510,14 +523,12 @@ extern "C" __global__ void __launch_bounds__(256, 4) mining_main(u32 *results,
         if (cmp == 1u) {
             continue;
         }
-        // Publish the lowest candidate index of the launch and how many of this
-        // thread's nonces stay unevaluated. A candidate thread stops here, so
-        // every nonce below the published index was evaluated and the host can
-        // resume exactly after a rejected one and count exactly what was hashed.
-        atomicMin(&results[0], logical_index);
-        u32 remaining = total_nonces - base_index;
-        u32 assigned = (nonces_per_thread < remaining) ? nonces_per_thread : remaining;
-        atomicAdd(&results[1], assigned - j - 1u);
-        return;
+        // Record the candidate and keep going: no thread ever stops early, so a
+        // launch always evaluates its whole rectangle. The host verifies every
+        // recorded index on the CPU.
+        u32 slot = atomicAdd(&results[0], 1u);
+        if (slot < MAX_HITS) {
+            results[1 + slot] = logical_index;
+        }
     }
 }
