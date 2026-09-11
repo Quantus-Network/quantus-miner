@@ -1,0 +1,131 @@
+{
+  "date": "2026-09-11",
+  "provider": "Vast.ai",
+  "pr": 104,
+  "baseline": "v4.2.0 release quantus-miner-linux-x86_64 (GitHub release asset)",
+  "candidate": "PR #104 head 7730cb5: software-pipelined internal rounds (elements 1..11 summed before the S-box result, element 0 first, next S-box issued immediately, last round peeled), depth-3 x^7, no early exit with up to 8 recorded hits",
+  "rejected_in_this_round": {
+    "free_addend_product": "row sum in mad.wide.u32 accumulators: -5% on ptxas 12.8 and -3% on ptxas 13.2, 16 B spill; dropped",
+    "depth3_sbox_alone": "neutral (878.5 vs 878.5, 867.2 vs 864.8)"
+  },
+  "method": "user protocol: same host, released v4.2.0 first then the new binary, three alternating 30 s runs each, GPU only, --cpu-workers 0 --gpu-devices 1, default 32M batch; engine-cuda GPU tests (10) passed three times on each host before timing",
+  "hosts": [
+    {
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "uuid": "GPU-fa47c00e-1feb-0f99-4ded-e5bd8122100c",
+      "instance": 50568728,
+      "location": "Texas, US",
+      "driver": "570.86.16 (CUDA 12.8 ptxas JIT)",
+      "power_limit_w": 450,
+      "sm_clock_mhz": "2475-2685",
+      "temp_c": "76-83",
+      "v420_mh_s": [
+        870.35,
+        862.66,
+        861.78
+      ],
+      "pr104_mh_s": [
+        882.3,
+        880.13,
+        881.73
+      ],
+      "gain": "+2.2% (medians 862.7 -> 881.7)",
+      "bundled_first_attempt_with_addend": {
+        "v420": [
+          874.41,
+          863.42,
+          864.92
+        ],
+        "pipe1": [
+          842.42,
+          841.09,
+          841.39
+        ],
+        "local_bytes": 16
+      },
+      "kernel_only": {
+        "v420": [
+          878.5,
+          864.8
+        ],
+        "v420_sbox3": [
+          878.5,
+          867.2
+        ],
+        "pipe1_addend": [
+          846.4,
+          837.7
+        ],
+        "pipe1_addend_sbox4": [
+          847.0,
+          838.7
+        ],
+        "pipe1_noaddend": [
+          889.1,
+          878.8
+        ],
+        "pipe1_lb3": [
+          842.7,
+          841.0
+        ],
+        "pipe1_lb2": [
+          838.8,
+          837.4
+        ]
+      }
+    },
+    {
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "uuid": "GPU-2aad50c9-7514-857a-f291-ca5bf37ab8da",
+      "instance": 50570055,
+      "location": "Washington, US",
+      "driver": "595.58.03 (CUDA 13.2 ptxas JIT)",
+      "power_limit_w": 420,
+      "sm_clock_mhz": "2520-2730",
+      "temp_c": "68-82",
+      "v420_mh_s": [
+        885.53,
+        879.38,
+        876.16
+      ],
+      "pr104_mh_s": [
+        901.64,
+        897.76,
+        896.27
+      ],
+      "pipe1_addend_mh_s": [
+        855.91,
+        852.8,
+        851.64
+      ],
+      "gain": "+2.1% (medians 879.4 -> 897.8)",
+      "ptxas_13_2_jit_vs_nvrtc_12_8_cubin": {
+        "v420": [
+          884.1,
+          883.95,
+          884.61,
+          884.87
+        ],
+        "pipe1_noaddend": [
+          904.33,
+          904.66,
+          905.01,
+          905.0
+        ],
+        "pipe1_addend": [
+          860.27,
+          860.29,
+          860.55,
+          860.41
+        ],
+        "verdict": "identical; ptxas version is not a factor for this kernel"
+      }
+    }
+  ],
+  "resource_usage": "mining_main 64 registers, 0 B local on both hosts (v4.2.0: 61 registers, 0 B local)",
+  "cost_usd": {
+    "texas_4090": 0.45,
+    "washington_4090": 0.25,
+    "failed_boots_norway_arizona_illinois": 0.15
+  }
+}
