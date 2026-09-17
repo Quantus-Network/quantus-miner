@@ -15,7 +15,7 @@ use quantus_miner_api::{
     read_message, write_message, ApiResponseStatus, MinerMessage, MiningResult,
 };
 
-use crate::{EngineType, WorkerPool};
+use crate::{EngineType, JobStopReason, WorkerPool};
 use pow_core::format_hashrate;
 
 /// Connect to a node and start mining.
@@ -51,8 +51,8 @@ pub async fn connect_and_mine(
                     handle_connection(connection, send, recv, &worker_pool, &mut authenticated)
                         .await
                 {
-                    // Cancel any running job when connection drops
-                    worker_pool.cancel();
+                    // Stop any running job when connection drops
+                    worker_pool.stop_current_job(JobStopReason::ConnectionLost);
                     if e.downcast_ref::<quic_transport::PermanentConnectError>()
                         .is_some()
                     {
@@ -144,13 +144,13 @@ async fn handle_connection(
     let mut job_start_time: Option<Instant> = None;
     let mut cpu_hashes: u64 = 0;
     let mut gpu_hashes: u64 = 0;
-    let mut result_sent_for_current_job = false;
+    let mut solution_submitted_for_current_job = false;
 
     log::info!("⛏️ Waiting for mining jobs from node...");
 
     loop {
         // Poll for worker results (non-blocking via spawn_blocking)
-        let poll_result = if node_job_id.is_some() && !result_sent_for_current_job {
+        let poll_result = if node_job_id.is_some() && !solution_submitted_for_current_job {
             let rx = worker_pool.result_receiver().clone();
             tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_millis(10)))
                 .await
@@ -176,8 +176,9 @@ async fn handle_connection(
             // Check if this result is for the current job (not stale)
             if worker_result.job_id != internal_job_id {
                 log::debug!(
-                    "⏰ Discarding stale result from worker {} (result job_id {} != current {})",
-                    worker_result.thread_id,
+                    "⏰ Discarding stale result from {:?} worker {} (result job_id {} != current {})",
+                    worker_result.engine_type,
+                    worker_result.worker_id,
                     worker_result.job_id,
                     internal_job_id
                 );
@@ -186,7 +187,7 @@ async fn handle_connection(
 
             // Only send result for the FIRST solution found for THIS job
             if let Some(candidate) = worker_result.candidate {
-                if !result_sent_for_current_job {
+                if !solution_submitted_for_current_job {
                     if let Some(ref job_id) = node_job_id {
                         let total_hashes = cpu_hashes + gpu_hashes;
                         let elapsed = job_start_time
@@ -194,13 +195,13 @@ async fn handle_connection(
                             .unwrap_or(0.0);
 
                         log::info!(
-                            "⛏️ Job {job_id} completed: {total_hashes} hashes in {elapsed:.2}s ({})",
+                            "✅ Job {job_id} solved: {total_hashes} hashes in {elapsed:.2}s ({}) - submitting solution to node",
                             format_hashrate(total_hashes as f64 / elapsed.max(0.001))
                         );
 
                         // Mark as sent BEFORE sending to prevent duplicates
-                        result_sent_for_current_job = true;
-                        worker_pool.cancel();
+                        solution_submitted_for_current_job = true;
+                        worker_pool.stop_current_job(JobStopReason::SolutionFound);
                         metrics::set_active_jobs(0);
 
                         let result = MiningResult {
@@ -240,7 +241,7 @@ async fn handle_connection(
                     Ok(MinerMessage::NewJob(request)) => {
                         *authenticated = true;
                         log::info!(
-                            "⛏️ Received job: id={}, hash=0x{}",
+                            "🧱 New block to mine: job {} (header 0x{})",
                             request.job_id,
                             request.mining_hash
                         );
@@ -307,7 +308,7 @@ async fn handle_connection(
                         gpu_hashes = 0;
                         job_start_time = Some(Instant::now());
                         node_job_id = Some(request.job_id.clone());
-                        result_sent_for_current_job = false;
+                        solution_submitted_for_current_job = false;
 
                         log::debug!("Starting job {}", request.job_id);
                         metrics::set_active_jobs(1);
