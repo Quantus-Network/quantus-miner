@@ -14,7 +14,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use engine_cpu::{EngineCandidate, EngineRange, JobIdCancelCheck, MinerEngine};
 use pow_core::{format_hashrate, format_u512};
 use primitive_types::U512;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -53,7 +53,9 @@ pub enum EngineType {
 /// Result from a single worker thread.
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
-    pub thread_id: usize,
+    /// Worker index within its engine type (CPU and GPU workers are numbered
+    /// independently, each starting from 0).
+    pub worker_id: usize,
     /// The type of engine (CPU or GPU) that produced this result.
     pub engine_type: EngineType,
     /// The job ID this result was computed for (used to detect stale results).
@@ -81,6 +83,45 @@ fn generate_random_nonce() -> U512 {
     U512::from_big_endian(&bytes)
 }
 
+/// Why the current job was stopped. Recorded by the pool so workers can log
+/// an accurate reason when they notice the job ID changed mid-search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStopReason {
+    /// The node sent work for a new block, superseding the current job.
+    NewBlock,
+    /// A worker already found and submitted a solution for this job.
+    SolutionFound,
+    /// The connection to the node was lost.
+    ConnectionLost,
+}
+
+impl JobStopReason {
+    fn as_u8(self) -> u8 {
+        match self {
+            JobStopReason::NewBlock => 0,
+            JobStopReason::SolutionFound => 1,
+            JobStopReason::ConnectionLost => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => JobStopReason::SolutionFound,
+            2 => JobStopReason::ConnectionLost,
+            _ => JobStopReason::NewBlock,
+        }
+    }
+
+    /// Short human-readable explanation used in worker logs.
+    fn describe(self) -> &'static str {
+        match self {
+            JobStopReason::NewBlock => "new block received",
+            JobStopReason::SolutionFound => "solution already found",
+            JobStopReason::ConnectionLost => "node connection lost",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Persistent Worker Pool
 // ---------------------------------------------------------------------------
@@ -105,6 +146,8 @@ pub struct WorkerPool {
     result_rx: Receiver<WorkerResult>,
     /// Job ID counter - incremented on each new job to detect stale results
     current_job_id: Arc<AtomicU64>,
+    /// Why the last job was stopped (encoded `JobStopReason`), for worker logs
+    job_stop_reason: Arc<AtomicU8>,
     /// Thread handles (for cleanup)
     _handles: Vec<thread::JoinHandle<()>>,
     /// Number of CPU workers
@@ -124,10 +167,10 @@ impl WorkerPool {
         let total_workers = cpu_workers + gpu_devices;
         let (result_tx, result_rx) = bounded(total_workers * 64);
         let current_job_id = Arc::new(AtomicU64::new(0));
+        let job_stop_reason = Arc::new(AtomicU8::new(JobStopReason::NewBlock.as_u8()));
 
         let mut job_senders = Vec::with_capacity(total_workers);
         let mut handles = Vec::with_capacity(total_workers);
-        let mut thread_id = 0;
 
         log::info!(
             "Creating persistent worker pool: {} CPU + {} GPU workers",
@@ -135,10 +178,13 @@ impl WorkerPool {
             gpu_devices
         );
 
+        // Workers are numbered per engine type (CPU worker 0..N, GPU worker 0..M)
+        // so log lines match how users think about their hardware.
+
         // Spawn CPU workers
         if cpu_workers > 0 {
             if let Some(ref engine) = cpu_engine {
-                for _ in 0..cpu_workers {
+                for worker_id in 0..cpu_workers {
                     // Use bounded channel to prevent unbounded queue growth.
                     // Capacity of 16 allows sender to queue jobs without realistic
                     // risk of drops during normal operation. Worker drains to get
@@ -149,13 +195,20 @@ impl WorkerPool {
                     let eng = engine.clone();
                     let tx = result_tx.clone();
                     let job_id_counter = current_job_id.clone();
-                    let tid = thread_id;
+                    let stop_reason = job_stop_reason.clone();
 
                     let handle = thread::spawn(move || {
-                        worker_loop(tid, EngineType::Cpu, eng, job_rx, tx, job_id_counter);
+                        worker_loop(
+                            worker_id,
+                            EngineType::Cpu,
+                            eng,
+                            job_rx,
+                            tx,
+                            job_id_counter,
+                            stop_reason,
+                        );
                     });
                     handles.push(handle);
-                    thread_id += 1;
                 }
             }
         }
@@ -163,7 +216,7 @@ impl WorkerPool {
         // Spawn GPU workers
         if gpu_devices > 0 {
             if let Some(ref engine) = gpu_engine {
-                for _ in 0..gpu_devices {
+                for worker_id in 0..gpu_devices {
                     // Use bounded channel to prevent unbounded queue growth.
                     // Capacity of 16 allows sender to queue jobs without realistic
                     // risk of drops during normal operation. Worker drains to get
@@ -174,13 +227,20 @@ impl WorkerPool {
                     let eng = engine.clone();
                     let tx = result_tx.clone();
                     let job_id_counter = current_job_id.clone();
-                    let tid = thread_id;
+                    let stop_reason = job_stop_reason.clone();
 
                     let handle = thread::spawn(move || {
-                        worker_loop(tid, EngineType::Gpu, eng, job_rx, tx, job_id_counter);
+                        worker_loop(
+                            worker_id,
+                            EngineType::Gpu,
+                            eng,
+                            job_rx,
+                            tx,
+                            job_id_counter,
+                            stop_reason,
+                        );
                     });
                     handles.push(handle);
-                    thread_id += 1;
                 }
             }
         }
@@ -189,16 +249,21 @@ impl WorkerPool {
             job_senders,
             result_rx,
             current_job_id,
+            job_stop_reason,
             _handles: handles,
             cpu_worker_count: cpu_workers,
             gpu_worker_count: gpu_devices,
         }
     }
 
-    /// Start a new mining job. Cancels any currently running job first.
+    /// Start a new mining job, stopping any currently running job first.
     ///
     /// Returns the new job ID, which can be used to filter stale results.
     pub fn start_job(&self, header_hash: [u8; 32], difficulty: U512) -> u64 {
+        // A new job means a new block arrived; record that so workers still
+        // finishing the old job log the right reason.
+        self.job_stop_reason
+            .store(JobStopReason::NewBlock.as_u8(), Ordering::SeqCst);
         // Increment job ID FIRST - this ensures any in-flight results from the old job
         // will be detected as stale when workers check the job ID before sending results
         let new_job_id = self.current_job_id.fetch_add(1, Ordering::SeqCst) + 1;
@@ -251,13 +316,16 @@ impl WorkerPool {
         new_job_id
     }
 
-    /// Cancel the current job by incrementing the job ID.
-    /// Workers will detect the change and stop processing.
+    /// Stop the current job by incrementing the job ID.
+    /// Workers will detect the change and stop searching; `reason` is recorded
+    /// so their logs explain why the search ended.
     ///
     /// Note: This increments job_id by 1, and start_job() also increments by 1,
-    /// so job IDs in logs may become non-contiguous after disconnects/cancellations.
-    /// This is expected behavior - job IDs only need to be unique, not sequential.
-    pub fn cancel(&self) {
+    /// so job IDs in logs may become non-contiguous after disconnects or early
+    /// stops. This is expected behavior - job IDs only need to be unique, not
+    /// sequential.
+    pub fn stop_current_job(&self, reason: JobStopReason) {
+        self.job_stop_reason.store(reason.as_u8(), Ordering::SeqCst);
         self.current_job_id.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -282,11 +350,11 @@ impl WorkerPool {
     }
 }
 
-/// Log worker completion with hash rate info.
+/// Log the end of a worker's search with hash rate info.
 fn log_worker_completion(
     type_str: &str,
-    thread_id: usize,
-    status: &str,
+    worker_id: usize,
+    outcome: &str,
     hash_count: u64,
     elapsed: std::time::Duration,
 ) {
@@ -296,7 +364,7 @@ fn log_worker_completion(
         0.0
     };
     log::info!(
-        "{type_str} worker {thread_id} {status}: {hash_count} hashes in {:.2}s ({})",
+        "{type_str} worker {worker_id} {outcome}: {hash_count} hashes in {:.2}s ({})",
         elapsed.as_secs_f64(),
         format_hashrate(hash_rate)
     );
@@ -304,30 +372,31 @@ fn log_worker_completion(
 
 /// Main loop for a persistent worker thread.
 fn worker_loop(
-    thread_id: usize,
+    worker_id: usize,
     engine_type: EngineType,
     engine: Arc<dyn MinerEngine>,
     job_rx: Receiver<MiningJob>,
     result_tx: Sender<WorkerResult>,
     current_job_id: Arc<AtomicU64>,
+    job_stop_reason: Arc<AtomicU8>,
 ) {
     let type_str = match engine_type {
         EngineType::Cpu => "CPU",
         EngineType::Gpu => "GPU",
     };
 
-    log::info!("{type_str} worker {thread_id} started (persistent)");
+    log::info!("{type_str} worker {worker_id} started (persistent)");
 
     // Main job processing loop
     loop {
-        log::debug!("[WORKER {type_str}-{thread_id}] Waiting for job...");
+        log::debug!("[WORKER {type_str}-{worker_id}] Waiting for job...");
 
         // Wait for a job (blocking)
         let mut job = match job_rx.recv() {
             Ok(job) => job,
             Err(_) => {
                 // Channel closed, pool is shutting down
-                log::debug!("{type_str} worker {thread_id} shutting down");
+                log::debug!("{type_str} worker {worker_id} shutting down");
                 break;
             }
         };
@@ -339,18 +408,18 @@ fn worker_loop(
             job = newer_job;
         }
         if skipped > 0 {
-            log::debug!("[WORKER {type_str}-{thread_id}] Drained {skipped} stale jobs from queue");
+            log::debug!("[WORKER {type_str}-{worker_id}] Drained {skipped} stale jobs from queue");
         }
 
         // Capture the job's ID for later validation
         let job_id = job.job_id;
-        log::debug!("[WORKER {type_str}-{thread_id}] Received job {job_id}");
+        log::debug!("[WORKER {type_str}-{worker_id}] Received job {job_id}");
 
         // Generate random starting nonce for this job
         let start = generate_random_nonce();
         let end = U512::MAX;
 
-        log::debug!("[WORKER {type_str}-{thread_id}] Starting search for job {job_id}");
+        log::debug!("[WORKER {type_str}-{worker_id}] Starting search for job {job_id}");
 
         // Execute the search - both CPU and GPU use job ID comparison for cancellation
         let search_start = std::time::Instant::now();
@@ -370,7 +439,7 @@ fn worker_loop(
             engine_cpu::EngineStatus::Running { .. } => "RUNNING",
         };
         log::debug!(
-            "[WORKER {type_str}-{thread_id}] Job {job_id} search finished: {} in {:.2}s",
+            "[WORKER {type_str}-{worker_id}] Job {job_id} search finished: {} in {:.2}s",
             result_type,
             search_elapsed.as_secs_f64()
         );
@@ -386,15 +455,16 @@ fn worker_loop(
                 engine_cpu::EngineStatus::DeviceLost { hash_count } => hash_count,
                 engine_cpu::EngineStatus::Running { .. } => 0,
             };
+            let reason = JobStopReason::from_u8(job_stop_reason.load(Ordering::SeqCst));
             log_worker_completion(
                 type_str,
-                thread_id,
-                "interrupted by new block",
+                worker_id,
+                &format!("stopped ({})", reason.describe()),
                 hash_count,
                 search_elapsed,
             );
             let _ = result_tx.try_send(WorkerResult {
-                thread_id,
+                worker_id,
                 engine_type,
                 job_id,
                 candidate: None, // Discard the stale candidate
@@ -412,7 +482,7 @@ fn worker_loop(
                 ..
             } => {
                 log::info!(
-                    "🎯 {type_str} worker {thread_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
+                    "🎯 {type_str} worker {worker_id} found solution! Nonce: {}, Hash: {} (job {job_id})",
                     format_u512(nonce),
                     format_u512(hash),
                 );
@@ -421,24 +491,31 @@ fn worker_loop(
             engine_cpu::EngineStatus::Exhausted { hash_count } => {
                 log_worker_completion(
                     type_str,
-                    thread_id,
-                    "exhausted range",
+                    worker_id,
+                    "finished (nonce range exhausted)",
                     hash_count,
                     search_elapsed,
                 );
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::Cancelled { hash_count } => {
-                log_worker_completion(type_str, thread_id, "new block", hash_count, search_elapsed);
+                let reason = JobStopReason::from_u8(job_stop_reason.load(Ordering::SeqCst));
+                log_worker_completion(
+                    type_str,
+                    worker_id,
+                    &format!("stopped ({})", reason.describe()),
+                    hash_count,
+                    search_elapsed,
+                );
                 (None, hash_count)
             }
             engine_cpu::EngineStatus::DeviceLost { hash_count } => {
                 log::error!(
-                    "{type_str} worker {thread_id} GPU device lost - worker exiting permanently"
+                    "{type_str} worker {worker_id} GPU device lost - worker exiting permanently"
                 );
                 // Send final result before exiting
                 let _ = result_tx.try_send(WorkerResult {
-                    thread_id,
+                    worker_id,
                     engine_type,
                     job_id,
                     candidate: None,
@@ -455,7 +532,7 @@ fn worker_loop(
 
         // Send result (non-blocking to avoid deadlock if receiver is full)
         let _ = result_tx.try_send(WorkerResult {
-            thread_id,
+            worker_id,
             engine_type,
             job_id,
             candidate,
@@ -469,7 +546,7 @@ fn worker_loop(
         engine_cuda::CudaEngine::clear_worker_resources();
     }
 
-    log::debug!("{type_str} worker {thread_id} exited");
+    log::debug!("{type_str} worker {worker_id} exited");
 }
 
 /// Resolve CUDA GPU configuration and initialize the engine.

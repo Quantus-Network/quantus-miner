@@ -539,7 +539,7 @@ impl MinerEngine for CudaEngine {
         });
         log::info!(
             target: "cuda_engine",
-            "CUDA {} search started: range {}..{}, batch size: {} nonces{}",
+            "CUDA device {} search started: range {}..{}, batch size: {} nonces{}",
             device_index,
             format_u512(range.start),
             format_u512(range.end),
@@ -621,7 +621,7 @@ impl MinerEngine for CudaEngine {
                 let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
                 log::debug!(
                     target: "cuda_engine",
-                    "CUDA {} batch {} complete: {} hashes so far ({:.2}s, {})",
+                    "CUDA device {} batch {} complete: {} hashes so far ({:.2}s, {})",
                     device_index,
                     batch_num,
                     total_hashes,

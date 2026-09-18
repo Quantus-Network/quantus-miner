@@ -625,7 +625,7 @@ impl MinerEngine for GpuEngine {
 
         log::info!(
             target: "gpu_engine",
-            "GPU {} search started: range {}..{}, batch size: {} nonces",
+            "GPU device {} search started: range {}..{}, batch size: {} nonces",
             device_index,
             format_u512(range.start),
             format_u512(range.end),
@@ -638,9 +638,9 @@ impl MinerEngine for GpuEngine {
             if cancel.is_cancelled() {
                 let elapsed = search_start.elapsed();
                 let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
-                log::info!(
+                log::debug!(
                     target: "gpu_engine",
-                    "GPU {} cancelled before batch {} ({} total hashes in {:.2}s, {})",
+                    "GPU device {} search stopped after {} batches ({} total hashes in {:.2}s, {})",
                     device_index,
                     batch_num,
                     total_hashes,
@@ -685,7 +685,7 @@ impl MinerEngine for GpuEngine {
 
                     log::debug!(
                         target: "gpu_engine",
-                        "GPU {} found solution in batch {}! Nonce: {}, Hash: {} ({} total hashes in {:.2}s, {})",
+                        "GPU device {} found solution in batch {}! Nonce: {}, Hash: {} ({} total hashes in {:.2}s, {})",
                         device_index,
                         batch_num,
                         format_u512(candidate.nonce),
@@ -712,7 +712,7 @@ impl MinerEngine for GpuEngine {
 
                     log::error!(
                         target: "gpu_engine",
-                        "GPU {} device lost or unresponsive - stopping worker. \
+                        "GPU device {} lost or unresponsive - stopping worker. \
                          This GPU will not process further batches.",
                         device_index
                     );
@@ -750,7 +750,7 @@ impl MinerEngine for GpuEngine {
                 let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
                 log::debug!(
                     target: "gpu_engine",
-                    "GPU {} batch {} complete: {} hashes so far ({:.2}s, {})",
+                    "GPU device {} batch {} complete: {} hashes so far ({:.2}s, {})",
                     device_index,
                     batch_num,
                     total_hashes,
@@ -765,7 +765,7 @@ impl MinerEngine for GpuEngine {
         let hash_rate = total_hashes as f64 / elapsed.as_secs_f64();
         log::info!(
             target: "gpu_engine",
-            "GPU {} search exhausted: {} hashes in {} batches ({:.2}s, {})",
+            "GPU device {} search exhausted: {} hashes in {} batches ({:.2}s, {})",
             device_index,
             total_hashes,
             batch_num,
