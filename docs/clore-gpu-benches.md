@@ -1,5 +1,11 @@
 # Clore.ai GPU benches
 
+**Platform:** The measurements below ran on Linux (Ubuntu-based containers).
+CUDA means native `--cuda-gpu`; WGSL means wgpu/Vulkan. These are not Windows
+benchmarks, and the CUDA-to-WGSL ratios are not NVIDIA-to-AMD speedups. They do
+not establish native CUDA performance or reliability on Windows; see the
+[benchmark platform context](../README.md#benchmark-platform-context).
+
 Same-host WGSL vs CUDA on Vast (Vulkan works there): [vast-gpu-benches.md](./vast-gpu-benches.md).
 On a Vast RTX 3080 Ti, official v4.0.2 WGSL was **106.03 MH/s** and private CUDA `--cuda-gpu` was **273.83 MH/s** (~2.58×).
 
