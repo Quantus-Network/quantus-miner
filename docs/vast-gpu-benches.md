@@ -1,5 +1,11 @@
 # Vast.ai same-host WGSL vs CUDA
 
+**Platform:** The measurements below ran on Linux. WGSL uses wgpu/Vulkan;
+CUDA uses native `--cuda-gpu`. The reported gains compare the named engines or
+CUDA revisions on the same host, not operating systems or GPU vendors. They do
+not establish native CUDA performance or reliability on Windows; see the
+[benchmark platform context](../README.md#benchmark-platform-context).
+
 Fair comparison on one NVIDIA box where **both** engines can run: wgpu/Vulkan
 (official Linux release) and native CUDA (`--cuda-gpu` from
 `quantus-miner-private`). GPU-only, `--cpu-workers 0 --gpu-devices 1`.

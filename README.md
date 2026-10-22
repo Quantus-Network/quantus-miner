@@ -76,6 +76,20 @@ On NVIDIA Linux boxes that have CUDA but not Vulkan:
 ./target/release/quantus-miner benchmark --cuda-gpu --gpu-devices 1 --cpu-workers 0 --duration 10
 ```
 
+### Benchmark platform context
+
+The [Vast.ai](docs/vast-gpu-benches.md) and
+[Clore.ai](docs/clore-gpu-benches.md) NVIDIA benchmark results were measured on
+**Linux**. Their CUDA results use the native `--cuda-gpu` engine; WGSL results
+use wgpu/Vulkan. CUDA-to-WGSL speedups compare engines on the documented hosts,
+not NVIDIA-to-AMD performance or Linux-to-Windows performance.
+
+These measurements do not establish native CUDA performance or reliability on
+Windows. A Windows `--cuda-gpu` crash is reported in
+[issue #106](https://github.com/Quantus-Network/quantus-miner/issues/106);
+do not treat the Linux CUDA rates as expected Windows hashrates. Benchmark your
+actual OS, driver, engine, and batch size before making a hardware comparison.
+
 ### Setup
 
 **Build with GPU support:**
