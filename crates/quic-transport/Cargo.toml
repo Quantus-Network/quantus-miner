@@ -16,4 +16,4 @@ tokio = { workspace = true, features = ["macros", "time"] }
 
 [dev-dependencies]
 rcgen = "0.14"
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
