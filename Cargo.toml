@@ -36,7 +36,9 @@ primitive-types = { version = "0.13.1", default-features = false }
 qp-poseidon-core = { version = "3.1.0", default-features = false }
 qpow-math = { git = "https://github.com/Quantus-Network/chain.git", tag = "v0.7.1-q-day-2", package = "qpow-math", default-features = false }
 quantus-miner-api = "0.3.0"
+quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "thread_rng"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.132", default-features = false }
 thiserror = "1"

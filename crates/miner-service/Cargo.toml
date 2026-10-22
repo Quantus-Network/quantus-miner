@@ -20,7 +20,7 @@ num_cpus = { workspace = true }
 anyhow = { workspace = true }
 
 # QUIC transport
-quinn = "0.10"
+quinn = { workspace = true }
 quic-transport = { path = "../quic-transport" }
 getrandom = "0.2"
 
