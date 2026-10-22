@@ -19,7 +19,7 @@ tokio = { workspace = true }
 warp = { workspace = true }
 
 # QUIC transport (shared with miner-service)
-quinn = "0.10"
+quinn = { workspace = true }
 quic-transport = { path = "../quic-transport" }
 
 # Constant-time comparison for the site secret

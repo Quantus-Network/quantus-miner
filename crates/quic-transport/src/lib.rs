@@ -10,8 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quantus_miner_api::{write_message, MinerMessage, MAX_MESSAGE_SIZE};
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
-use rustls::client::ServerCertVerified;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{ring, CryptoProvider};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 
 /// Permanent misconfiguration / auth failure: callers must not reconnect-loop.
@@ -79,9 +83,11 @@ pub async fn connect(
     let expected = parse_fingerprint(tls_cert_sha256_hex)?;
     validate_ready_frame(auth_token)?;
 
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier { expected }))
+    let provider = Arc::new(ring::default_provider());
+    let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier { expected, provider }))
         .with_no_client_auth();
     // Versioned with the wire protocol (node side: MINER_ALPN). `/2` = the
     // authenticated `Ready { token }` protocol; a mismatched node/miner pair
@@ -89,7 +95,7 @@ pub async fn connect(
     // opaque auth/deserialize error.
     crypto.alpn_protocols = vec![b"quantus-miner/2".to_vec()];
 
-    let mut client_config = ClientConfig::new(Arc::new(crypto));
+    let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
     transport_config.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
@@ -160,27 +166,62 @@ fn normalize_fingerprint(input: &str) -> Option<[u8; 32]> {
 }
 
 /// Accepts only a server certificate whose SHA-256 fingerprint matches.
+#[derive(Debug)]
 struct PinnedCertVerifier {
     expected: [u8; 32],
+    provider: Arc<CryptoProvider>,
 }
 
-impl rustls::client::ServerCertVerifier for PinnedCertVerifier {
+impl ServerCertVerifier for PinnedCertVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let actual = Sha256::digest(&end_entity.0);
+        let actual = Sha256::digest(end_entity.as_ref());
         if actual.as_slice() != self.expected.as_slice() {
             return Err(rustls::Error::General(
                 "server certificate SHA-256 fingerprint mismatch".into(),
             ));
         }
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -214,5 +255,55 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("Ready frame"), "{err}");
+    }
+
+    /// Minimal stand-in for the node's miner endpoint: self-signed cert, same
+    /// ALPN, accepts the bi-stream and holds the connection open.
+    async fn spawn_node_stub() -> (SocketAddr, String) {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_der = certified.cert.der().clone();
+        let key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let mut server_crypto =
+            rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert_der.clone()], key.into())
+                .unwrap();
+        server_crypto.alpn_protocols = vec![b"quantus-miner/2".to_vec()];
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
+        ));
+        let endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(connection) = incoming.await {
+                        let _streams = connection.accept_bi().await;
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                });
+            }
+        });
+        (addr, format!("{:x}", Sha256::digest(&cert_der)))
+    }
+
+    #[tokio::test]
+    async fn wrong_pin_is_rejected_as_permanent_error() {
+        let (addr, _) = spawn_node_stub().await;
+        let err = connect(addr, "token", &"b".repeat(64)).await.unwrap_err();
+        assert!(
+            err.downcast_ref::<PermanentConnectError>().is_some(),
+            "{err}"
+        );
+        assert!(err.to_string().contains("pin rejected"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn pinned_cert_is_accepted() {
+        let (addr, fingerprint) = spawn_node_stub().await;
+        connect(addr, "token", &fingerprint).await.unwrap();
     }
 }
