@@ -41,6 +41,13 @@ fn gf64_add(a: u64, b: u64) -> u64 {
     return s1 + select(0lu, EPS64, c2);
 }
 
+// a + c where c < P, so s0 after a wrap is at most P - 2 and adding EPS64 cannot
+// wrap again: the second carry of gf64_add is not needed.
+fn gf64_add_rc(a: u64, c: u64) -> u64 {
+    let s0 = a + c;
+    return s0 + select(0lu, EPS64, s0 < a);
+}
+
 // Reduce a 128-bit value (lo + hi*2^64) mod P using
 // 2^64 ≡ EPS64 and 2^96 ≡ -1 (mod P).
 fn gf64_reduce(lo: u64, hi: u64) -> u64 {
@@ -48,11 +55,12 @@ fn gf64_reduce(lo: u64, hi: u64) -> u64 {
     let hi_lo = hi & EPS64;
     var t0 = lo - hi_hi;
     t0 = t0 - select(0lu, EPS64, lo < hi_hi);
-    let t1 = hi_lo * EPS64;
+    let t1 = (hi_lo << 32u) - hi_lo;
     let t2 = t0 + t1;
     return t2 + select(0lu, EPS64, t2 < t0);
 }
 
+// Carry-free schoolbook: 32-bit parts are summed in 64 bits, so no comparisons.
 fn gf64_mul(a: u64, b: u64) -> u64 {
     let a_lo = a & EPS64;
     let a_hi = a >> 32u;
@@ -62,11 +70,9 @@ fn gf64_mul(a: u64, b: u64) -> u64 {
     let lh = a_lo * b_hi;
     let hl = a_hi * b_lo;
     let hh = a_hi * b_hi;
-    let mid = lh + hl;
-    let mid_c = select(0lu, 1lu, mid < lh);
-    let lo = ll + (mid << 32u);
-    let lo_c = select(0lu, 1lu, lo < ll);
-    let hi = hh + (mid >> 32u) + (mid_c << 32u) + lo_c;
+    let t = (ll >> 32u) + (lh & EPS64) + (hl & EPS64);
+    let lo = (t << 32u) | (ll & EPS64);
+    let hi = hh + (lh >> 32u) + (hl >> 32u) + (t >> 32u);
     return gf64_reduce(lo, hi);
 }
 
@@ -76,11 +82,9 @@ fn gf64_sqr(a: u64) -> u64 {
     let ll = a_lo * a_lo;
     let lh = a_lo * a_hi;
     let hh = a_hi * a_hi;
-    let mid = lh << 1u;
-    let mid_c = lh >> 63u;
-    let lo = ll + (mid << 32u);
-    let lo_c = select(0lu, 1lu, lo < ll);
-    let hi = hh + (mid >> 32u) + (mid_c << 32u) + lo_c;
+    let t = (ll >> 32u) + ((lh & EPS64) << 1u);
+    let lo = (t << 32u) | (ll & EPS64);
+    let hi = hh + ((lh >> 32u) << 1u) + (t >> 32u);
     return gf64_reduce(lo, hi);
 }
 
@@ -137,7 +141,7 @@ fn permute64(state: ptr<function, array<u64, 12>>) {
     ext_layer64(state);
     for (var r = 0u; r < 4u; r++) {
         for (var i = 0u; i < 12u; i++) {
-            (*state)[i] = gf64_add((*state)[i], RC_INITIAL[r][i]);
+            (*state)[i] = gf64_add_rc((*state)[i], RC_INITIAL[r][i]);
         }
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = gf64_sbox((*state)[i]);
@@ -145,12 +149,12 @@ fn permute64(state: ptr<function, array<u64, 12>>) {
         ext_layer64(state);
     }
     for (var r = 0u; r < 22u; r++) {
-        (*state)[0] = gf64_sbox(gf64_add((*state)[0], RC_INTERNAL[r]));
+        (*state)[0] = gf64_sbox(gf64_add_rc((*state)[0], RC_INTERNAL[r]));
         int_layer64(state);
     }
     for (var r = 0u; r < 4u; r++) {
         for (var i = 0u; i < 12u; i++) {
-            (*state)[i] = gf64_add((*state)[i], RC_TERMINAL[r][i]);
+            (*state)[i] = gf64_add_rc((*state)[i], RC_TERMINAL[r][i]);
         }
         for (var i = 0u; i < 12u; i++) {
             (*state)[i] = gf64_sbox((*state)[i]);
