@@ -65,6 +65,8 @@ struct Args {
     share_difficulty: u64,
 
     /// Secret that protected-site backends must present to /siteverify.
+    /// Required when `--node-addr` is set; the dev default is only accepted
+    /// in standalone mode.
     #[arg(long, default_value = "dev-secret", env = "POOL_SITE_SECRET")]
     site_secret: String,
 
@@ -95,9 +97,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     anyhow::ensure!(args.share_difficulty > 0, "--share-difficulty must be > 0");
-    if args.site_secret == "dev-secret" {
-        log::warn!("Using default site secret; set --site-secret in production");
-    }
+    // `/siteverify` treats `secret` as its only credential, so the dev default
+    // is refused in node mode. Standalone mode keeps the default so the
+    // README demo commands still boot without extra flags.
+    validate_site_secret(&args.site_secret, args.node_addr.is_some())?;
 
     // Resolve + validate node auth before starting HTTP / upstream tasks so a
     // bad fingerprint or oversized token exits instead of retrying forever.
@@ -182,7 +185,17 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => Err(anyhow::anyhow!("upstream task panicked: {e}")),
                     }
                 }
-                _ = http::serve(state, limiter, args.http_addr, args.serve_dir) => Ok(()),
+                _ = http::serve(state, limiter, args.http_addr, args.serve_dir) => {
+                    // `warp::Server::run` never returns today. Reaching this
+                    // arm means the API is gone (bug, or a future
+                    // graceful-shutdown refactor); bail so an external
+                    // supervisor restarts the process instead of leaving a
+                    // healthy-looking pool with no HTTP front door.
+                    anyhow::bail!(
+                        "HTTP server exited unexpectedly; shutting down so an \
+                         external supervisor can restart the pool"
+                    );
+                }
             }
         }
         None => {
@@ -197,9 +210,37 @@ async fn main() -> anyhow::Result<()> {
                 .await
             });
             http::serve(state, limiter, args.http_addr, args.serve_dir).await;
-            Ok(())
+            anyhow::bail!("HTTP server exited unexpectedly in standalone mode");
         }
     }
+}
+
+/// Refuse the default `--site-secret` when the pool talks to a real node.
+///
+/// `/siteverify` treats the secret as its sole credential, so the dev default
+/// in production would let any site backend redeem any issued token. Standalone
+/// mode (no `--node-addr`) keeps the default so the demo still boots without
+/// extra flags.
+///
+/// The empty string is rejected in every mode: it is never a valid secret and
+/// is worse than a documented default because it fails silently.
+fn validate_site_secret(site_secret: &str, node_mode: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !site_secret.is_empty(),
+        "--site-secret must not be empty; pass --site-secret <SECRET>"
+    );
+    if !node_mode {
+        if site_secret == "dev-secret" {
+            log::warn!("Standalone mode: using the default dev site secret");
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(
+        site_secret != "dev-secret",
+        "refusing to run against a real node with the default --site-secret; \
+         pass --site-secret <SECRET> (it is the sole credential guarding /siteverify)"
+    );
+    Ok(())
 }
 
 fn resolve_auth_token(
@@ -247,4 +288,35 @@ fn resolve_required_secret(
         return Ok(value);
     }
     anyhow::bail!("{missing_msg}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_secret_allowed_standalone() {
+        validate_site_secret("dev-secret", false).unwrap();
+    }
+
+    #[test]
+    fn default_secret_rejected_in_node_mode() {
+        let err = validate_site_secret("dev-secret", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--site-secret"), "{msg}");
+        assert!(msg.contains("refusing"), "{msg}");
+    }
+
+    #[test]
+    fn explicit_secret_allowed_in_node_mode() {
+        validate_site_secret("s3cret", true).unwrap();
+    }
+
+    #[test]
+    fn empty_secret_is_rejected_in_every_mode() {
+        for node_mode in [false, true] {
+            let err = validate_site_secret("", node_mode).unwrap_err();
+            assert!(err.to_string().contains("--site-secret"), "{err}");
+        }
+    }
 }

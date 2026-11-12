@@ -15,6 +15,8 @@
 //! worker responsive; a return of 0 means "keep going" (the nonce field has
 //! been advanced), 1 means the nonce field now holds a valid share.
 
+use core::cell::UnsafeCell;
+
 use primitive_types::U512;
 
 const HEADER_OFF: usize = 0;
@@ -23,12 +25,23 @@ const TARGET_OFF: usize = 96;
 const HASH_OFF: usize = 160;
 const IO_SIZE: usize = 224;
 
-static mut IO: [u8; IO_SIZE] = [0u8; IO_SIZE];
+/// Shared I/O buffer. `UnsafeCell` (rather than `static mut`) makes interior
+/// mutability explicit at the type level; the `Sync` assertion below states
+/// the invariant that is otherwise implicit.
+struct IoBuf(UnsafeCell<[u8; IO_SIZE]>);
+
+// SAFETY: `wasm32-unknown-unknown` is single-threaded. The JS glue owns one
+// module instance, calls `solve()` synchronously on the worker thread, and
+// never reenters or touches the buffer while `solve()` is running. Under that
+// contract there is exactly one live reference to `IO.0` at any time.
+unsafe impl Sync for IoBuf {}
+
+static IO: IoBuf = IoBuf(UnsafeCell::new([0u8; IO_SIZE]));
 
 /// Pointer to the shared I/O buffer in WASM linear memory.
 #[no_mangle]
 pub extern "C" fn io_ptr() -> *mut u8 {
-    core::ptr::addr_of_mut!(IO) as *mut u8
+    IO.0.get() as *mut u8
 }
 
 /// Size of the shared I/O buffer, for JS-side sanity checks.
@@ -40,7 +53,9 @@ pub extern "C" fn io_len() -> u32 {
 /// Grind up to `iters` nonces. Returns 1 if a share was found.
 #[no_mangle]
 pub extern "C" fn solve(iters: u32) -> u32 {
-    let io = unsafe { &mut *core::ptr::addr_of_mut!(IO) };
+    // SAFETY: single-threaded target; the reference does not outlive this
+    // call and the JS caller does not reenter `solve`.
+    let io = unsafe { &mut *IO.0.get() };
 
     let mut header = [0u8; 32];
     header.copy_from_slice(&io[HEADER_OFF..HEADER_OFF + 32]);
@@ -73,12 +88,18 @@ mod tests {
         let header = [7u8; 32];
         let difficulty = U512::from(4u64);
         let target = U512::MAX / difficulty;
-
-        let io = unsafe { &mut *core::ptr::addr_of_mut!(IO) };
-        io[HEADER_OFF..HEADER_OFF + 32].copy_from_slice(&header);
         let start = U512::from(1u64) << 64; // arbitrary "session range" start
-        io[NONCE_OFF..NONCE_OFF + 64].copy_from_slice(&start.to_big_endian());
-        io[TARGET_OFF..TARGET_OFF + 64].copy_from_slice(&target.to_big_endian());
+
+        // Seed the buffer in a scoped borrow, then drop it before calling
+        // `solve`, which takes its own `&mut` to the same `UnsafeCell`.
+        {
+            // SAFETY: single-threaded test; the borrow ends at the closing
+            // brace, so no second `&mut` can overlap `solve` below.
+            let io = unsafe { &mut *IO.0.get() };
+            io[HEADER_OFF..HEADER_OFF + 32].copy_from_slice(&header);
+            io[NONCE_OFF..NONCE_OFF + 64].copy_from_slice(&start.to_big_endian());
+            io[TARGET_OFF..TARGET_OFF + 64].copy_from_slice(&target.to_big_endian());
+        }
 
         let mut found = 0;
         for _ in 0..64 {
@@ -89,6 +110,8 @@ mod tests {
         }
         assert_eq!(found, 1, "should find a share at difficulty 4");
 
+        // SAFETY: `solve` has returned; no `&mut` to the buffer is live.
+        let io = unsafe { &*IO.0.get() };
         let nonce = U512::from_big_endian(&io[NONCE_OFF..NONCE_OFF + 64]);
         let (valid, hash) = qpow_math::is_valid_nonce(header, nonce.to_big_endian(), difficulty);
         assert!(
