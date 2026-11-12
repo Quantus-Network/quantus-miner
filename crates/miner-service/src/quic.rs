@@ -127,8 +127,6 @@ async fn handle_connection(
     worker_pool: &WorkerPool,
     authenticated: &mut bool,
 ) -> anyhow::Result<()> {
-    use crossbeam_channel::RecvTimeoutError;
-
     // Set static metrics once per connection
     metrics::set_effective_cpus(num_cpus::get() as i64);
     metrics::set_workers(worker_pool.worker_count() as i64);
@@ -146,81 +144,21 @@ async fn handle_connection(
     let mut gpu_hashes: u64 = 0;
     let mut solution_submitted_for_current_job = false;
 
+    // Setup a bridge from the crossbeam channel (sync) to tokio mpsc (async).
+    // This avoids spawning a blocking task every millisecond.
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+    let crossbeam_rx = worker_pool.result_receiver().clone();
+    tokio::task::spawn_blocking(move || {
+        while let Ok(res) = crossbeam_rx.recv() {
+            if result_tx.send(res).is_err() {
+                break; // Receiver dropped (connection ended)
+            }
+        }
+    });
+
     log::info!("⛏️ Waiting for mining jobs from node...");
 
     loop {
-        // Poll for worker results (non-blocking via spawn_blocking)
-        let poll_result = if node_job_id.is_some() && !solution_submitted_for_current_job {
-            let rx = worker_pool.result_receiver().clone();
-            tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_millis(10)))
-                .await
-                .unwrap_or(Err(RecvTimeoutError::Disconnected))
-        } else {
-            Err(RecvTimeoutError::Timeout)
-        };
-
-        // Handle worker result if any
-        if let Ok(worker_result) = poll_result {
-            // Track hashes by engine type (always, even for stale results)
-            match worker_result.engine_type {
-                EngineType::Cpu => {
-                    cpu_hashes += worker_result.hash_count;
-                    metrics::record_cpu_hashes(worker_result.hash_count);
-                }
-                EngineType::Gpu => {
-                    gpu_hashes += worker_result.hash_count;
-                    metrics::record_gpu_hashes(worker_result.hash_count);
-                }
-            }
-
-            // Check if this result is for the current job (not stale)
-            if worker_result.job_id != internal_job_id {
-                log::debug!(
-                    "⏰ Discarding stale result from {:?} worker {} (result job_id {} != current {})",
-                    worker_result.engine_type,
-                    worker_result.worker_id,
-                    worker_result.job_id,
-                    internal_job_id
-                );
-                continue;
-            }
-
-            // Only send result for the FIRST solution found for THIS job
-            if let Some(candidate) = worker_result.candidate {
-                if !solution_submitted_for_current_job {
-                    if let Some(ref job_id) = node_job_id {
-                        let total_hashes = cpu_hashes + gpu_hashes;
-                        let elapsed = job_start_time
-                            .map(|t| t.elapsed().as_secs_f64())
-                            .unwrap_or(0.0);
-
-                        log::info!(
-                            "✅ Job {job_id} solved: {total_hashes} hashes in {elapsed:.2}s ({}) - submitting solution to node",
-                            format_hashrate(total_hashes as f64 / elapsed.max(0.001))
-                        );
-
-                        // Mark as sent BEFORE sending to prevent duplicates
-                        solution_submitted_for_current_job = true;
-                        worker_pool.stop_current_job(JobStopReason::SolutionFound);
-                        metrics::set_active_jobs(0);
-
-                        let result = MiningResult {
-                            status: ApiResponseStatus::Completed,
-                            job_id: job_id.clone(),
-                            nonce: Some(format!("{:x}", candidate.nonce)),
-                            work: Some(hex::encode(candidate.work)),
-                            hash_count: total_hashes,
-                            elapsed_time: elapsed,
-                            miner_id: None,
-                        };
-
-                        let msg = MinerMessage::JobResult(result);
-                        send_message_checked(&connection, &mut send, &msg).await?;
-                    }
-                }
-            }
-        }
-
         // Check for incoming messages and connection health
         tokio::select! {
             biased;
@@ -234,6 +172,68 @@ async fn handle_connection(
                     .into());
                 }
                 return Err(anyhow::anyhow!("Connection closed: {}", msg));
+            }
+
+            // Handle worker results asynchronously
+            worker_res = result_rx.recv() => {
+                if let Some(worker_result) = worker_res {
+                    // Track hashes by engine type
+                    match worker_result.engine_type {
+                        EngineType::Cpu => {
+                            cpu_hashes += worker_result.hash_count;
+                            metrics::record_cpu_hashes(worker_result.hash_count);
+                        }
+                        EngineType::Gpu => {
+                            gpu_hashes += worker_result.hash_count;
+                            metrics::record_gpu_hashes(worker_result.hash_count);
+                        }
+                    }
+
+                    if worker_result.job_id != internal_job_id {
+                        log::debug!(
+                            "⏰ Discarding stale result from {:?} worker {} (result job_id {} != current {})",
+                            worker_result.engine_type,
+                            worker_result.worker_id,
+                            worker_result.job_id,
+                            internal_job_id
+                        );
+                        continue;
+                    }
+
+                    if let Some(candidate) = worker_result.candidate {
+                        if !solution_submitted_for_current_job {
+                            if let Some(ref job_id) = node_job_id {
+                                let total_hashes = cpu_hashes + gpu_hashes;
+                                let elapsed = job_start_time
+                                    .map(|t| t.elapsed().as_secs_f64())
+                                    .unwrap_or(0.0);
+
+                                log::info!(
+                                    "✅ Job {job_id} solved: {total_hashes} hashes in {elapsed:.2}s ({}) - submitting solution to node",
+                                    format_hashrate(total_hashes as f64 / elapsed.max(0.001))
+                                );
+
+                                // Mark as sent BEFORE sending to prevent duplicates
+                                solution_submitted_for_current_job = true;
+                                worker_pool.stop_current_job(JobStopReason::SolutionFound);
+                                metrics::set_active_jobs(0);
+
+                                let result = MiningResult {
+                                    status: ApiResponseStatus::Completed,
+                                    job_id: job_id.clone(),
+                                    nonce: Some(format!("{:x}", candidate.nonce)),
+                                    work: Some(hex::encode(candidate.work)),
+                                    hash_count: total_hashes,
+                                    elapsed_time: elapsed,
+                                    miner_id: None,
+                                };
+
+                                let msg = MinerMessage::JobResult(result);
+                                send_message_checked(&connection, &mut send, &msg).await?;
+                            }
+                        }
+                    }
+                }
             }
 
             msg_result = read_message(&mut recv) => {
@@ -330,9 +330,6 @@ async fn handle_connection(
                     }
                 }
             }
-
-            // Short sleep to yield when no messages
-            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
         }
     }
 }
