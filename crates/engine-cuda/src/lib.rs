@@ -95,12 +95,14 @@ impl CudaEngine {
         match silent_catch(cudarc::driver::result::init) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                log::error!(target: "cuda_engine", "CUDA driver init failed: {e}");
                 return Err(format!(
                     "CUDA driver is not available (need libcuda / nvidia driver): {e}"
                 )
                 .into());
             }
             Err(_) => {
+                log::error!(target: "cuda_engine", "CUDA driver init panicked (missing or incompatible DLL?)");
                 return Err("CUDA driver is not available (need libcuda / nvidia driver)".into());
             }
         }
@@ -128,8 +130,13 @@ impl CudaEngine {
                 Some(ptx) => ptx.clone(),
                 None => {
                     let ptx = match silent_catch(|| compile_kernel(major, minor)) {
-                        Ok(ptx) => ptx?,
+                        Ok(Ok(ptx)) => ptx,
+                        Ok(Err(e)) => {
+                            log::error!(target: "cuda_engine", "Failed to compile CUDA kernel: {e}");
+                            return Err(e);
+                        }
                         Err(_) => {
+                            log::error!(target: "cuda_engine", "CUDA NVRTC panicked during compilation (missing or incompatible DLL?)");
                             return Err("CUDA NVRTC library is not available (need libnvrtc from the CUDA toolkit)".into());
                         }
                     };

@@ -323,6 +323,40 @@ fn init_logger(verbose: bool) {
         std::env::set_var("RUST_LOG", log_level);
     }
     env_logger::init();
+
+    // Set a global panic hook to ensure fatal crashes are logged.
+    // Because the workspace is compiled with `panic = "abort"`, a normal panic
+    // will terminate the process without unwinding. This hook guarantees the
+    // error message and location are flushed to stderr before the process dies,
+    // which is critical for debugging Windows CUDA driver crashes (issue #105).
+    std::panic::set_hook(Box::new(|panic_info| {
+        use std::io::Write;
+        let payload = panic_info.payload();
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+        let location = panic_info
+            .location()
+            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+
+        let _ = writeln!(
+            std::io::stderr(),
+            "\n========================================\n\
+             FATAL PANIC: {}{}\n\
+             ========================================\n",
+            msg,
+            location
+        );
+        // Explicitly flush stdout/stderr in case they are block-buffered
+        // (e.g. when redirected to a file or log collection tool).
+        let _ = std::io::stderr().flush();
+        let _ = std::io::stdout().flush();
+    }));
 }
 
 async fn run_benchmark(
