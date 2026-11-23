@@ -138,6 +138,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+          IS_DRAFT: ${{ github.event.inputs.is_draft }}
+          VERSION_TYPE: ${{ github.event.inputs.version_type }}
         run: |
           set -ex
           new_cargo_version=${NEW_VERSION#v}
@@ -176,9 +178,9 @@ jobs:
           PR_BODY="Automated version bump for release $NEW_VERSION.
 
           ## Overview
-          - Version bump: ${{ github.event.inputs.version_type }}
-          - Type: ${{ github.event.inputs.version_type }}
-          - Draft: ${{ github.event.inputs.is_draft }}
+          - Version bump: $VERSION_TYPE
+          - Type: $VERSION_TYPE
+          - Draft: $IS_DRAFT
 
           ## What changed
           - Updated version in Cargo.toml and Cargo.lock
@@ -187,7 +189,7 @@ jobs:
 
           # Prepare labels
           PR_LABELS="release-proposal"
-          if [[ "${{ github.event.inputs.is_draft }}" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             PR_LABELS="$PR_LABELS,draft-release"
           fi
 
